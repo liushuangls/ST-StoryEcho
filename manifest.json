@@ -1,0 +1,15 @@
+{
+  "display_name": "StoryEcho · 剧情回响",
+  "loading_order": 90,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "dist/index.js",
+  "css": "style.css",
+  "author": "liushuang",
+  "version": "0.1.0",
+  "generate_interceptor": "storyEchoGenerateInterceptor",
+  "hooks": {
+    "activate": "onActivate"
+  }
+}

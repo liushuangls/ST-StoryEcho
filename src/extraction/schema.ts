@@ -1,0 +1,83 @@
+export const EXTRACTION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    memories: {
+      type: 'array',
+      maxItems: 20,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'type',
+          'scene',
+          'event',
+          'cause',
+          'consequence',
+          'entities',
+          'aliases',
+          'stateChanges',
+          'unresolvedThreads',
+          'knownBy',
+          'truthStatus',
+          'importance',
+          'retrievalText',
+          'injectionText',
+        ],
+        properties: {
+          type: {
+            type: 'string',
+            enum: [
+              'event',
+              'state_change',
+              'relationship_change',
+              'commitment',
+              'revelation',
+              'clue',
+              'conflict',
+            ],
+          },
+          scene: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['location', 'time', 'participants'],
+            properties: {
+              location: { type: 'string' },
+              time: { type: 'string' },
+              participants: { type: 'array', items: { type: 'string' } },
+            },
+          },
+          event: { type: 'string' },
+          cause: { type: 'string' },
+          consequence: { type: 'string' },
+          entities: { type: 'array', items: { type: 'string' } },
+          aliases: { type: 'array', items: { type: 'string' } },
+          stateChanges: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['entity', 'attribute', 'before', 'after'],
+              properties: {
+                entity: { type: 'string' },
+                attribute: { type: 'string' },
+                before: { type: 'string' },
+                after: { type: 'string' },
+              },
+            },
+          },
+          unresolvedThreads: { type: 'array', items: { type: 'string' } },
+          knownBy: { type: 'array', items: { type: 'string' } },
+          truthStatus: {
+            type: 'string',
+            enum: ['confirmed', 'claimed', 'inferred', 'uncertain'],
+          },
+          importance: { type: 'number', minimum: 0, maximum: 1 },
+          retrievalText: { type: 'string' },
+          injectionText: { type: 'string' },
+        },
+      },
+    },
+  },
+  required: ['memories'],
+};
