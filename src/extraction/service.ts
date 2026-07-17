@@ -1,6 +1,10 @@
 import { logger } from '../core/logger';
 import { sha256 } from '../core/hash';
-import type { StoryEchoChatState, StoryMemory, TavernChatMessage } from '../core/types';
+import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
+import { applyConsolidationDecisions } from '../consolidation/apply';
+import { decideConsolidation } from '../consolidation/service';
+import { shortlistMemories } from '../consolidation/shortlist';
+import { recordDebugTrace } from '../debug/metrics';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
@@ -8,7 +12,6 @@ import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { planNextChunk } from './chunk-planner';
-import { createStoryMemory } from './memory-factory';
 import { parseExtractionResponse } from './parser';
 import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from './prompts';
 import { EXTRACTION_SCHEMA } from './schema';
@@ -18,6 +21,7 @@ export interface ExtractionProgress {
   endMessageId: number;
   targetEndMessageId: number;
   newMemoryCount: number;
+  changedMemoryCount: number;
 }
 
 function sourcePayload(messages: TavernChatMessage[], sourceStartMessageId: number): string {
@@ -72,15 +76,34 @@ export class ExtractionService {
     const configurationChanged = current.vectorFingerprint !== fingerprint;
 
     if (configurationChanged) {
+      const isRebuild = current.vectorFingerprint.length > 0;
       current.pendingVectorHashes = [...eligibleHashes];
+      current.pendingVectorDeleteHashes = [];
+      current.metrics.vectorRebuilds += isRebuild ? 1 : 0;
+      recordDebugTrace(current, settings.debug, 'vector', isRebuild
+        ? 'Embedding配置变化，重建当前聊天向量集合。'
+        : '初始化当前聊天向量集合。', {
+        eligibleMemories: eligible.length,
+      });
       await this.memoryRepository.save(current);
       await this.vectorStore.purge(current.vectorCollectionId);
     } else {
       current.pendingVectorHashes = current.pendingVectorHashes.filter((hash) => eligibleHashes.has(hash));
     }
 
-    if (!configurationChanged && current.pendingVectorHashes.length === 0) {
+    const deleteHashes = configurationChanged
+      ? []
+      : [...new Set(current.pendingVectorDeleteHashes)].filter((hash) => !eligibleHashes.has(hash));
+    if (!configurationChanged && current.pendingVectorHashes.length === 0 && deleteHashes.length === 0) {
       return current;
+    }
+
+    if (deleteHashes.length > 0) {
+      await this.vectorStore.delete(current.vectorCollectionId, deleteHashes, config);
+      current.metrics.vectorItemsDeleted += deleteHashes.length;
+      current.pendingVectorDeleteHashes = current.pendingVectorDeleteHashes.filter(
+        (hash) => !deleteHashes.includes(hash),
+      );
     }
 
     const savedHashes = configurationChanged
@@ -97,6 +120,7 @@ export class ExtractionService {
 
     if (items.length > 0) {
       await this.vectorStore.insert(current.vectorCollectionId, items, config);
+      current.metrics.vectorItemsInserted += items.length;
     }
 
     const synchronized = new Set([...savedHashes, ...items.map((item) => item.hash)]);
@@ -135,80 +159,149 @@ export class ExtractionService {
       }
     }
 
-    while (start <= maximumEnd) {
-      const chunk = planNextChunk(
-        context.chat,
-        start,
-        maximumEnd,
-        settings.extraction.targetTurnsPerChunk,
-      );
-      if (!chunk) {
-        break;
-      }
-
-      const snapshot = context.chat
-        .slice(chunk.startMessageId, chunk.endMessageId + 1)
-        .map((message) => ({
-          is_user: message.is_user,
-          is_system: Boolean(message.is_system),
-          ...(message.name ? { name: message.name } : {}),
-          mes: message.mes,
-        }));
-      const chunkSourceHash = await sha256(sourcePayload(snapshot, chunk.startMessageId));
-
-      const raw = await completeWithConfiguredProvider(settings, {
-        system: EXTRACTION_SYSTEM_PROMPT,
-        prompt: buildExtractionPrompt(snapshot, 0, snapshot.length - 1, chunk.startMessageId),
-        jsonSchema: EXTRACTION_SCHEMA,
-      });
-      const candidates = parseExtractionResponse(raw);
-      const currentSourceHash = await sha256(sourcePayload(
-        context.chat.slice(chunk.startMessageId, chunk.endMessageId + 1),
-        chunk.startMessageId,
-      ));
-      if (currentSourceHash !== chunkSourceHash) {
-        throw new Error('抽取期间源消息发生变化，已丢弃本次结果。');
-      }
-      const occupiedHashes = new Set(state.memories.map((memory) => memory.vectorHash));
-      const existingRetrievalHashes = new Set(state.memories.map((memory) => memory.retrievalHash));
-      const created: StoryMemory[] = [];
-
-      for (const candidate of candidates) {
-        const candidateRetrievalHash = await sha256(candidate.retrievalText);
-        if (existingRetrievalHashes.has(candidateRetrievalHash)) {
-          continue;
+    try {
+      while (start <= maximumEnd) {
+        const chunkStartedAt = performance.now();
+        const chunk = planNextChunk(
+          context.chat,
+          start,
+          maximumEnd,
+          settings.extraction.targetTurnsPerChunk,
+        );
+        if (!chunk) {
+          break;
         }
-        const memory = await createStoryMemory(candidate, {
+
+        const snapshot = context.chat
+          .slice(chunk.startMessageId, chunk.endMessageId + 1)
+          .map((message) => ({
+            is_user: message.is_user,
+            is_system: Boolean(message.is_system),
+            ...(message.name ? { name: message.name } : {}),
+            mes: message.mes,
+          }));
+        const chunkSourceHash = await sha256(sourcePayload(snapshot, chunk.startMessageId));
+
+        const raw = await completeWithConfiguredProvider(settings, {
+          system: EXTRACTION_SYSTEM_PROMPT,
+          prompt: buildExtractionPrompt(snapshot, 0, snapshot.length - 1, chunk.startMessageId),
+          jsonSchema: EXTRACTION_SCHEMA,
+        });
+        const candidates = parseExtractionResponse(raw);
+        const currentSourceHash = await sha256(sourcePayload(
+          context.chat.slice(chunk.startMessageId, chunk.endMessageId + 1),
+          chunk.startMessageId,
+        ));
+        if (currentSourceHash !== chunkSourceHash) {
+          throw new Error('抽取期间源消息发生变化，已丢弃本次结果。');
+        }
+
+        let vectorHashes = new Set<number>();
+        if (candidates.length > 0 && state.memories.length > 0) {
+          const queryStartedAt = performance.now();
+          state.metrics.vectorQueries += 1;
+          try {
+            const results = await this.vectorStore.query(
+              state.vectorCollectionId,
+              candidates.map((candidate) => candidate.retrievalText).join('\n').slice(0, 12_000),
+              24,
+              settings.recall.scoreThreshold,
+              resolveVectorConfig(settings),
+            );
+            vectorHashes = new Set(results.map((result) => result.hash));
+          } catch (error) {
+            state.metrics.vectorQueryFailures += 1;
+            recordDebugTrace(state, settings.debug, 'vector', '整理前相似记忆查询失败，使用结构化匹配。', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            logger.warn('整理前相似记忆查询失败，使用结构化匹配。', error);
+          }
+          state.metrics.totalRetrievalMs += Math.round(performance.now() - queryStartedAt);
+        }
+
+        const shortlist = shortlistMemories(candidates, state.memories, vectorHashes);
+        const consolidation = await decideConsolidation(settings, candidates, shortlist);
+        if (consolidation.usedLlm) {
+          state.metrics.consolidationCalls += 1;
+          state.metrics.totalConsolidationMs += consolidation.durationMs;
+        }
+        if (consolidation.error) {
+          state.metrics.consolidationFailures += 1;
+          recordDebugTrace(state, settings.debug, 'consolidation', 'LLM整理失败，已使用保守规则。', {
+            error: consolidation.error,
+          });
+        }
+
+        const source = {
           startMessageId: chunk.startMessageId,
           endMessageId: chunk.endMessageId,
           sourceHash: chunkSourceHash,
-        }, occupiedHashes);
-        occupiedHashes.add(memory.vectorHash);
-        existingRetrievalHashes.add(memory.retrievalHash);
-        created.push(memory);
+        };
+        const applied = await applyConsolidationDecisions(state, consolidation.decisions, source);
+
+        assertChatOwner(state);
+        state.indexedThroughMessageId = chunk.endMessageId;
+        state.indexedThroughHash = chunkSourceHash;
+        state.metrics.extractionChunks += 1;
+        state.metrics.candidatesExtracted += candidates.length;
+        state.metrics.totalExtractionMs += Math.round(performance.now() - chunkStartedAt);
+        state.metrics.lastExtractionAt = new Date().toISOString();
+        recordDebugTrace(state, settings.debug, 'consolidation', '剧情分块整理完成。', {
+          range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+          candidates: candidates.length,
+          shortlist: shortlist.length,
+          actions: applied.decisions.map((decision) => decision.operation).join(','),
+          decisions: applied.decisions
+            .map((decision) => [
+              decision.candidateIndex,
+              decision.operation,
+              decision.targetMemoryId ?? '-',
+              decision.reason,
+            ].join(':'))
+            .join(' | ')
+            .slice(0, 2_000),
+          llm: consolidation.usedLlm,
+        });
+        await this.memoryRepository.save(state);
+
+        try {
+          await this.syncPendingVectors(state);
+        } catch (error) {
+          state.metrics.vectorSyncFailures += 1;
+          recordDebugTrace(state, settings.debug, 'vector', '剧情记忆已保存，但向量同步失败。', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          try {
+            await this.memoryRepository.save(state);
+          } catch (saveError) {
+            logger.warn('保存向量同步失败统计时元数据不可用。', saveError);
+          }
+          logger.warn('剧情记忆已保存，但向量同步失败，稍后将重试。', error);
+        }
+
+        onProgress?.({
+          startMessageId: chunk.startMessageId,
+          endMessageId: chunk.endMessageId,
+          targetEndMessageId: maximumEnd,
+          newMemoryCount: applied.created.length,
+          changedMemoryCount: applied.changed.length,
+        });
+        start = chunk.endMessageId + 1;
       }
-
-      assertChatOwner(state);
-      state.memories.push(...created);
-      state.pendingVectorHashes.push(...created.map((memory) => memory.vectorHash));
-      state.pendingVectorHashes = [...new Set(state.pendingVectorHashes)];
-      state.indexedThroughMessageId = chunk.endMessageId;
-      state.indexedThroughHash = chunkSourceHash;
-      await this.memoryRepository.save(state);
-
-      try {
-        await this.syncPendingVectors(state);
-      } catch (error) {
-        logger.warn('剧情记忆已保存，但向量同步失败，稍后将重试。', error);
-      }
-
-      onProgress?.({
-        startMessageId: chunk.startMessageId,
-        endMessageId: chunk.endMessageId,
+    } catch (error) {
+      state.metrics.extractionFailures += 1;
+      recordDebugTrace(state, settings.debug, 'error', '剧情抽取分块失败。', {
+        error: error instanceof Error ? error.message : String(error),
+        startMessageId: start,
         targetEndMessageId: maximumEnd,
-        newMemoryCount: created.length,
       });
-      start = chunk.endMessageId + 1;
+      try {
+        assertChatOwner(state);
+        await this.memoryRepository.save(state);
+      } catch (saveError) {
+        logger.warn('保存抽取失败统计时聊天已切换或元数据不可用。', saveError);
+      }
+      throw error;
     }
 
     return state;

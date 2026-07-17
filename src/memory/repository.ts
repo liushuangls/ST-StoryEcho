@@ -1,5 +1,6 @@
 import { CHAT_STATE_VERSION, MODULE_ID, VECTOR_COLLECTION_PREFIX } from '../core/constants';
 import type { StoryEchoChatState, StoryMemory } from '../core/types';
+import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 
 function newUuid(): string {
@@ -22,13 +23,33 @@ function createState(ownerChatId: string): StoryEchoChatState {
     memories: [],
     pendingRanges: [],
     pendingVectorHashes: [],
+    pendingVectorDeleteHashes: [],
     vectorFingerprint: '',
+    metrics: createMetrics(),
+    debugTraces: [],
   };
 }
 
-type StoredState = Omit<StoryEchoChatState, 'pendingVectorHashes' | 'vectorFingerprint'> & {
+type StoredMemory = Omit<
+  StoryMemory,
+  'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'
+> & Partial<Pick<StoryMemory, 'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'>>;
+
+type StoredState = Omit<
+  StoryEchoChatState,
+  | 'memories'
+  | 'pendingVectorHashes'
+  | 'pendingVectorDeleteHashes'
+  | 'vectorFingerprint'
+  | 'metrics'
+  | 'debugTraces'
+> & {
+  memories: StoredMemory[];
   pendingVectorHashes?: number[];
+  pendingVectorDeleteHashes?: number[];
   vectorFingerprint?: string;
+  metrics?: StoryEchoChatState['metrics'];
+  debugTraces?: StoryEchoChatState['debugTraces'];
 };
 
 function isStateBase(value: unknown): value is StoredState {
@@ -48,10 +69,46 @@ function isStateBase(value: unknown): value is StoredState {
 }
 
 function normalizeState(stored: StoredState): StoryEchoChatState {
+  const lastInspection = stored.lastInspection
+    ? {
+        ...stored.lastInspection,
+        vectorResultCount: Number.isFinite(stored.lastInspection.vectorResultCount)
+          ? stored.lastInspection.vectorResultCount
+          : 0,
+        durationMs: Number.isFinite(stored.lastInspection.durationMs)
+          ? stored.lastInspection.durationMs
+          : 0,
+        estimatedRemovedTokens: Number.isFinite(stored.lastInspection.estimatedRemovedTokens)
+          ? stored.lastInspection.estimatedRemovedTokens
+          : 0,
+        estimatedInjectedTokens: Number.isFinite(stored.lastInspection.estimatedInjectedTokens)
+          ? stored.lastInspection.estimatedInjectedTokens
+          : 0,
+        estimatedNetSavedTokens: Number.isFinite(stored.lastInspection.estimatedNetSavedTokens)
+          ? stored.lastInspection.estimatedNetSavedTokens
+          : 0,
+      }
+    : undefined;
   return {
     ...stored,
+    memories: stored.memories.map((memory) => ({
+      ...memory,
+      sourceHistory: Array.isArray(memory.sourceHistory) && memory.sourceHistory.length > 0
+        ? memory.sourceHistory
+        : [memory.source],
+      supersedesMemoryIds: Array.isArray(memory.supersedesMemoryIds)
+        ? memory.supersedesMemoryIds
+        : [],
+      lastOperation: memory.lastOperation ?? 'CREATE',
+    })),
     pendingVectorHashes: Array.isArray(stored.pendingVectorHashes) ? stored.pendingVectorHashes : [],
+    pendingVectorDeleteHashes: Array.isArray(stored.pendingVectorDeleteHashes)
+      ? stored.pendingVectorDeleteHashes
+      : [],
     vectorFingerprint: typeof stored.vectorFingerprint === 'string' ? stored.vectorFingerprint : '',
+    metrics: normalizeMetrics(stored.metrics),
+    debugTraces: Array.isArray(stored.debugTraces) ? stored.debugTraces.slice(-50) : [],
+    ...(lastInspection ? { lastInspection } : {}),
   };
 }
 
@@ -81,7 +138,26 @@ export class MemoryRepository {
     }
 
     const state = normalizeState(stored);
-    if (!Array.isArray(stored.pendingVectorHashes) || typeof stored.vectorFingerprint !== 'string') {
+    if (
+      !Array.isArray(stored.pendingVectorHashes) ||
+      !Array.isArray(stored.pendingVectorDeleteHashes) ||
+      typeof stored.vectorFingerprint !== 'string' ||
+      !stored.metrics ||
+      !Array.isArray(stored.debugTraces) ||
+      (stored.lastInspection !== undefined &&
+        (!Number.isFinite(stored.lastInspection.vectorResultCount) ||
+          !Number.isFinite(stored.lastInspection.durationMs) ||
+          !Number.isFinite(stored.lastInspection.estimatedRemovedTokens) ||
+          !Number.isFinite(stored.lastInspection.estimatedInjectedTokens) ||
+          !Number.isFinite(stored.lastInspection.estimatedNetSavedTokens))) ||
+      stored.memories.some(
+        (memory) =>
+          !Array.isArray(memory.sourceHistory) ||
+          memory.sourceHistory.length === 0 ||
+          !Array.isArray(memory.supersedesMemoryIds) ||
+          !memory.lastOperation,
+      )
+    ) {
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
     }
@@ -96,7 +172,10 @@ export class MemoryRepository {
         pendingVectorHashes: state.memories
           .filter((memory) => memory.status !== 'invalid' && memory.status !== 'superseded')
           .map((memory) => memory.vectorHash),
+        pendingVectorDeleteHashes: [],
         vectorFingerprint: '',
+        metrics: createMetrics(),
+        debugTraces: [],
       };
       delete branchState.lastInspection;
       context.chatMetadata[MODULE_ID] = branchState;
@@ -124,9 +203,20 @@ export class MemoryRepository {
 
     const byId = new Map(state.memories.map((memory) => [memory.id, memory]));
     for (const memory of memories) {
+      const existing = byId.get(memory.id);
+      if (existing && existing.vectorHash !== memory.vectorHash) {
+        state.pendingVectorDeleteHashes.push(existing.vectorHash);
+      }
+      if (memory.status !== 'invalid' && memory.status !== 'superseded') {
+        state.pendingVectorHashes.push(memory.vectorHash);
+      } else {
+        state.pendingVectorDeleteHashes.push(memory.vectorHash);
+      }
       byId.set(memory.id, memory);
     }
     state.memories = [...byId.values()];
+    state.pendingVectorHashes = [...new Set(state.pendingVectorHashes)];
+    state.pendingVectorDeleteHashes = [...new Set(state.pendingVectorDeleteHashes)];
     await this.save(state);
     return state;
   }
@@ -136,7 +226,15 @@ export class MemoryRepository {
     if (!state) {
       throw new Error('当前没有可用聊天。');
     }
+    const removed = state.memories.find((memory) => memory.id === memoryId);
     state.memories = state.memories.filter((memory) => memory.id !== memoryId);
+    if (removed) {
+      state.pendingVectorHashes = state.pendingVectorHashes.filter((hash) => hash !== removed.vectorHash);
+      state.pendingVectorDeleteHashes = [...new Set([
+        ...state.pendingVectorDeleteHashes,
+        removed.vectorHash,
+      ])];
+    }
     await this.save(state);
     return state;
   }

@@ -17,6 +17,7 @@
 #story-echo-settings .story-echo-inline {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
 }
 
@@ -30,6 +31,28 @@
   border: 1px solid var(--SmartThemeBorderColor);
   border-radius: 6px;
   padding: 0.6rem;
+}
+
+#story-echo-settings .story-echo-diagnostics {
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 6px;
+  margin-top: 0.6rem;
+  padding: 0.45rem 0.6rem;
+}
+
+#story-echo-settings .story-echo-diagnostics summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#story-echo-settings .story-echo-diagnostics pre {
+  margin: 0.6rem 0 0;
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85em;
+  user-select: text;
 }
 
 #story-echo-settings .story-echo-secret-loaded {

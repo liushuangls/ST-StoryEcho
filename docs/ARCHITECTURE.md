@@ -93,15 +93,19 @@ type MemoryType =
 
 type TruthStatus = 'confirmed' | 'claimed' | 'inferred' | 'uncertain';
 type MemoryStatus = 'active' | 'resolved' | 'superseded' | 'invalid';
+type ConsolidationOperation = 'CREATE' | 'MERGE' | 'UPDATE' | 'RESOLVE' | 'SUPERSEDE' | 'IGNORE';
+
+interface StoryMemorySource {
+  startMessageId: number;
+  endMessageId: number;
+  sourceHash: string;
+}
 
 interface StoryMemory {
   id: string;
   type: MemoryType;
-  source: {
-    startMessageId: number;
-    endMessageId: number;
-    sourceHash: string;
-  };
+  source: StoryMemorySource;
+  sourceHistory: StoryMemorySource[];
   scene: {
     location?: string;
     time?: string;
@@ -130,6 +134,9 @@ interface StoryMemory {
   pinned: boolean;
   excluded: boolean;
   manuallyEdited: boolean;
+  supersedesMemoryIds: string[];
+  replacedByMemoryId?: string;
+  lastOperation: ConsolidationOperation;
   createdAt: string;
   updatedAt: string;
 }
@@ -148,7 +155,10 @@ interface StoryEchoChatState {
   memories: StoryMemory[];
   pendingRanges: Array<{ startMessageId: number; endMessageId: number }>;
   pendingVectorHashes: number[];
+  pendingVectorDeleteHashes: number[];
   vectorFingerprint: string;
+  metrics: StoryEchoMetrics;
+  debugTraces: StoryEchoDebugTrace[];
   lastInspection?: InspectionRecord;
 }
 ```
@@ -313,6 +323,10 @@ https://example.com/v1/chat/completions
 
 该设计避免每次把全部历史记忆发送给抽取模型。
 
+第一版实现先使用 Vector Storage与实体/状态槽匹配生成最多 16 条旧记忆候选，再进行一次结构化 LLM整理。模型失败时采用保守规则：检索文本完全相同则 `IGNORE`；同一实体同一属性值不变则 `MERGE`；值变化则 `SUPERSEDE`；其余 `CREATE`。手工编辑的记忆不得被自动修改。
+
+`MERGE/UPDATE/RESOLVE` 原地保留记忆 ID并追加 `sourceHistory`；`SUPERSEDE` 将旧记忆标为 `superseded`、记录新旧 ID关系并创建最新有效记忆。任何检索文本变化都会分配新向量哈希，同时把旧哈希放入 `pendingVectorDeleteHashes`，防止旧事实继续被语义召回。
+
 ## 8. 查询与排序
 
 `QueryBuilder` 从当前输入和最近场景生成检索查询文本，保留原始实体名和代词解析结果。
@@ -408,7 +422,7 @@ Vector Storage当前公开响应不保证提供可直接使用的原始相似度
 - `info`：手动重建、迁移完成；
 - `debug`：候选、排名和 Token明细，默认关闭。
 
-每次生成保存一个轻量 `InspectionRecord`，不保存 API Key、完整系统提示或不必要原文。
+每次生成保存一个轻量 `InspectionRecord`，并累计抽取、整理、向量和裁剪指标。调试模式额外在聊天元数据中保留最近 50 条有界轨迹。可复制报告明确排除 API Key和自定义 Base URL，但包含定位问题所需的剧情查询、整理动作和召回文本。
 
 ## 14. 兼容策略
 

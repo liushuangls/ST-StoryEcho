@@ -38,20 +38,7 @@ function jsonPayload(raw: string): string {
   return trimmed.slice(start, end + 1);
 }
 
-export function parseExtractionResponse(raw: string): ExtractedMemoryCandidate[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonPayload(raw));
-  } catch (error) {
-    throw new Error('抽取模型返回的JSON无法解析。', { cause: error });
-  }
-
-  const memories = record(parsed)['memories'];
-  if (!Array.isArray(memories)) {
-    throw new Error('抽取结果缺少memories数组。');
-  }
-
-  return memories.slice(0, 20).flatMap((value) => {
+export function parseMemoryCandidate(value: unknown): ExtractedMemoryCandidate | null {
     const item = record(value);
     const type = text(item['type']) as MemoryType;
     const truthStatus = text(item['truthStatus']) as TruthStatus;
@@ -67,7 +54,7 @@ export function parseExtractionResponse(raw: string): ExtractedMemoryCandidate[]
       !retrievalText ||
       !injectionText
     ) {
-      return [];
+      return null;
     }
 
     const stateChanges = Array.isArray(item['stateChanges'])
@@ -89,7 +76,7 @@ export function parseExtractionResponse(raw: string): ExtractedMemoryCandidate[]
       : [];
 
     const importanceValue = Number(item['importance']);
-    return [{
+    return {
       type,
       scene: {
         location: text(scene['location'], 300),
@@ -110,6 +97,24 @@ export function parseExtractionResponse(raw: string): ExtractedMemoryCandidate[]
         : 0.5,
       retrievalText,
       injectionText,
-    }];
+    };
+}
+
+export function parseExtractionResponse(raw: string): ExtractedMemoryCandidate[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonPayload(raw));
+  } catch (error) {
+    throw new Error('抽取模型返回的JSON无法解析。', { cause: error });
+  }
+
+  const memories = record(parsed)['memories'];
+  if (!Array.isArray(memories)) {
+    throw new Error('抽取结果缺少memories数组。');
+  }
+
+  return memories.slice(0, 20).flatMap((value) => {
+    const candidate = parseMemoryCandidate(value);
+    return candidate ? [candidate] : [];
   });
 }

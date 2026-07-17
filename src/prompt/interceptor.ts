@@ -1,6 +1,8 @@
 import { DISPLAY_NAME } from '../core/constants';
 import { logger } from '../core/logger';
 import type { InspectionRecord, StoryMemory, TavernChatMessage } from '../core/types';
+import { emitDiagnosticsUpdated } from '../debug/events';
+import { recordDebugTrace } from '../debug/metrics';
 import { planNextChunk } from '../extraction/chunk-planner';
 import { extractionService } from '../extraction/service';
 import { isInternalGeneration } from '../llm/internal-generation';
@@ -35,6 +37,10 @@ function createInspection(
   candidates: StoryMemory[],
   selected: StoryMemory[],
   warnings: string[],
+  vectorResultCount = 0,
+  durationMs = 0,
+  estimatedRemovedTokens = 0,
+  estimatedInjectedTokens = 0,
 ): InspectionRecord {
   return {
     createdAt: new Date().toISOString(),
@@ -49,6 +55,11 @@ function createInspection(
       (total, memory) => total + estimateTokens(memory.injectionText),
       0,
     ),
+    estimatedRemovedTokens,
+    estimatedInjectedTokens,
+    estimatedNetSavedTokens: Math.max(0, estimatedRemovedTokens - estimatedInjectedTokens),
+    vectorResultCount,
+    durationMs,
     warnings,
   };
 }
@@ -65,6 +76,7 @@ export async function storyEchoGenerateInterceptor(
   }
 
   try {
+    const startedAt = performance.now();
     const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
     const sourceChat = getContext().chat;
     const sourceWindow = selectRecentWindow(
@@ -80,6 +92,7 @@ export async function storyEchoGenerateInterceptor(
     if (!state) {
       return;
     }
+    state.metrics.generationAttempts += 1;
 
     const warnings: string[] = [];
     const requiredIndexedThrough = sourceWindow.retainedStartIndex - 1;
@@ -119,8 +132,17 @@ export async function storyEchoGenerateInterceptor(
         [],
         [],
         warnings,
+        0,
+        Math.round(performance.now() - startedAt),
       );
+      state.metrics.generationsDeferred += 1;
+      state.metrics.lastGenerationAt = new Date().toISOString();
+      recordDebugTrace(state, settings.debug, 'interceptor', '索引未覆盖窗口边界，本次保留完整聊天。', {
+        indexedThrough: state.indexedThroughMessageId,
+        requiredIndexedThrough,
+      });
       await memoryRepository.save(state);
+      emitDiagnosticsUpdated();
       logger.warn('索引未覆盖裁剪边界，本次保留完整聊天。', warnings[0]);
       return;
     }
@@ -128,6 +150,12 @@ export async function storyEchoGenerateInterceptor(
     try {
       state = await extractionService.syncPendingVectors(state);
     } catch (error) {
+      if (state) {
+        state.metrics.vectorSyncFailures += 1;
+        recordDebugTrace(state, settings.debug, 'vector', '生成前同步向量失败。', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       warnings.push('部分剧情记忆尚未完成向量化，将使用可用索引和关键词召回。');
       logger.warn('同步待处理向量失败。', error);
     }
@@ -146,6 +174,8 @@ export async function storyEchoGenerateInterceptor(
 
     let vectorResults: VectorQueryResult[] = [];
     if (eligibleMemories.length > 0 && query.trim()) {
+      const queryStartedAt = performance.now();
+      state.metrics.vectorQueries += 1;
       try {
         vectorResults = await vectorStore.query(
           state.vectorCollectionId,
@@ -155,9 +185,11 @@ export async function storyEchoGenerateInterceptor(
           resolveVectorConfig(settings),
         );
       } catch (error) {
-        warnings.push('Vector Storage检索失败，本次只使用固定记忆。');
+        state.metrics.vectorQueryFailures += 1;
+        warnings.push('Vector Storage检索失败，本次只使用固定记忆和关键词匹配。');
         logger.warn('Vector Storage检索失败。', error);
       }
+      state.metrics.totalRetrievalMs += Math.round(performance.now() - queryStartedAt);
     }
 
     const ranked = rankMemories(query, eligibleMemories, vectorResults);
@@ -167,6 +199,11 @@ export async function storyEchoGenerateInterceptor(
       settings.recall.maxTokens,
     );
     const memoryBlock = selected.length > 0 ? renderMemoryBlock(selected) : '';
+    const estimatedRemovedTokens = window.removableIndices.reduce(
+      (total, index) => total + estimateTokens(chat[index]?.mes ?? ''),
+      0,
+    );
+    const estimatedInjectedTokens = memoryBlock ? estimateTokens(memoryBlock) : 0;
 
     const anchor = chat[window.retainedStartIndex];
     const removable = new Set(window.removableIndices);
@@ -197,9 +234,29 @@ export async function storyEchoGenerateInterceptor(
       ranked,
       selected,
       warnings,
+      vectorResults.length,
+      Math.round(performance.now() - startedAt),
+      estimatedRemovedTokens,
+      estimatedInjectedTokens,
     );
+    state.metrics.generationsTrimmed += 1;
+    state.metrics.messagesRemoved += window.removableIndices.length;
+    state.metrics.memoriesInjected += selected.length;
+    state.metrics.estimatedRemovedTokens += estimatedRemovedTokens;
+    state.metrics.estimatedInjectedTokens += estimatedInjectedTokens;
+    state.metrics.lastGenerationAt = new Date().toISOString();
+    recordDebugTrace(state, settings.debug, 'interceptor', '上下文裁剪与剧情召回完成。', {
+      removedMessages: window.removableIndices.length,
+      vectorResults: vectorResults.length,
+      rankedMemories: ranked.length,
+      injectedMemories: selected.length,
+      estimatedRemovedTokens,
+      estimatedInjectedTokens,
+      durationMs: Math.round(performance.now() - startedAt),
+    });
     try {
       await memoryRepository.save(state);
+      emitDiagnosticsUpdated();
     } catch (error) {
       logger.warn('保存上下文检查记录失败。', error);
     }

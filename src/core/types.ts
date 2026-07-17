@@ -10,6 +10,14 @@ export type MemoryType =
   | 'conflict';
 export type TruthStatus = 'confirmed' | 'claimed' | 'inferred' | 'uncertain';
 export type MemoryStatus = 'active' | 'resolved' | 'superseded' | 'invalid';
+export type ConsolidationOperation =
+  | 'CREATE'
+  | 'MERGE'
+  | 'UPDATE'
+  | 'RESOLVE'
+  | 'SUPERSEDE'
+  | 'IGNORE';
+export type DebugStage = 'extraction' | 'consolidation' | 'vector' | 'retrieval' | 'interceptor' | 'error';
 
 export interface StoryEchoSettings {
   version: 1;
@@ -55,6 +63,7 @@ export interface StoryMemory {
   id: string;
   type: MemoryType;
   source: StoryMemorySource;
+  sourceHistory: StoryMemorySource[];
   scene: {
     location?: string;
     time?: string;
@@ -83,6 +92,9 @@ export interface StoryMemory {
   pinned: boolean;
   excluded: boolean;
   manuallyEdited: boolean;
+  supersedesMemoryIds: string[];
+  replacedByMemoryId?: string;
+  lastOperation: ConsolidationOperation;
   createdAt: string;
   updatedAt: string;
 }
@@ -102,7 +114,49 @@ export interface InspectionRecord {
   candidateMemoryIds: string[];
   selectedMemoryIds: string[];
   estimatedRecallTokens: number;
+  estimatedRemovedTokens: number;
+  estimatedInjectedTokens: number;
+  estimatedNetSavedTokens: number;
+  vectorResultCount: number;
+  durationMs: number;
   warnings: string[];
+}
+
+export interface StoryEchoMetrics {
+  extractionChunks: number;
+  extractionFailures: number;
+  candidatesExtracted: number;
+  consolidationCalls: number;
+  consolidationFailures: number;
+  actions: Record<ConsolidationOperation, number>;
+  vectorQueries: number;
+  vectorQueryFailures: number;
+  vectorSyncFailures: number;
+  vectorItemsInserted: number;
+  vectorItemsDeleted: number;
+  vectorRebuilds: number;
+  generationAttempts: number;
+  generationsTrimmed: number;
+  generationsDeferred: number;
+  messagesRemoved: number;
+  memoriesInjected: number;
+  estimatedRemovedTokens: number;
+  estimatedInjectedTokens: number;
+  totalExtractionMs: number;
+  totalConsolidationMs: number;
+  totalRetrievalMs: number;
+  lastExtractionAt?: string;
+  lastGenerationAt?: string;
+}
+
+export type DebugDetails = Record<string, string | number | boolean | null>;
+
+export interface StoryEchoDebugTrace {
+  id: string;
+  createdAt: string;
+  stage: DebugStage;
+  message: string;
+  details?: DebugDetails;
 }
 
 export interface StoryEchoChatState {
@@ -115,7 +169,10 @@ export interface StoryEchoChatState {
   memories: StoryMemory[];
   pendingRanges: PendingRange[];
   pendingVectorHashes: number[];
+  pendingVectorDeleteHashes: number[];
   vectorFingerprint: string;
+  metrics: StoryEchoMetrics;
+  debugTraces: StoryEchoDebugTrace[];
   lastInspection?: InspectionRecord;
 }
 

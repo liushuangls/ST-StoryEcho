@@ -1,5 +1,8 @@
 import { logger } from '../core/logger';
 import type { LlmProviderId, StoryEchoSettings, WindowUnit } from '../core/types';
+import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
+import { resetDiagnostics } from '../debug/metrics';
+import { buildDebugReport } from '../debug/report';
 import { extractionService } from '../extraction/service';
 import { createLlmProvider } from '../llm/provider-factory';
 import { sessionSecretVault } from '../llm/secret-vault';
@@ -68,6 +71,10 @@ function panelTemplate(): HTMLElement {
             <input id="story-echo-auto-extract" type="checkbox">
             <span>窗口边界需要时自动抽取尚未处理的历史</span>
           </label>
+          <label class="checkbox_label story-echo-inline story-echo-field-wide">
+            <input id="story-echo-debug" type="checkbox">
+            <span>调试模式（保留最近50条运行轨迹）</span>
+          </label>
         </div>
 
         <div id="story-echo-custom-provider" class="story-echo-grid">
@@ -101,12 +108,27 @@ function panelTemplate(): HTMLElement {
           <button id="story-echo-test-llm" class="menu_button" type="button">测试LLM连接</button>
           <button id="story-echo-process-history" class="menu_button" type="button">处理窗口外历史</button>
           <button id="story-echo-refresh-status" class="menu_button" type="button">刷新状态</button>
+          <button id="story-echo-copy-debug" class="menu_button" type="button">复制调试报告</button>
+          <button id="story-echo-reset-stats" class="menu_button" type="button">重置统计</button>
         </div>
 
         <p class="story-echo-hint">
           自定义Key不会保存到扩展设置。Vector Storage默认复用酒馆当前向量来源和模型。
         </p>
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
+        <details class="story-echo-diagnostics" open>
+          <summary>测试统计</summary>
+          <pre id="story-echo-stats">尚无统计数据。</pre>
+        </details>
+        <details class="story-echo-diagnostics">
+          <summary>最近一次上下文检查</summary>
+          <pre id="story-echo-inspection">尚无生成记录。</pre>
+        </details>
+        <details class="story-echo-diagnostics">
+          <summary>最近调试轨迹</summary>
+          <pre id="story-echo-traces">调试模式关闭或尚无轨迹。</pre>
+        </details>
+        <p class="story-echo-hint">调试报告不包含API Key，但会包含检索查询和被召回的剧情文本。</p>
       </div>
     </div>
   `;
@@ -145,6 +167,7 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-threshold').value = String(settings.recall.scoreThreshold);
   element<HTMLSelectElement>(panel, '#story-echo-provider').value = settings.llm.provider;
   element<HTMLInputElement>(panel, '#story-echo-auto-extract').checked = settings.extraction.automatic;
+  element<HTMLInputElement>(panel, '#story-echo-debug').checked = settings.debug;
   element<HTMLInputElement>(panel, '#story-echo-base-url').value = settings.llm.custom.baseUrl;
   element<HTMLInputElement>(panel, '#story-echo-model').value = settings.llm.custom.model;
   element<HTMLInputElement>(panel, '#story-echo-allow-http').checked = settings.llm.custom.allowInsecureHttp;
@@ -201,6 +224,12 @@ function bindSettings(panel: HTMLElement): void {
   element<HTMLInputElement>(panel, '#story-echo-auto-extract').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.extraction.automatic = (event.currentTarget as HTMLInputElement).checked;
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-debug').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.debug = (event.currentTarget as HTMLInputElement).checked;
     });
   });
 
@@ -285,7 +314,7 @@ function bindSettings(panel: HTMLElement): void {
       }
       const target = window.retainedStartIndex - 1;
       await extractionService.processThrough(target, (progress) => {
-        status.textContent = `正在处理消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条事件……`;
+        status.textContent = `正在处理消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
       });
       notify.success('窗口外历史处理完成。');
       await refreshStatus(panel);
@@ -300,16 +329,145 @@ function bindSettings(panel: HTMLElement): void {
   element<HTMLButtonElement>(panel, '#story-echo-refresh-status').addEventListener('click', async () => {
     await refreshStatus(panel);
   });
+
+  element<HTMLButtonElement>(panel, '#story-echo-copy-debug').addEventListener('click', async () => {
+    const state = memoryRepository.getExisting();
+    if (!state) {
+      notify.info('当前聊天还没有StoryEcho调试数据。');
+      return;
+    }
+    let vectorCount: number | string = 'unavailable';
+    try {
+      vectorCount = (await vectorStore.list(
+        state.vectorCollectionId,
+        resolveVectorConfig(settingsRepository.get()),
+      )).length;
+    } catch {
+      // The report still has useful local diagnostics when Vector Storage is unavailable.
+    }
+    try {
+      await copyText(buildDebugReport(state, settingsRepository.get(), vectorCount));
+      notify.success('调试报告已复制。');
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '复制调试报告失败。');
+    }
+  });
+
+  element<HTMLButtonElement>(panel, '#story-echo-reset-stats').addEventListener('click', async () => {
+    const state = memoryRepository.getExisting();
+    if (!state) {
+      notify.info('当前聊天还没有统计数据。');
+      return;
+    }
+    if (!globalThis.confirm('重置当前聊天的StoryEcho统计、调试轨迹和最近检查记录？')) {
+      return;
+    }
+    resetDiagnostics(state);
+    await memoryRepository.save(state);
+    await refreshStatus(panel);
+    notify.success('当前聊天统计已重置。');
+  });
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Fall back to execCommand for HTTP deployments and restricted clipboard permissions.
+    }
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) {
+    throw new Error('浏览器拒绝访问剪贴板。');
+  }
+}
+
+function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']>>): string {
+  const statusCount = (status: string) => state.memories.filter((memory) => memory.status === status).length;
+  const metrics = state.metrics;
+  const averageExtraction = metrics.extractionChunks > 0
+    ? Math.round(metrics.totalExtractionMs / metrics.extractionChunks)
+    : 0;
+  const averageConsolidation = metrics.consolidationCalls > 0
+    ? Math.round(metrics.totalConsolidationMs / metrics.consolidationCalls)
+    : 0;
+  const estimatedNetSaved = Math.max(
+    0,
+    metrics.estimatedRemovedTokens - metrics.estimatedInjectedTokens,
+  );
+  return [
+    `记忆：active ${statusCount('active')} / resolved ${statusCount('resolved')} / superseded ${statusCount('superseded')} / invalid ${statusCount('invalid')}`,
+    `抽取：${metrics.extractionChunks}块，${metrics.candidatesExtracted}候选，失败${metrics.extractionFailures}次，平均${averageExtraction}ms/块`,
+    `整理：调用${metrics.consolidationCalls}次，失败回退${metrics.consolidationFailures}次，平均${averageConsolidation}ms`,
+    `动作：CREATE ${metrics.actions.CREATE} / MERGE ${metrics.actions.MERGE} / UPDATE ${metrics.actions.UPDATE} / RESOLVE ${metrics.actions.RESOLVE} / SUPERSEDE ${metrics.actions.SUPERSEDE} / IGNORE ${metrics.actions.IGNORE}`,
+    `向量：查询${metrics.vectorQueries}次，查询失败${metrics.vectorQueryFailures}次，同步失败${metrics.vectorSyncFailures}次，写入${metrics.vectorItemsInserted}，删除${metrics.vectorItemsDeleted}，重建${metrics.vectorRebuilds}次`,
+    `上下文：尝试${metrics.generationAttempts}次，裁剪${metrics.generationsTrimmed}次，延迟裁剪${metrics.generationsDeferred}次，移除${metrics.messagesRemoved}条原文，注入${metrics.memoriesInjected}条记忆`,
+    `估算Token：移除${metrics.estimatedRemovedTokens}，注入${metrics.estimatedInjectedTokens}，累计净节省${estimatedNetSaved}`,
+    `最近：抽取 ${metrics.lastExtractionAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
+    `调试轨迹：${state.debugTraces.length}/50`,
+  ].join('\n');
+}
+
+function inspectionText(state: NonNullable<ReturnType<MemoryRepository['getExisting']>>): string {
+  const inspection = state.lastInspection;
+  if (!inspection) {
+    return '尚无生成记录。';
+  }
+  const selected = new Set(inspection.selectedMemoryIds);
+  const selectedLines = state.memories
+    .filter((memory) => selected.has(memory.id))
+    .map((memory) => `- [${memory.lastOperation}/${memory.status}] ${memory.injectionText}`);
+  return [
+    `时间：${inspection.createdAt}`,
+    `耗时：${inspection.durationMs}ms`,
+    `保留范围：${inspection.retainedStartIndex}～${inspection.retainedEndIndex}`,
+    `裁剪消息：${inspection.removedMessageCount}`,
+    `向量候选：${inspection.vectorResultCount}，排序候选：${inspection.candidateMemoryIds.length}，最终注入：${inspection.selectedMemoryIds.length}`,
+    `估算召回Token：${inspection.estimatedRecallTokens}`,
+    `估算移除/注入/净节省Token：${inspection.estimatedRemovedTokens} / ${inspection.estimatedInjectedTokens} / ${inspection.estimatedNetSavedTokens}`,
+    `查询：\n${inspection.query || '（无）'}`,
+    `注入记忆：\n${selectedLines.join('\n') || '（无）'}`,
+    `警告：\n${inspection.warnings.join('\n') || '（无）'}`,
+  ].join('\n\n');
+}
+
+function tracesText(state: NonNullable<ReturnType<MemoryRepository['getExisting']>>): string {
+  if (state.debugTraces.length === 0) {
+    return '调试模式关闭或尚无轨迹。';
+  }
+  return [...state.debugTraces]
+    .slice(-15)
+    .reverse()
+    .map((trace) => [
+      `${trace.createdAt} [${trace.stage}] ${trace.message}`,
+      trace.details ? JSON.stringify(trace.details, null, 2) : '',
+    ].filter(Boolean).join('\n'))
+    .join('\n\n');
 }
 
 async function refreshStatus(panel: HTMLElement): Promise<void> {
   const target = element<HTMLElement>(panel, '#story-echo-status');
+  const stats = element<HTMLElement>(panel, '#story-echo-stats');
+  const inspection = element<HTMLElement>(panel, '#story-echo-inspection');
+  const traces = element<HTMLElement>(panel, '#story-echo-traces');
   try {
     const state = memoryRepository.getExisting();
     if (!state) {
       target.textContent = getCurrentChatId()
         ? '当前聊天尚未初始化StoryEcho数据。'
         : '当前没有打开聊天。';
+      stats.textContent = '尚无统计数据。';
+      inspection.textContent = '尚无生成记录。';
+      traces.textContent = '调试模式关闭或尚无轨迹。';
       return;
     }
 
@@ -326,11 +484,19 @@ async function refreshStatus(panel: HTMLElement): Promise<void> {
       `剧情事件：${state.memories.length}`,
       `向量：${vectorCountText}`,
       `待同步向量：${state.pendingVectorHashes.length}`,
+      `待删除向量：${state.pendingVectorDeleteHashes.length}`,
       `已处理到消息：${state.indexedThroughMessageId}`,
       `集合：${state.vectorCollectionId}`,
     ].join('｜');
+    stats.textContent = statsText(state);
+    inspection.textContent = inspectionText(state);
+    traces.textContent = tracesText(state);
   } catch (error) {
-    target.textContent = error instanceof Error ? error.message : '读取当前聊天状态失败。';
+    const message = error instanceof Error ? error.message : '读取当前聊天状态失败。';
+    target.textContent = message;
+    stats.textContent = `读取失败：${message}`;
+    inspection.textContent = '读取失败。';
+    traces.textContent = '读取失败。';
   }
 }
 
@@ -360,5 +526,8 @@ export async function registerSettingsPanel(): Promise<void> {
   const settings = settingsRepository.get();
   syncForm(panel, settings);
   bindSettings(panel);
+  globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
+    void refreshStatus(panel);
+  });
   await refreshStatus(panel);
 }

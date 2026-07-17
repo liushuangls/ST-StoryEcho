@@ -1,14 +1,23 @@
 import { allocateVectorHash, sha256 } from '../core/hash';
-import type { StoryMemory } from '../core/types';
+import type { ConsolidationOperation, StoryMemory, StoryMemorySource } from '../core/types';
 import type { ExtractedMemoryCandidate } from './types';
+
+export interface MemoryFactoryOptions {
+  id?: string;
+  createdAt?: string;
+  sourceHistory?: StoryMemorySource[];
+  supersedesMemoryIds?: string[];
+  lastOperation?: ConsolidationOperation;
+}
 
 export async function createStoryMemory(
   candidate: ExtractedMemoryCandidate,
   source: { startMessageId: number; endMessageId: number; sourceHash: string },
   occupiedVectorHashes: ReadonlySet<number>,
+  options: MemoryFactoryOptions = {},
 ): Promise<StoryMemory> {
   const now = new Date().toISOString();
-  const id = `mem_${crypto.randomUUID()}`;
+  const id = options.id ?? `mem_${crypto.randomUUID()}`;
   const retrievalHash = await sha256(candidate.retrievalText);
   const vectorHash = allocateVectorHash(`${id}:${retrievalHash}`, occupiedVectorHashes);
   const location = candidate.scene.location.trim();
@@ -20,6 +29,7 @@ export async function createStoryMemory(
     id,
     type: candidate.type,
     source,
+    sourceHistory: options.sourceHistory ?? [source],
     scene: {
       ...(location ? { location } : {}),
       ...(time ? { time } : {}),
@@ -48,7 +58,9 @@ export async function createStoryMemory(
     pinned: false,
     excluded: false,
     manuallyEdited: false,
-    createdAt: now,
+    supersedesMemoryIds: options.supersedesMemoryIds ?? [],
+    lastOperation: options.lastOperation ?? 'CREATE',
+    createdAt: options.createdAt ?? now,
     updatedAt: now,
   };
 }

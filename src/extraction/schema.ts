@@ -1,11 +1,4 @@
-export const EXTRACTION_SCHEMA: Record<string, unknown> = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    memories: {
-      type: 'array',
-      maxItems: 20,
-      items: {
+export const MEMORY_CANDIDATE_SCHEMA: Record<string, unknown> = {
         type: 'object',
         additionalProperties: false,
         required: [
@@ -76,7 +69,16 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
           retrievalText: { type: 'string' },
           injectionText: { type: 'string' },
         },
-      },
+};
+
+export const EXTRACTION_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    memories: {
+      type: 'array',
+      maxItems: 20,
+      items: MEMORY_CANDIDATE_SCHEMA,
     },
   },
   required: ['memories'],
