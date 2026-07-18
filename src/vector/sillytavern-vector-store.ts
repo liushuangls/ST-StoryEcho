@@ -5,6 +5,10 @@ import type {
   VectorRequestConfig,
   VectorStoreAdapter,
 } from './adapter';
+import type { EmbeddingClient } from './openai-compatible-embedding';
+import { openAiCompatibleEmbeddingClient } from './openai-compatible-embedding';
+
+const EMBEDDING_BATCH_SIZE = 64;
 
 interface VectorMetadata {
   hash?: number | string;
@@ -26,12 +30,44 @@ function requestBody(
   };
 }
 
+function embeddingMap(texts: string[], vectors: number[][]): Record<string, number[]> {
+  if (texts.length !== vectors.length) {
+    throw new Error(`Embedding数量不匹配：文本${texts.length}条，向量${vectors.length}条。`);
+  }
+  return Object.fromEntries(texts.map((text, index) => [text, vectors[index] ?? []]));
+}
+
 export class SillyTavernVectorStore implements VectorStoreAdapter {
+  constructor(private readonly embeddingClient: EmbeddingClient = openAiCompatibleEmbeddingClient) {}
+
+  private async embedTexts(
+    texts: string[],
+    config: NonNullable<VectorRequestConfig['precomputed']>,
+  ): Promise<number[][]> {
+    const vectors: number[][] = [];
+    for (let start = 0; start < texts.length; start += EMBEDDING_BATCH_SIZE) {
+      vectors.push(...await this.embeddingClient.embed({
+        ...config,
+        texts: texts.slice(start, start + EMBEDDING_BATCH_SIZE),
+      }));
+    }
+    return vectors;
+  }
+
   async insert(collectionId: string, items: VectorItem[], config: VectorRequestConfig): Promise<void> {
     if (items.length === 0) {
       return;
     }
-    await this.post('/api/vector/insert', requestBody(collectionId, config, { items }));
+    const embeddings = config.precomputed
+      ? embeddingMap(
+          items.map((item) => item.text),
+          await this.embedTexts(items.map((item) => item.text), config.precomputed),
+        )
+      : undefined;
+    await this.post('/api/vector/insert', requestBody(collectionId, config, {
+      items,
+      ...(embeddings ? { embeddings } : {}),
+    }));
   }
 
   async query(
@@ -41,8 +77,19 @@ export class SillyTavernVectorStore implements VectorStoreAdapter {
     threshold: number,
     config: VectorRequestConfig,
   ): Promise<VectorQueryResult[]> {
+    const embeddings = config.precomputed
+      ? embeddingMap(
+          [searchText],
+          await this.embedTexts([searchText], config.precomputed),
+        )
+      : undefined;
     const response = await this.post('/api/vector/query',
-      requestBody(collectionId, config, { searchText, topK, threshold }));
+      requestBody(collectionId, config, {
+        searchText,
+        topK,
+        threshold,
+        ...(embeddings ? { embeddings } : {}),
+      }));
     const responseRecord = Array.isArray(response) ? {} : response;
     const metadata = Array.isArray(responseRecord['metadata'])
       ? (responseRecord['metadata'] as VectorMetadata[])

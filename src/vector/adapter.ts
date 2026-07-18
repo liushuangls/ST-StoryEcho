@@ -15,6 +15,12 @@ export interface VectorRequestConfig {
   source: string;
   model?: string;
   sourceSettings?: Record<string, unknown>;
+  precomputed?: {
+    provider: 'openai-compatible';
+    endpoint: string;
+    model: string;
+    timeoutMs: number;
+  };
 }
 
 export interface VectorStoreAdapter {

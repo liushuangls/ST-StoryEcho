@@ -33,5 +33,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
   vector: {
     source: 'inherit',
     model: '',
+    custom: {
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      model: '',
+      timeoutMs: 60_000,
+      allowInsecureHttp: false,
+    },
   },
 } satisfies StoryEchoSettings);

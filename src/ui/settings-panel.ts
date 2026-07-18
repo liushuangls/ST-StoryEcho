@@ -3,6 +3,7 @@ import type {
   LlmProviderId,
   RetrievalQueryMode,
   StoryEchoSettings,
+  VectorSourceMode,
   WindowUnit,
 } from '../core/types';
 import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
@@ -10,14 +11,16 @@ import { resetDiagnostics } from '../debug/metrics';
 import { buildDebugReport } from '../debug/report';
 import { extractionService } from '../extraction/service';
 import { createLlmProvider } from '../llm/provider-factory';
-import { sessionSecretVault } from '../llm/secret-vault';
+import { embeddingSecretVault, sessionSecretVault } from '../llm/secret-vault';
 import { normalizeChatCompletionsUrl } from '../llm/url';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { selectRecentWindow } from '../prompt/window';
 import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig } from '../vector/config';
+import { openAiCompatibleEmbeddingClient } from '../vector/openai-compatible-embedding';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
+import { normalizeEmbeddingsUrl } from '../vector/url';
 import { notify } from './notifications';
 
 const PANEL_ID = 'story-echo-settings';
@@ -35,13 +38,17 @@ function panelTemplate(): HTMLElement {
         <b>StoryEcho · 剧情回响</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
-      <div class="inline-drawer-content">
+      <div class="inline-drawer-content story-echo-panel-body">
         <label class="checkbox_label story-echo-inline">
           <input id="story-echo-enabled" type="checkbox">
           <span>启用滑动窗口与历史剧情召回</span>
         </label>
 
-        <div class="story-echo-grid">
+        <div class="story-echo-grid story-echo-section">
+          <div class="story-echo-section-title story-echo-field-wide">
+            <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+            <span>上下文与召回</span>
+          </div>
           <label class="story-echo-field">
             <span>最近窗口</span>
             <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
@@ -92,7 +99,7 @@ function panelTemplate(): HTMLElement {
           </p>
         </div>
 
-        <div id="story-echo-custom-provider" class="story-echo-grid">
+        <div id="story-echo-custom-provider" class="story-echo-grid story-echo-subsection">
           <label class="story-echo-field story-echo-field-wide">
             <span>Base URL</span>
             <input id="story-echo-base-url" class="text_pole" type="url" placeholder="https://example.com/v1">
@@ -119,6 +126,56 @@ function panelTemplate(): HTMLElement {
           </div>
         </div>
 
+        <div class="story-echo-grid story-echo-section">
+          <div class="story-echo-section-title story-echo-field-wide">
+            <i class="fa-solid fa-database" aria-hidden="true"></i>
+            <span>Embedding 与 Vector Storage</span>
+          </div>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding来源</span>
+            <select id="story-echo-vector-source" class="text_pole">
+              <option value="inherit">酒馆Vector Storage当前向量源（默认）</option>
+              <option value="openai-compatible">自定义OpenAI兼容接口（支持火山方舟）</option>
+            </select>
+          </label>
+          <p class="story-echo-hint story-echo-field-wide">
+            自定义模式只替换向量生成器；向量仍由酒馆Vector Storage保存并在服务端检索。
+          </p>
+        </div>
+
+        <div id="story-echo-custom-embedding" class="story-echo-grid story-echo-subsection">
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding Base URL</span>
+            <input id="story-echo-embedding-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
+          </label>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding模型或Endpoint ID</span>
+            <input id="story-echo-embedding-model" class="text_pole" type="text" maxlength="200" placeholder="doubao-embedding-text-… 或 ep-…">
+          </label>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding API Key（仅当前页面内存）</span>
+            <input id="story-echo-embedding-api-key" class="text_pole" type="password" autocomplete="off" placeholder="刷新后需要重新输入">
+          </label>
+          <label class="checkbox_label story-echo-inline story-echo-field-wide">
+            <input id="story-echo-embedding-allow-http" type="checkbox">
+            <span>允许不安全HTTP（仅建议局域网）</span>
+          </label>
+          <div class="story-echo-field-wide story-echo-key-row">
+            <span id="story-echo-embedding-key-status" class="story-echo-secret-empty">Embedding Key未加载</span>
+            <div class="story-echo-key-actions">
+              <button id="story-echo-test-embedding" class="menu_button" type="button">
+                <i class="fa-solid fa-vial" aria-hidden="true"></i><span>测试Embedding</span>
+              </button>
+              <button id="story-echo-clear-embedding-key" class="menu_button" type="button">
+                <i class="fa-solid fa-key" aria-hidden="true"></i><span>清除Key</span>
+              </button>
+            </div>
+          </div>
+          <p class="story-echo-hint story-echo-field-wide">
+            优先直连接口；若目标不允许浏览器跨域，会自动回退酒馆CORS代理。火山方舟可直接使用。
+          </p>
+        </div>
+
         <div class="story-echo-actions" role="group" aria-label="StoryEcho操作">
           <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-plug" aria-hidden="true"></i><span>测试LLM连接</span>
@@ -138,7 +195,7 @@ function panelTemplate(): HTMLElement {
         </div>
 
         <p class="story-echo-hint">
-          自定义Key不会保存到扩展设置。Vector Storage默认复用酒馆当前向量来源和模型。
+          LLM与Embedding自定义Key都不会保存到扩展设置；刷新页面后需要重新输入。
         </p>
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
         <details class="story-echo-diagnostics" open>
@@ -177,10 +234,20 @@ function syncVisibility(panel: HTMLElement, settings: StoryEchoSettings): void {
   const custom = element<HTMLElement>(panel, '#story-echo-custom-provider');
   custom.hidden = settings.llm.provider !== 'openai-compatible';
 
+  const customEmbedding = element<HTMLElement>(panel, '#story-echo-custom-embedding');
+  customEmbedding.hidden = settings.vector.source !== 'openai-compatible';
+
   const keyStatus = element<HTMLElement>(panel, '#story-echo-key-status');
   keyStatus.textContent = sessionSecretVault.hasSessionKey() ? 'API Key已加载到当前页面' : 'API Key未加载';
   keyStatus.classList.toggle('story-echo-secret-loaded', sessionSecretVault.hasSessionKey());
   keyStatus.classList.toggle('story-echo-secret-empty', !sessionSecretVault.hasSessionKey());
+
+  const embeddingKeyStatus = element<HTMLElement>(panel, '#story-echo-embedding-key-status');
+  embeddingKeyStatus.textContent = embeddingSecretVault.hasSessionKey()
+    ? 'Embedding Key已加载到当前页面'
+    : 'Embedding Key未加载';
+  embeddingKeyStatus.classList.toggle('story-echo-secret-loaded', embeddingSecretVault.hasSessionKey());
+  embeddingKeyStatus.classList.toggle('story-echo-secret-empty', !embeddingSecretVault.hasSessionKey());
 }
 
 function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
@@ -199,6 +266,12 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-allow-http').checked = settings.llm.custom.allowInsecureHttp;
   element<HTMLInputElement>(panel, '#story-echo-fallback-main').checked = settings.llm.custom.fallbackToMain;
   element<HTMLInputElement>(panel, '#story-echo-api-key').value = '';
+  element<HTMLSelectElement>(panel, '#story-echo-vector-source').value = settings.vector.source;
+  element<HTMLInputElement>(panel, '#story-echo-embedding-base-url').value = settings.vector.custom.baseUrl;
+  element<HTMLInputElement>(panel, '#story-echo-embedding-model').value = settings.vector.custom.model;
+  element<HTMLInputElement>(panel, '#story-echo-embedding-allow-http').checked =
+    settings.vector.custom.allowInsecureHttp;
+  element<HTMLInputElement>(panel, '#story-echo-embedding-api-key').value = '';
   syncVisibility(panel, settings);
 }
 
@@ -317,6 +390,83 @@ function bindSettings(panel: HTMLElement): void {
   element<HTMLButtonElement>(panel, '#story-echo-clear-key').addEventListener('click', () => {
     sessionSecretVault.clear();
     syncVisibility(panel, settingsRepository.get());
+  });
+
+  element<HTMLSelectElement>(panel, '#story-echo-vector-source').addEventListener('change', (event) => {
+    const settings = settingsRepository.update((current) => {
+      current.vector.source = (event.currentTarget as HTMLSelectElement).value as VectorSourceMode;
+    });
+    syncVisibility(panel, settings);
+    void refreshStatus(panel);
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-embedding-base-url').addEventListener('change', (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const current = settingsRepository.get();
+    const value = input.value.trim();
+    if (!value) {
+      settingsRepository.update((settings) => {
+        settings.vector.custom.baseUrl = '';
+      });
+      return;
+    }
+    try {
+      const normalized = normalizeEmbeddingsUrl(value, {
+        allowInsecureHttp: current.vector.custom.allowInsecureHttp,
+      });
+      const baseUrl = normalized.replace(/\/embeddings\/?$/, '');
+      settingsRepository.update((settings) => {
+        settings.vector.custom.baseUrl = baseUrl;
+      });
+      input.value = baseUrl;
+    } catch (error) {
+      input.value = current.vector.custom.baseUrl;
+      notify.error(error instanceof Error ? error.message : 'Embedding Base URL无效。');
+    }
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-embedding-model').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.vector.custom.model = (event.currentTarget as HTMLInputElement).value.trim();
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-embedding-api-key').addEventListener('change', (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    embeddingSecretVault.setSessionKey(input.value);
+    input.value = '';
+    syncVisibility(panel, settingsRepository.get());
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-embedding-allow-http').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.vector.custom.allowInsecureHttp = (event.currentTarget as HTMLInputElement).checked;
+    });
+  });
+
+  element<HTMLButtonElement>(panel, '#story-echo-clear-embedding-key').addEventListener('click', () => {
+    embeddingSecretVault.clear();
+    syncVisibility(panel, settingsRepository.get());
+  });
+
+  element<HTMLButtonElement>(panel, '#story-echo-test-embedding').addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      const config = resolveVectorConfig(settingsRepository.get());
+      if (!config.precomputed) {
+        throw new Error('请先选择自定义OpenAI兼容Embedding。');
+      }
+      const vectors = await openAiCompatibleEmbeddingClient.embed({
+        ...config.precomputed,
+        texts: ['StoryEcho剧情记忆向量连接测试'],
+      });
+      notify.success(`Embedding连接测试成功（${vectors[0]?.length ?? 0}维）。`);
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : 'Embedding连接测试失败。');
+    } finally {
+      button.disabled = false;
+    }
   });
 
   element<HTMLButtonElement>(panel, '#story-echo-test-llm').addEventListener('click', async (event) => {

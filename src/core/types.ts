@@ -1,6 +1,7 @@
 export type WindowUnit = 'turns' | 'messages';
 export type LlmProviderId = 'main' | 'openai-compatible';
 export type RetrievalQueryMode = 'llm' | 'local';
+export type VectorSourceMode = 'inherit' | 'openai-compatible';
 export type MemoryType =
   | 'event'
   | 'state_change'
@@ -50,8 +51,14 @@ export interface StoryEchoSettings {
     };
   };
   vector: {
-    source: 'inherit' | string;
+    source: VectorSourceMode | string;
     model: string;
+    custom: {
+      baseUrl: string;
+      model: string;
+      timeoutMs: number;
+      allowInsecureHttp: boolean;
+    };
   };
 }
 

@@ -20,3 +20,4 @@ export class SessionSecretVault {
 }
 
 export const sessionSecretVault = new SessionSecretVault();
+export const embeddingSecretVault = new SessionSecretVault();

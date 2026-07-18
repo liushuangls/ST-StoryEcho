@@ -62,7 +62,9 @@ src/
     invalidation.ts
   vector/
     adapter.ts
+    openai-compatible-embedding.ts
     sillytavern-vector-store.ts
+    url.ts
   retrieval/
     query-builder.ts
     retriever.ts
@@ -207,9 +209,27 @@ interface VectorItem {
 向量来源选择原则：
 
 - 默认复用 SillyTavern Vector Storage设置；
-- 若希望完全避免浏览器计算，不使用 WebLLM；
+- 可选择StoryEcho自定义OpenAI兼容Embedding，包括火山方舟；
+- 自定义模式只在浏览器发起远程API请求，不在浏览器计算向量；
+- 远程API返回的预生成向量通过SillyTavern现有WebLLM输入通道交给Vector Storage，`insert/query/list/delete/purge`仍由酒馆服务端完成；
+- 自定义模式使用独立模型作用域，不与用户真正的WebLLM集合混用；
 - 服务端 `transformers`、Ollama或远程Embedding提供方均可；
 - 查询和写入封装在 `VectorStoreAdapter` 后面，避免业务代码依赖内部请求格式。
+
+### 5.1 自定义OpenAI兼容Embedding
+
+```text
+剧情检索文本
+  -> StoryEcho优先直连embedding endpoint
+  -> 跨域失败时回退 /proxy/<embedding-endpoint>
+  -> OpenAI兼容API返回预生成向量
+  -> POST /api/vector/insert 或 /api/vector/query
+  -> SillyTavern Vector Storage保存/检索
+```
+
+请求使用标准 `{ input: string[], model, encoding_format: "float" }`，并校验返回数量、顺序、有限数值和统一维度。Base URL会规范化为 `/embeddings`：空路径默认补 `/v1/embeddings`，已有路径（例如方舟 `/api/v3`）直接补 `/embeddings`。
+
+API Key使用独立页面内存SecretVault，不进入向量配置指纹和持久化设置。端点或模型变化会改变 `vectorFingerprint` 并触发当前聊天集合重建；单纯调整超时时间不会重建。
 
 ## 6. LLM Provider
 

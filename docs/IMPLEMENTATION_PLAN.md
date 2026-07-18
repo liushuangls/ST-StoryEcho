@@ -41,6 +41,8 @@
 - 哈希碰撞处理；
 - 增量同步和完整重建；
 - Embedding来源/模型变化检测。
+- 自定义OpenAI兼容Embedding、页面内存Key和连接测试；
+- 预生成向量复用Vector Storage存储与检索；
 
 完成标准：剧情事件可以写入服务端索引，并通过当前输入召回对应事件。
 
@@ -94,8 +96,8 @@
 
 ## 阶段8：可选服务端密钥插件
 
-- 服务端保存自定义 Provider Key；
-- 代理 OpenAI兼容请求；
+- 服务端保存自定义 LLM与Embedding Key；
+- 代理 OpenAI兼容Chat Completions与Embedding请求；
 - 用户隔离；
 - 删除和轮换 Key；
 - 威胁模型与安装说明。

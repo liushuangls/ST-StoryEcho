@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { vectorConfigFingerprint } from '../src/vector/config';
+import { resolveVectorConfig, vectorConfigFingerprint } from '../src/vector/config';
+import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 
 describe('vectorConfigFingerprint', () => {
   it('is independent of object key order', async () => {
@@ -24,5 +25,58 @@ describe('vectorConfigFingerprint', () => {
     expect(first).not.toBe(second);
     expect(first).toMatch(/^[a-f0-9]{64}$/);
     expect(first).not.toContain('model-a');
+  });
+
+  it('ignores request timeout changes but tracks embedding endpoint changes', async () => {
+    const first = await vectorConfigFingerprint({
+      source: 'webllm',
+      model: 'storyecho-model',
+      precomputed: {
+        provider: 'openai-compatible',
+        endpoint: 'https://example.com/v1/embeddings',
+        model: 'model-a',
+        timeoutMs: 10_000,
+      },
+    });
+    const sameEmbedding = await vectorConfigFingerprint({
+      source: 'webllm',
+      model: 'storyecho-model',
+      precomputed: {
+        provider: 'openai-compatible',
+        endpoint: 'https://example.com/v1/embeddings',
+        model: 'model-a',
+        timeoutMs: 60_000,
+      },
+    });
+    const differentEndpoint = await vectorConfigFingerprint({
+      source: 'webllm',
+      model: 'storyecho-model',
+      precomputed: {
+        provider: 'openai-compatible',
+        endpoint: 'https://other.example.com/v1/embeddings',
+        model: 'model-a',
+        timeoutMs: 10_000,
+      },
+    });
+
+    expect(first).toBe(sameEmbedding);
+    expect(first).not.toBe(differentEndpoint);
+  });
+
+  it('maps custom OpenAI-compatible embeddings to precomputed Vector Storage input', () => {
+    const settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+    settings.vector.source = 'openai-compatible';
+    settings.vector.custom.model = 'doubao-embedding-text-test';
+
+    expect(resolveVectorConfig(settings)).toEqual({
+      source: 'webllm',
+      model: 'storyecho-openai-compatible--doubao-embedding-text-test',
+      precomputed: {
+        provider: 'openai-compatible',
+        endpoint: 'https://ark.cn-beijing.volces.com/api/v3/embeddings',
+        model: 'doubao-embedding-text-test',
+        timeoutMs: 60_000,
+      },
+    });
   });
 });

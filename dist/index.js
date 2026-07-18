@@ -37,7 +37,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 1;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.3.0";
+var EXTENSION_VERSION = "0.4.0";
 
 // src/debug/events.ts
 var DIAGNOSTICS_UPDATED_EVENT = "storyecho:diagnostics-updated";
@@ -600,6 +600,7 @@ var SessionSecretVault = class {
   }
 };
 var sessionSecretVault = new SessionSecretVault();
+var embeddingSecretVault = new SessionSecretVault();
 
 // src/llm/provider-factory.ts
 function createLlmProvider(settings) {
@@ -1315,7 +1316,13 @@ var DEFAULT_SETTINGS = Object.freeze({
   },
   vector: {
     source: "inherit",
-    model: ""
+    model: "",
+    custom: {
+      baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+      model: "",
+      timeoutMs: 6e4,
+      allowInsecureHttp: false
+    }
   }
 });
 
@@ -1366,6 +1373,48 @@ var SettingsRepository = class {
   }
 };
 
+// src/vector/url.ts
+function normalizeEmbeddingsUrl(rawUrl, options) {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    throw new Error("Embedding Base URL\u4E0D\u80FD\u4E3A\u7A7A\u3002");
+  }
+  if (trimmed.length > 2048) {
+    throw new Error("Embedding Base URL\u8FC7\u957F\u3002");
+  }
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error("Embedding Base URL\u683C\u5F0F\u65E0\u6548\u3002");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Embedding Base URL\u53EA\u5141\u8BB8HTTP\u6216HTTPS\u534F\u8BAE\u3002");
+  }
+  if (url.username || url.password) {
+    throw new Error("Embedding Base URL\u4E0D\u80FD\u5305\u542B\u7528\u6237\u540D\u6216\u5BC6\u7801\u3002\u8BF7\u901A\u8FC7API Key\u5B57\u6BB5\u63D0\u4F9B\u51ED\u636E\u3002");
+  }
+  if (url.search) {
+    throw new Error("Embedding Base URL\u4E0D\u80FD\u5305\u542B\u67E5\u8BE2\u53C2\u6570\u3002\u8BF7\u901A\u8FC7API Key\u5B57\u6BB5\u63D0\u4F9B\u51ED\u636E\u3002");
+  }
+  if (url.protocol === "http:" && !options.allowInsecureHttp) {
+    throw new Error("\u5F53\u524D\u7981\u6B62\u4E0D\u5B89\u5168\u7684Embedding HTTP\u7AEF\u70B9\u3002\u4EC5\u5C40\u57DF\u7F51\u670D\u52A1\u5E94\u542F\u7528\u8BE5\u9009\u9879\u3002");
+  }
+  const path = url.pathname.replace(/\/+$/, "");
+  if (path.endsWith("/embeddings")) {
+    url.pathname = path;
+  } else if (path === "") {
+    url.pathname = "/v1/embeddings";
+  } else {
+    url.pathname = `${path}/embeddings`;
+  }
+  url.hash = "";
+  return url.toString();
+}
+function corsProxyUrl(targetUrl) {
+  return `/proxy/${encodeURIComponent(targetUrl)}`;
+}
+
 // src/vector/config.ts
 var MODEL_SETTING_KEYS = {
   openai: "openai_model",
@@ -1394,12 +1443,42 @@ function canonicalize(value) {
   );
 }
 function vectorConfigFingerprint(config) {
-  return sha256(JSON.stringify(canonicalize(config)));
+  const fingerprintConfig = config.precomputed ? {
+    ...config,
+    precomputed: {
+      provider: config.precomputed.provider,
+      endpoint: config.precomputed.endpoint,
+      model: config.precomputed.model
+    }
+  } : config;
+  return sha256(JSON.stringify(canonicalize(fingerprintConfig)));
 }
 function asRecord(value) {
   return typeof value === "object" && value !== null ? value : {};
 }
 function resolveVectorConfig(settings) {
+  if (settings.vector.source === "openai-compatible") {
+    const endpoint = normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
+      allowInsecureHttp: settings.vector.custom.allowInsecureHttp
+    });
+    const model2 = settings.vector.custom.model.trim();
+    if (!model2) {
+      throw new Error("\u81EA\u5B9A\u4E49Embedding\u6A21\u578B\u4E0D\u80FD\u4E3A\u7A7A\u3002");
+    }
+    if (model2.length > 200) {
+      throw new Error("\u81EA\u5B9A\u4E49Embedding\u6A21\u578B\u540D\u8FC7\u957F\u3002");
+    }
+    return {
+      source: "webllm",
+      model: `storyecho-openai-compatible--${model2}`,
+      precomputed: {
+        provider: "openai-compatible",
+        endpoint,
+        model: model2,
+        timeoutMs: settings.vector.custom.timeoutMs
+      }
+    };
+  }
   const vectorSettings = asRecord(getContext().extensionSettings["vectors"]);
   const inheritedSource = typeof vectorSettings["source"] === "string" ? vectorSettings["source"] : "transformers";
   const source = settings.vector.source === "inherit" ? inheritedSource : settings.vector.source;
@@ -1430,7 +1509,167 @@ function resolveVectorConfig(settings) {
   };
 }
 
+// src/vector/openai-compatible-embedding.ts
+var MAX_RESPONSE_BYTES2 = 32 * 1024 * 1024;
+function parseErrorBody(value) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed.error === "string") {
+      return parsed.error.slice(0, 500);
+    }
+    if (typeof parsed.error?.message === "string") {
+      return parsed.error.message.slice(0, 500);
+    }
+    if (typeof parsed.message === "string") {
+      return parsed.message.slice(0, 500);
+    }
+  } catch {
+  }
+  return trimmed.replace(/\s+/g, " ").slice(0, 500);
+}
+function redactSecret2(value, secret) {
+  return value.split(secret).join("[REDACTED]");
+}
+async function readLimitedText2(response) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES2) {
+    throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\uFF0C\u5DF2\u62D2\u7EDD\u5904\u7406\u3002");
+  }
+  if (!response.body) {
+    const text3 = await response.text();
+    if (text3.length > MAX_RESPONSE_BYTES2) {
+      throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\uFF0C\u5DF2\u62D2\u7EDD\u5904\u7406\u3002");
+    }
+    return text3;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let byteLength = 0;
+  let text2 = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    byteLength += value.byteLength;
+    if (byteLength > MAX_RESPONSE_BYTES2) {
+      await reader.cancel();
+      throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\uFF0C\u5DF2\u62D2\u7EDD\u5904\u7406\u3002");
+    }
+    text2 += decoder.decode(value, { stream: true });
+  }
+  return text2 + decoder.decode();
+}
+function parseVectors(data, expectedCount) {
+  if (typeof data !== "object" || data === null || !Array.isArray(data.data)) {
+    throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11data\u6570\u7EC4\u3002");
+  }
+  const items = [...data.data].sort((left, right) => Number(left.index ?? 0) - Number(right.index ?? 0));
+  if (items.length !== expectedCount) {
+    throw new Error(`Embedding\u63A5\u53E3\u8FD4\u56DE${items.length}\u6761\u5411\u91CF\uFF0C\u9884\u671F${expectedCount}\u6761\u3002`);
+  }
+  let dimension;
+  return items.map((item) => {
+    if (!Array.isArray(item.embedding) || item.embedding.length === 0) {
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u7A7A\u5411\u91CF\u3002");
+    }
+    const vector = item.embedding.map(Number);
+    if (vector.some((value) => !Number.isFinite(value))) {
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u5411\u91CF\u6570\u503C\u3002");
+    }
+    dimension ??= vector.length;
+    if (vector.length !== dimension) {
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u7684\u5411\u91CF\u7EF4\u5EA6\u4E0D\u4E00\u81F4\u3002");
+    }
+    return vector;
+  });
+}
+var OpenAiCompatibleEmbeddingClient = class {
+  constructor(fetchImpl = fetch, requestHeaders = getRequestHeaders) {
+    this.fetchImpl = fetchImpl;
+    this.requestHeaders = requestHeaders;
+  }
+  async embed(request) {
+    if (request.texts.length === 0) {
+      return [];
+    }
+    const apiKey = embeddingSecretVault.getSessionKey();
+    if (!apiKey) {
+      throw new Error("\u5C1A\u672A\u52A0\u8F7DEmbedding API Key\u3002\u8BF7\u5728StoryEcho\u8BBE\u7F6E\u4E2D\u8F93\u5165\u3002");
+    }
+    if (!request.model.trim()) {
+      throw new Error("Embedding\u6A21\u578B\u4E0D\u80FD\u4E3A\u7A7A\u3002");
+    }
+    const timeoutMs = Math.min(3e5, Math.max(1e3, Math.floor(request.timeoutMs)));
+    const controller = new AbortController();
+    const timeoutId = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const requestBody2 = JSON.stringify({
+        input: request.texts,
+        model: request.model,
+        encoding_format: "float"
+      });
+      const directHeaders = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      };
+      let response;
+      try {
+        response = await this.fetchImpl(request.endpoint, {
+          method: "POST",
+          headers: directHeaders,
+          body: requestBody2,
+          signal: controller.signal,
+          redirect: "error"
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw error;
+        }
+        const proxyHeaders = await this.requestHeaders();
+        response = await this.fetchImpl(corsProxyUrl(request.endpoint), {
+          method: "POST",
+          headers: {
+            ...proxyHeaders,
+            ...directHeaders
+          },
+          body: requestBody2,
+          signal: controller.signal
+        });
+      }
+      const responseText = await readLimitedText2(response);
+      if (!response.ok) {
+        const detail = redactSecret2(parseErrorBody(responseText), apiKey);
+        if (response.status === 404 && responseText.includes("CORS proxy is disabled")) {
+          throw new Error("SillyTavern CORS\u4EE3\u7406\u672A\u542F\u7528\u3002\u8BF7\u5728config.yaml\u8BBE\u7F6EenableCorsProxy: true\u5E76\u91CD\u542F\u9152\u9986\u3002");
+        }
+        throw new Error(`Embedding\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09${detail ? `\uFF1A${detail}` : ""}`);
+      }
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u7684\u4E0D\u662F\u6709\u6548JSON\u3002");
+      }
+      return parseVectors(data, request.texts.length);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error(`Embedding\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+      }
+      throw error;
+    } finally {
+      globalThis.clearTimeout(timeoutId);
+    }
+  }
+};
+var openAiCompatibleEmbeddingClient = new OpenAiCompatibleEmbeddingClient();
+
 // src/vector/sillytavern-vector-store.ts
+var EMBEDDING_BATCH_SIZE = 64;
 function requestBody(collectionId, config, extra = {}) {
   return {
     collectionId,
@@ -1440,17 +1679,52 @@ function requestBody(collectionId, config, extra = {}) {
     ...extra
   };
 }
+function embeddingMap(texts, vectors) {
+  if (texts.length !== vectors.length) {
+    throw new Error(`Embedding\u6570\u91CF\u4E0D\u5339\u914D\uFF1A\u6587\u672C${texts.length}\u6761\uFF0C\u5411\u91CF${vectors.length}\u6761\u3002`);
+  }
+  return Object.fromEntries(texts.map((text2, index) => [text2, vectors[index] ?? []]));
+}
 var SillyTavernVectorStore = class {
+  constructor(embeddingClient = openAiCompatibleEmbeddingClient) {
+    this.embeddingClient = embeddingClient;
+  }
+  async embedTexts(texts, config) {
+    const vectors = [];
+    for (let start = 0; start < texts.length; start += EMBEDDING_BATCH_SIZE) {
+      vectors.push(...await this.embeddingClient.embed({
+        ...config,
+        texts: texts.slice(start, start + EMBEDDING_BATCH_SIZE)
+      }));
+    }
+    return vectors;
+  }
   async insert(collectionId, items, config) {
     if (items.length === 0) {
       return;
     }
-    await this.post("/api/vector/insert", requestBody(collectionId, config, { items }));
+    const embeddings = config.precomputed ? embeddingMap(
+      items.map((item) => item.text),
+      await this.embedTexts(items.map((item) => item.text), config.precomputed)
+    ) : void 0;
+    await this.post("/api/vector/insert", requestBody(collectionId, config, {
+      items,
+      ...embeddings ? { embeddings } : {}
+    }));
   }
   async query(collectionId, searchText, topK, threshold, config) {
+    const embeddings = config.precomputed ? embeddingMap(
+      [searchText],
+      await this.embedTexts([searchText], config.precomputed)
+    ) : void 0;
     const response = await this.post(
       "/api/vector/query",
-      requestBody(collectionId, config, { searchText, topK, threshold })
+      requestBody(collectionId, config, {
+        searchText,
+        topK,
+        threshold,
+        ...embeddings ? { embeddings } : {}
+      })
     );
     const responseRecord = Array.isArray(response) ? {} : response;
     const metadata = Array.isArray(responseRecord["metadata"]) ? responseRecord["metadata"] : [];
@@ -2424,13 +2698,17 @@ function panelTemplate() {
         <b>StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
-      <div class="inline-drawer-content">
+      <div class="inline-drawer-content story-echo-panel-body">
         <label class="checkbox_label story-echo-inline">
           <input id="story-echo-enabled" type="checkbox">
           <span>\u542F\u7528\u6ED1\u52A8\u7A97\u53E3\u4E0E\u5386\u53F2\u5267\u60C5\u53EC\u56DE</span>
         </label>
 
-        <div class="story-echo-grid">
+        <div class="story-echo-grid story-echo-section">
+          <div class="story-echo-section-title story-echo-field-wide">
+            <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+            <span>\u4E0A\u4E0B\u6587\u4E0E\u53EC\u56DE</span>
+          </div>
           <label class="story-echo-field">
             <span>\u6700\u8FD1\u7A97\u53E3</span>
             <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
@@ -2481,7 +2759,7 @@ function panelTemplate() {
           </p>
         </div>
 
-        <div id="story-echo-custom-provider" class="story-echo-grid">
+        <div id="story-echo-custom-provider" class="story-echo-grid story-echo-subsection">
           <label class="story-echo-field story-echo-field-wide">
             <span>Base URL</span>
             <input id="story-echo-base-url" class="text_pole" type="url" placeholder="https://example.com/v1">
@@ -2508,6 +2786,56 @@ function panelTemplate() {
           </div>
         </div>
 
+        <div class="story-echo-grid story-echo-section">
+          <div class="story-echo-section-title story-echo-field-wide">
+            <i class="fa-solid fa-database" aria-hidden="true"></i>
+            <span>Embedding \u4E0E Vector Storage</span>
+          </div>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding\u6765\u6E90</span>
+            <select id="story-echo-vector-source" class="text_pole">
+              <option value="inherit">\u9152\u9986Vector Storage\u5F53\u524D\u5411\u91CF\u6E90\uFF08\u9ED8\u8BA4\uFF09</option>
+              <option value="openai-compatible">\u81EA\u5B9A\u4E49OpenAI\u517C\u5BB9\u63A5\u53E3\uFF08\u652F\u6301\u706B\u5C71\u65B9\u821F\uFF09</option>
+            </select>
+          </label>
+          <p class="story-echo-hint story-echo-field-wide">
+            \u81EA\u5B9A\u4E49\u6A21\u5F0F\u53EA\u66FF\u6362\u5411\u91CF\u751F\u6210\u5668\uFF1B\u5411\u91CF\u4ECD\u7531\u9152\u9986Vector Storage\u4FDD\u5B58\u5E76\u5728\u670D\u52A1\u7AEF\u68C0\u7D22\u3002
+          </p>
+        </div>
+
+        <div id="story-echo-custom-embedding" class="story-echo-grid story-echo-subsection">
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding Base URL</span>
+            <input id="story-echo-embedding-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
+          </label>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding\u6A21\u578B\u6216Endpoint ID</span>
+            <input id="story-echo-embedding-model" class="text_pole" type="text" maxlength="200" placeholder="doubao-embedding-text-\u2026 \u6216 ep-\u2026">
+          </label>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>Embedding API Key\uFF08\u4EC5\u5F53\u524D\u9875\u9762\u5185\u5B58\uFF09</span>
+            <input id="story-echo-embedding-api-key" class="text_pole" type="password" autocomplete="off" placeholder="\u5237\u65B0\u540E\u9700\u8981\u91CD\u65B0\u8F93\u5165">
+          </label>
+          <label class="checkbox_label story-echo-inline story-echo-field-wide">
+            <input id="story-echo-embedding-allow-http" type="checkbox">
+            <span>\u5141\u8BB8\u4E0D\u5B89\u5168HTTP\uFF08\u4EC5\u5EFA\u8BAE\u5C40\u57DF\u7F51\uFF09</span>
+          </label>
+          <div class="story-echo-field-wide story-echo-key-row">
+            <span id="story-echo-embedding-key-status" class="story-echo-secret-empty">Embedding Key\u672A\u52A0\u8F7D</span>
+            <div class="story-echo-key-actions">
+              <button id="story-echo-test-embedding" class="menu_button" type="button">
+                <i class="fa-solid fa-vial" aria-hidden="true"></i><span>\u6D4B\u8BD5Embedding</span>
+              </button>
+              <button id="story-echo-clear-embedding-key" class="menu_button" type="button">
+                <i class="fa-solid fa-key" aria-hidden="true"></i><span>\u6E05\u9664Key</span>
+              </button>
+            </div>
+          </div>
+          <p class="story-echo-hint story-echo-field-wide">
+            \u4F18\u5148\u76F4\u8FDE\u63A5\u53E3\uFF1B\u82E5\u76EE\u6807\u4E0D\u5141\u8BB8\u6D4F\u89C8\u5668\u8DE8\u57DF\uFF0C\u4F1A\u81EA\u52A8\u56DE\u9000\u9152\u9986CORS\u4EE3\u7406\u3002\u706B\u5C71\u65B9\u821F\u53EF\u76F4\u63A5\u4F7F\u7528\u3002
+          </p>
+        </div>
+
         <div class="story-echo-actions" role="group" aria-label="StoryEcho\u64CD\u4F5C">
           <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-plug" aria-hidden="true"></i><span>\u6D4B\u8BD5LLM\u8FDE\u63A5</span>
@@ -2527,7 +2855,7 @@ function panelTemplate() {
         </div>
 
         <p class="story-echo-hint">
-          \u81EA\u5B9A\u4E49Key\u4E0D\u4F1A\u4FDD\u5B58\u5230\u6269\u5C55\u8BBE\u7F6E\u3002Vector Storage\u9ED8\u8BA4\u590D\u7528\u9152\u9986\u5F53\u524D\u5411\u91CF\u6765\u6E90\u548C\u6A21\u578B\u3002
+          LLM\u4E0EEmbedding\u81EA\u5B9A\u4E49Key\u90FD\u4E0D\u4F1A\u4FDD\u5B58\u5230\u6269\u5C55\u8BBE\u7F6E\uFF1B\u5237\u65B0\u9875\u9762\u540E\u9700\u8981\u91CD\u65B0\u8F93\u5165\u3002
         </p>
         <div id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u2026\u2026</div>
         <details class="story-echo-diagnostics" open>
@@ -2562,10 +2890,16 @@ function numberValue(input, fallback) {
 function syncVisibility(panel, settings) {
   const custom = element(panel, "#story-echo-custom-provider");
   custom.hidden = settings.llm.provider !== "openai-compatible";
+  const customEmbedding = element(panel, "#story-echo-custom-embedding");
+  customEmbedding.hidden = settings.vector.source !== "openai-compatible";
   const keyStatus = element(panel, "#story-echo-key-status");
   keyStatus.textContent = sessionSecretVault.hasSessionKey() ? "API Key\u5DF2\u52A0\u8F7D\u5230\u5F53\u524D\u9875\u9762" : "API Key\u672A\u52A0\u8F7D";
   keyStatus.classList.toggle("story-echo-secret-loaded", sessionSecretVault.hasSessionKey());
   keyStatus.classList.toggle("story-echo-secret-empty", !sessionSecretVault.hasSessionKey());
+  const embeddingKeyStatus = element(panel, "#story-echo-embedding-key-status");
+  embeddingKeyStatus.textContent = embeddingSecretVault.hasSessionKey() ? "Embedding Key\u5DF2\u52A0\u8F7D\u5230\u5F53\u524D\u9875\u9762" : "Embedding Key\u672A\u52A0\u8F7D";
+  embeddingKeyStatus.classList.toggle("story-echo-secret-loaded", embeddingSecretVault.hasSessionKey());
+  embeddingKeyStatus.classList.toggle("story-echo-secret-empty", !embeddingSecretVault.hasSessionKey());
 }
 function syncForm(panel, settings) {
   element(panel, "#story-echo-enabled").checked = settings.enabled;
@@ -2583,6 +2917,11 @@ function syncForm(panel, settings) {
   element(panel, "#story-echo-allow-http").checked = settings.llm.custom.allowInsecureHttp;
   element(panel, "#story-echo-fallback-main").checked = settings.llm.custom.fallbackToMain;
   element(panel, "#story-echo-api-key").value = "";
+  element(panel, "#story-echo-vector-source").value = settings.vector.source;
+  element(panel, "#story-echo-embedding-base-url").value = settings.vector.custom.baseUrl;
+  element(panel, "#story-echo-embedding-model").value = settings.vector.custom.model;
+  element(panel, "#story-echo-embedding-allow-http").checked = settings.vector.custom.allowInsecureHttp;
+  element(panel, "#story-echo-embedding-api-key").value = "";
   syncVisibility(panel, settings);
 }
 function bindSettings(panel) {
@@ -2685,6 +3024,76 @@ function bindSettings(panel) {
   element(panel, "#story-echo-clear-key").addEventListener("click", () => {
     sessionSecretVault.clear();
     syncVisibility(panel, settingsRepository2.get());
+  });
+  element(panel, "#story-echo-vector-source").addEventListener("change", (event) => {
+    const settings = settingsRepository2.update((current) => {
+      current.vector.source = event.currentTarget.value;
+    });
+    syncVisibility(panel, settings);
+    void refreshStatus(panel);
+  });
+  element(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    const current = settingsRepository2.get();
+    const value = input.value.trim();
+    if (!value) {
+      settingsRepository2.update((settings) => {
+        settings.vector.custom.baseUrl = "";
+      });
+      return;
+    }
+    try {
+      const normalized2 = normalizeEmbeddingsUrl(value, {
+        allowInsecureHttp: current.vector.custom.allowInsecureHttp
+      });
+      const baseUrl = normalized2.replace(/\/embeddings\/?$/, "");
+      settingsRepository2.update((settings) => {
+        settings.vector.custom.baseUrl = baseUrl;
+      });
+      input.value = baseUrl;
+    } catch (error) {
+      input.value = current.vector.custom.baseUrl;
+      notify.error(error instanceof Error ? error.message : "Embedding Base URL\u65E0\u6548\u3002");
+    }
+  });
+  element(panel, "#story-echo-embedding-model").addEventListener("change", (event) => {
+    settingsRepository2.update((settings) => {
+      settings.vector.custom.model = event.currentTarget.value.trim();
+    });
+  });
+  element(panel, "#story-echo-embedding-api-key").addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    embeddingSecretVault.setSessionKey(input.value);
+    input.value = "";
+    syncVisibility(panel, settingsRepository2.get());
+  });
+  element(panel, "#story-echo-embedding-allow-http").addEventListener("change", (event) => {
+    settingsRepository2.update((settings) => {
+      settings.vector.custom.allowInsecureHttp = event.currentTarget.checked;
+    });
+  });
+  element(panel, "#story-echo-clear-embedding-key").addEventListener("click", () => {
+    embeddingSecretVault.clear();
+    syncVisibility(panel, settingsRepository2.get());
+  });
+  element(panel, "#story-echo-test-embedding").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const config = resolveVectorConfig(settingsRepository2.get());
+      if (!config.precomputed) {
+        throw new Error("\u8BF7\u5148\u9009\u62E9\u81EA\u5B9A\u4E49OpenAI\u517C\u5BB9Embedding\u3002");
+      }
+      const vectors = await openAiCompatibleEmbeddingClient.embed({
+        ...config.precomputed,
+        texts: ["StoryEcho\u5267\u60C5\u8BB0\u5FC6\u5411\u91CF\u8FDE\u63A5\u6D4B\u8BD5"]
+      });
+      notify.success(`Embedding\u8FDE\u63A5\u6D4B\u8BD5\u6210\u529F\uFF08${vectors[0]?.length ?? 0}\u7EF4\uFF09\u3002`);
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : "Embedding\u8FDE\u63A5\u6D4B\u8BD5\u5931\u8D25\u3002");
+    } finally {
+      button.disabled = false;
+    }
   });
   element(panel, "#story-echo-test-llm").addEventListener("click", async (event) => {
     const button = event.currentTarget;

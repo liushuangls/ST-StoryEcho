@@ -2,6 +2,7 @@ import type { StoryEchoSettings } from '../core/types';
 import { sha256 } from '../core/hash';
 import { getContext } from '../platform/sillytavern';
 import type { VectorRequestConfig } from './adapter';
+import { normalizeEmbeddingsUrl } from './url';
 
 const MODEL_SETTING_KEYS: Record<string, string> = {
   openai: 'openai_model',
@@ -34,7 +35,17 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function vectorConfigFingerprint(config: VectorRequestConfig): Promise<string> {
-  return sha256(JSON.stringify(canonicalize(config)));
+  const fingerprintConfig = config.precomputed
+    ? {
+        ...config,
+        precomputed: {
+          provider: config.precomputed.provider,
+          endpoint: config.precomputed.endpoint,
+          model: config.precomputed.model,
+        },
+      }
+    : config;
+  return sha256(JSON.stringify(canonicalize(fingerprintConfig)));
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -42,6 +53,29 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 export function resolveVectorConfig(settings: StoryEchoSettings): VectorRequestConfig {
+  if (settings.vector.source === 'openai-compatible') {
+    const endpoint = normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
+      allowInsecureHttp: settings.vector.custom.allowInsecureHttp,
+    });
+    const model = settings.vector.custom.model.trim();
+    if (!model) {
+      throw new Error('自定义Embedding模型不能为空。');
+    }
+    if (model.length > 200) {
+      throw new Error('自定义Embedding模型名过长。');
+    }
+    return {
+      source: 'webllm',
+      model: `storyecho-openai-compatible--${model}`,
+      precomputed: {
+        provider: 'openai-compatible',
+        endpoint,
+        model,
+        timeoutMs: settings.vector.custom.timeoutMs,
+      },
+    };
+  }
+
   const vectorSettings = asRecord(getContext().extensionSettings['vectors']);
   const inheritedSource =
     typeof vectorSettings['source'] === 'string' ? vectorSettings['source'] : 'transformers';
