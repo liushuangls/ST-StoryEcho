@@ -329,24 +329,21 @@ https://example.com/v1/chat/completions
 
 ## 8. 查询与排序
 
-`QueryBuilder` 从当前输入和最近场景生成检索查询文本，保留原始实体名和代词解析结果。
+`QueryBuilder` 生成两个彼此独立的查询：完整的当前用户输入，以及上一条 AI 回复末尾最多 500 字的场景补充。普通输入的向量权重为 `1.0 / 0.35`；“继续”“然后呢”“我跟上去”等依赖上下文的弱语义输入改为 `0.25 / 1.0`，避免长篇 AI 叙事淹没用户意图，又能处理仅凭用户短句无法检索的情况。
 
-`Retriever` 调用 Vector Storage 获取比最终数量更多的候选，例如最终需要 4条时先取 12条。
+`Retriever` 并行执行用户意图和场景补充两个 Vector Storage查询。每个通道获取比最终数量更多的候选，例如最终需要 4条时每路先取 12条；任一路失败不影响另一路和实体关键词降级召回。
 
 `Ranker` 在客户端执行轻量重排：
 
 ```text
-vectorRankScore
-+ exactEntityMatch
-+ activeThreadMatch
+intentVectorRankScore * intentWeight
++ sceneVectorRankScore * sceneWeight
++ weightedExactEntityMatch
 + importance
-+ sceneContinuity
 - resolvedPenalty
-- supersededPenalty
-- excludedPenalty
 ```
 
-Vector Storage当前公开响应不保证提供可直接使用的原始相似度分数，因此第一版将返回顺序转换为倒数排名分数。后续若服务端接口开放 score，再替换该部分。
+Vector Storage当前公开响应不保证提供可直接使用的原始相似度分数，因此当前将两路返回顺序分别转换为倒数排名分数后加权融合。后续若服务端接口开放 score，再替换该部分。
 
 ## 9. Token预算
 

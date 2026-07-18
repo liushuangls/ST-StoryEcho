@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StoryMemory } from '../src/core/types';
+import { buildRetrievalQueryPlan } from '../src/retrieval/query-builder';
 import { rankMemories } from '../src/retrieval/ranker';
 
 function memory(overrides: Partial<StoryMemory>): StoryMemory {
@@ -35,12 +36,44 @@ function memory(overrides: Partial<StoryMemory>): StoryMemory {
 
 describe('rankMemories', () => {
   it('can recall a Chinese entity match when vector search is unavailable', () => {
-    const result = rankMemories('我把钟楼钥匙交给了她', [memory({})], []);
+    const plan = buildRetrievalQueryPlan([{ is_user: true, mes: '我把钟楼钥匙交给了她' }], 0);
+    const result = rankMemories(plan, [memory({})], { intent: [], scene: [] });
     expect(result.map((item) => item.id)).toEqual(['mem-1']);
   });
 
   it('does not include an unrelated unpinned item without a vector result', () => {
-    const result = rankMemories('我们去港口', [memory({})], []);
+    const plan = buildRetrievalQueryPlan([{ is_user: true, mes: '我们去港口' }], 0);
+    const result = rankMemories(plan, [memory({})], { intent: [], scene: [] });
     expect(result).toEqual([]);
+  });
+
+  it('gives the user-intent vector channel more weight for a concrete input', () => {
+    const intentMemory = memory({ id: 'intent', vectorHash: 1, entities: [], aliases: [] });
+    const sceneMemory = memory({ id: 'scene', vectorHash: 2, entities: [], aliases: [] });
+    const plan = buildRetrievalQueryPlan([
+      { is_user: false, mes: '场景里提到了港口。' },
+      { is_user: true, mes: '我要询问银色钥匙。' },
+    ], 1);
+    const result = rankMemories(plan, [sceneMemory, intentMemory], {
+      intent: [{ hash: 1, text: '', index: 1, rank: 0 }],
+      scene: [{ hash: 2, text: '', index: 1, rank: 0 }],
+    });
+
+    expect(result.map((item) => item.id)).toEqual(['intent', 'scene']);
+  });
+
+  it('gives the scene vector channel more weight for a weak input', () => {
+    const intentMemory = memory({ id: 'intent', vectorHash: 1, entities: [], aliases: [] });
+    const sceneMemory = memory({ id: 'scene', vectorHash: 2, entities: [], aliases: [] });
+    const plan = buildRetrievalQueryPlan([
+      { is_user: false, mes: '林雨把银色钥匙放在桌上。' },
+      { is_user: true, mes: '继续' },
+    ], 1);
+    const result = rankMemories(plan, [intentMemory, sceneMemory], {
+      intent: [{ hash: 1, text: '', index: 1, rank: 0 }],
+      scene: [{ hash: 2, text: '', index: 1, rank: 0 }],
+    });
+
+    expect(result.map((item) => item.id)).toEqual(['scene', 'intent']);
   });
 });

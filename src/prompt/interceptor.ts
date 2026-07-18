@@ -8,8 +8,8 @@ import { extractionService } from '../extraction/service';
 import { isInternalGeneration } from '../llm/internal-generation';
 import { MemoryRepository } from '../memory/repository';
 import { getContext } from '../platform/sillytavern';
-import { buildRetrievalQuery } from '../retrieval/query-builder';
-import { rankMemories } from '../retrieval/ranker';
+import { buildRetrievalQueryPlan } from '../retrieval/query-builder';
+import { rankMemories, type RetrievalVectorResults } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig } from '../vector/config';
 import type { VectorQueryResult } from '../vector/adapter';
@@ -163,7 +163,11 @@ export async function storyEchoGenerateInterceptor(
       return;
     }
 
-    const query = buildRetrievalQuery(chat, window.currentInputIndex);
+    const queryPlan = buildRetrievalQueryPlan(chat, window.currentInputIndex);
+    const query = [
+      `用户意图（权重 ${queryPlan.intentWeight}${queryPlan.weakIntent ? '，弱语义' : ''}）：${queryPlan.intentQuery || '（空）'}`,
+      `场景补充（权重 ${queryPlan.sceneWeight}）：${queryPlan.sceneQuery || '（空）'}`,
+    ].join('\n');
     const eligibleMemories = state.memories.filter(
       (memory) =>
         !memory.excluded &&
@@ -172,27 +176,50 @@ export async function storyEchoGenerateInterceptor(
         memory.source.endMessageId < sourceWindow.retainedStartIndex,
     );
 
-    let vectorResults: VectorQueryResult[] = [];
-    if (eligibleMemories.length > 0 && query.trim()) {
+    const vectorResults: RetrievalVectorResults = { intent: [], scene: [] };
+    if (
+      eligibleMemories.length > 0 &&
+      settings.recall.maxEvents > 0 &&
+      (queryPlan.intentQuery || queryPlan.sceneQuery)
+    ) {
       const queryStartedAt = performance.now();
-      state.metrics.vectorQueries += 1;
-      try {
-        vectorResults = await vectorStore.query(
-          state.vectorCollectionId,
-          query,
-          Math.max(settings.recall.maxEvents * 3, settings.recall.maxEvents),
-          settings.recall.scoreThreshold,
-          resolveVectorConfig(settings),
-        );
-      } catch (error) {
-        state.metrics.vectorQueryFailures += 1;
-        warnings.push('Vector Storage检索失败，本次只使用固定记忆和关键词匹配。');
-        logger.warn('Vector Storage检索失败。', error);
-      }
+      const topK = Math.max(settings.recall.maxEvents * 3, settings.recall.maxEvents);
+      const vectorConfig = resolveVectorConfig(settings);
+      const queryVectorChannel = async (
+        channel: '用户意图' | '场景补充',
+        searchText: string,
+      ): Promise<VectorQueryResult[]> => {
+        if (!searchText) {
+          return [];
+        }
+        state.metrics.vectorQueries += 1;
+        try {
+          return await vectorStore.query(
+            state.vectorCollectionId,
+            searchText,
+            topK,
+            settings.recall.scoreThreshold,
+            vectorConfig,
+          );
+        } catch (error) {
+          state.metrics.vectorQueryFailures += 1;
+          warnings.push(`${channel}向量检索失败，该通道将使用实体关键词降级。`);
+          logger.warn(`${channel}向量检索失败。`, error);
+          return [];
+        }
+      };
+      [vectorResults.intent, vectorResults.scene] = await Promise.all([
+        queryVectorChannel('用户意图', queryPlan.intentQuery),
+        queryVectorChannel('场景补充', queryPlan.sceneQuery),
+      ]);
       state.metrics.totalRetrievalMs += Math.round(performance.now() - queryStartedAt);
     }
 
-    const ranked = rankMemories(query, eligibleMemories, vectorResults);
+    const ranked = rankMemories(queryPlan, eligibleMemories, vectorResults);
+    const uniqueVectorResultCount = new Set([
+      ...vectorResults.intent.map((result) => result.hash),
+      ...vectorResults.scene.map((result) => result.hash),
+    ]).size;
     const selected = selectWithinBudget(
       ranked,
       settings.recall.maxEvents,
@@ -234,7 +261,7 @@ export async function storyEchoGenerateInterceptor(
       ranked,
       selected,
       warnings,
-      vectorResults.length,
+      uniqueVectorResultCount,
       Math.round(performance.now() - startedAt),
       estimatedRemovedTokens,
       estimatedInjectedTokens,
@@ -247,7 +274,12 @@ export async function storyEchoGenerateInterceptor(
     state.metrics.lastGenerationAt = new Date().toISOString();
     recordDebugTrace(state, settings.debug, 'interceptor', '上下文裁剪与剧情召回完成。', {
       removedMessages: window.removableIndices.length,
-      vectorResults: vectorResults.length,
+      intentVectorResults: vectorResults.intent.length,
+      sceneVectorResults: vectorResults.scene.length,
+      uniqueVectorResults: uniqueVectorResultCount,
+      weakIntent: queryPlan.weakIntent,
+      intentWeight: queryPlan.intentWeight,
+      sceneWeight: queryPlan.sceneWeight,
       rankedMemories: ranked.length,
       injectedMemories: selected.length,
       estimatedRemovedTokens,

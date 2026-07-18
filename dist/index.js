@@ -37,7 +37,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 1;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.2.0";
+var EXTENSION_VERSION = "0.2.1";
 
 // src/debug/events.ts
 var DIAGNOSTICS_UPDATED_EVENT = "storyecho:diagnostics-updated";
@@ -1777,25 +1777,76 @@ var ExtractionService = class {
 var extractionService = new ExtractionService();
 
 // src/retrieval/query-builder.ts
-function buildRetrievalQuery(messages, currentInputIndex, recentMessageCount = 3) {
-  const start = Math.max(0, currentInputIndex - recentMessageCount);
-  return messages.slice(start, currentInputIndex + 1).filter((message) => !message.is_system && message.mes.trim().length > 0).map((message) => `${message.name || (message.is_user ? "\u7528\u6237" : "\u89D2\u8272")}\uFF1A${message.mes.trim()}`).join("\n");
+var DEFAULT_SCENE_TAIL_CHARACTERS = 500;
+var MAX_INTENT_CHARACTERS = 2e3;
+var WEAK_INTENT_PATTERNS = [
+  /^(继续|继续吧|继续下去|接着|接着说|然后|然后呢|往下|下一步|后续)$/u,
+  /^(嗯+|哦+|啊+|好|好的|好吧|行|可以|没问题|知道了|明白了)$/u,
+  /^(我)?(跟上去|跟过去|追上去|走过去|进去|过去|上前|点头|摇头|答应|拒绝|看看|听着|等着)$/u,
+  /^(goon|continue|next|okay|ok)$/iu
+];
+function normalizedIntent(value) {
+  return value.trim().toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+function isWeakRetrievalIntent(value) {
+  const normalized2 = normalizedIntent(value);
+  return normalized2.length === 0 || WEAK_INTENT_PATTERNS.some((pattern) => pattern.test(normalized2));
+}
+function previousAssistantMessage(messages, currentInputIndex) {
+  for (let index = currentInputIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message && !message.is_system && !message.is_user && message.mes.trim()) {
+      return message;
+    }
+  }
+  return void 0;
+}
+function buildRetrievalQueryPlan(messages, currentInputIndex, sceneTailCharacters = DEFAULT_SCENE_TAIL_CHARACTERS) {
+  const current = messages[currentInputIndex];
+  const intentQuery = current?.is_user && !current.is_system ? current.mes.trim().slice(0, MAX_INTENT_CHARACTERS) : "";
+  const sceneTailLimit = Math.max(0, Math.floor(sceneTailCharacters));
+  const assistant = previousAssistantMessage(messages, currentInputIndex);
+  const scene = assistant?.mes.trim() ?? "";
+  const sceneQuery = sceneTailLimit > 0 ? scene.slice(-sceneTailLimit) : "";
+  const weakIntent = isWeakRetrievalIntent(intentQuery);
+  return {
+    intentQuery,
+    sceneQuery,
+    weakIntent,
+    intentWeight: weakIntent ? 0.25 : 1,
+    sceneWeight: weakIntent ? 1 : 0.35
+  };
 }
 
 // src/retrieval/ranker.ts
-function rankMemories(query, memories, vectorResults) {
-  const rankByHash = new Map(vectorResults.map((result) => [result.hash, result.rank]));
+function exactEntityMatches(query, memory) {
   const normalizedQuery = query.toLocaleLowerCase();
+  const entityTerms = [.../* @__PURE__ */ new Set([...memory.entities, ...memory.aliases])].map((term) => term.trim().toLocaleLowerCase()).filter((term) => term.length >= 2);
+  return entityTerms.reduce(
+    (count, term) => count + (normalizedQuery.includes(term) ? 1 : 0),
+    0
+  );
+}
+function reciprocalRankScore(rank) {
+  return rank === void 0 ? 0 : 10 / (rank + 1);
+}
+function rankMemories(queryPlan, memories, vectorResults) {
+  const intentRankByHash = new Map(vectorResults.intent.map((result) => [result.hash, result.rank]));
+  const sceneRankByHash = new Map(vectorResults.scene.map((result) => [result.hash, result.rank]));
   return memories.map((memory) => {
-    const rank = rankByHash.get(memory.vectorHash);
-    const entityTerms = [.../* @__PURE__ */ new Set([...memory.entities, ...memory.aliases])].map((term) => term.trim().toLocaleLowerCase()).filter((term) => term.length >= 2);
-    const exactMatches = entityTerms.reduce(
-      (count, term) => count + (normalizedQuery.includes(term) ? 1 : 0),
-      0
-    );
-    const vectorRankScore = rank === void 0 ? 0 : 10 / (rank + 1);
-    const score = (memory.pinned ? 100 : 0) + vectorRankScore + exactMatches * 0.35 + memory.importance * 2 + (memory.status === "resolved" ? -2 : 0);
-    return { memory, score, hasVectorResult: rank !== void 0, exactMatches };
+    const intentRank = intentRankByHash.get(memory.vectorHash);
+    const sceneRank = sceneRankByHash.get(memory.vectorHash);
+    const intentMatches = exactEntityMatches(queryPlan.intentQuery, memory);
+    const sceneMatches = exactEntityMatches(queryPlan.sceneQuery, memory);
+    const vectorRankScore = reciprocalRankScore(intentRank) * queryPlan.intentWeight + reciprocalRankScore(sceneRank) * queryPlan.sceneWeight;
+    const exactMatchScore = intentMatches * 0.7 * queryPlan.intentWeight + sceneMatches * 0.35 * queryPlan.sceneWeight;
+    const score = (memory.pinned ? 100 : 0) + vectorRankScore + exactMatchScore + memory.importance * 2 + (memory.status === "resolved" ? -2 : 0);
+    return {
+      memory,
+      score,
+      hasVectorResult: intentRank !== void 0 || sceneRank !== void 0,
+      exactMatches: intentMatches + sceneMatches
+    };
   }).filter(({ memory, hasVectorResult, exactMatches }) => memory.pinned || hasVectorResult || exactMatches > 0).sort((left, right) => right.score - left.score).map(({ memory }) => memory);
 }
 
@@ -1985,30 +2036,50 @@ async function storyEchoGenerateInterceptor(chat, _contextSize, _abort, type) {
     if (!state) {
       return;
     }
-    const query = buildRetrievalQuery(chat, window.currentInputIndex);
+    const queryPlan = buildRetrievalQueryPlan(chat, window.currentInputIndex);
+    const query = [
+      `\u7528\u6237\u610F\u56FE\uFF08\u6743\u91CD ${queryPlan.intentWeight}${queryPlan.weakIntent ? "\uFF0C\u5F31\u8BED\u4E49" : ""}\uFF09\uFF1A${queryPlan.intentQuery || "\uFF08\u7A7A\uFF09"}`,
+      `\u573A\u666F\u8865\u5145\uFF08\u6743\u91CD ${queryPlan.sceneWeight}\uFF09\uFF1A${queryPlan.sceneQuery || "\uFF08\u7A7A\uFF09"}`
+    ].join("\n");
     const eligibleMemories = state.memories.filter(
       (memory) => !memory.excluded && memory.status !== "invalid" && memory.status !== "superseded" && memory.source.endMessageId < sourceWindow.retainedStartIndex
     );
-    let vectorResults = [];
-    if (eligibleMemories.length > 0 && query.trim()) {
+    const vectorResults = { intent: [], scene: [] };
+    if (eligibleMemories.length > 0 && settings.recall.maxEvents > 0 && (queryPlan.intentQuery || queryPlan.sceneQuery)) {
       const queryStartedAt = performance.now();
-      state.metrics.vectorQueries += 1;
-      try {
-        vectorResults = await vectorStore.query(
-          state.vectorCollectionId,
-          query,
-          Math.max(settings.recall.maxEvents * 3, settings.recall.maxEvents),
-          settings.recall.scoreThreshold,
-          resolveVectorConfig(settings)
-        );
-      } catch (error) {
-        state.metrics.vectorQueryFailures += 1;
-        warnings.push("Vector Storage\u68C0\u7D22\u5931\u8D25\uFF0C\u672C\u6B21\u53EA\u4F7F\u7528\u56FA\u5B9A\u8BB0\u5FC6\u548C\u5173\u952E\u8BCD\u5339\u914D\u3002");
-        logger.warn("Vector Storage\u68C0\u7D22\u5931\u8D25\u3002", error);
-      }
+      const topK = Math.max(settings.recall.maxEvents * 3, settings.recall.maxEvents);
+      const vectorConfig = resolveVectorConfig(settings);
+      const queryVectorChannel = async (channel, searchText) => {
+        if (!searchText) {
+          return [];
+        }
+        state.metrics.vectorQueries += 1;
+        try {
+          return await vectorStore.query(
+            state.vectorCollectionId,
+            searchText,
+            topK,
+            settings.recall.scoreThreshold,
+            vectorConfig
+          );
+        } catch (error) {
+          state.metrics.vectorQueryFailures += 1;
+          warnings.push(`${channel}\u5411\u91CF\u68C0\u7D22\u5931\u8D25\uFF0C\u8BE5\u901A\u9053\u5C06\u4F7F\u7528\u5B9E\u4F53\u5173\u952E\u8BCD\u964D\u7EA7\u3002`);
+          logger.warn(`${channel}\u5411\u91CF\u68C0\u7D22\u5931\u8D25\u3002`, error);
+          return [];
+        }
+      };
+      [vectorResults.intent, vectorResults.scene] = await Promise.all([
+        queryVectorChannel("\u7528\u6237\u610F\u56FE", queryPlan.intentQuery),
+        queryVectorChannel("\u573A\u666F\u8865\u5145", queryPlan.sceneQuery)
+      ]);
       state.metrics.totalRetrievalMs += Math.round(performance.now() - queryStartedAt);
     }
-    const ranked = rankMemories(query, eligibleMemories, vectorResults);
+    const ranked = rankMemories(queryPlan, eligibleMemories, vectorResults);
+    const uniqueVectorResultCount = (/* @__PURE__ */ new Set([
+      ...vectorResults.intent.map((result) => result.hash),
+      ...vectorResults.scene.map((result) => result.hash)
+    ])).size;
     const selected = selectWithinBudget(
       ranked,
       settings.recall.maxEvents,
@@ -2047,7 +2118,7 @@ async function storyEchoGenerateInterceptor(chat, _contextSize, _abort, type) {
       ranked,
       selected,
       warnings,
-      vectorResults.length,
+      uniqueVectorResultCount,
       Math.round(performance.now() - startedAt),
       estimatedRemovedTokens,
       estimatedInjectedTokens
@@ -2060,7 +2131,12 @@ async function storyEchoGenerateInterceptor(chat, _contextSize, _abort, type) {
     state.metrics.lastGenerationAt = (/* @__PURE__ */ new Date()).toISOString();
     recordDebugTrace(state, settings.debug, "interceptor", "\u4E0A\u4E0B\u6587\u88C1\u526A\u4E0E\u5267\u60C5\u53EC\u56DE\u5B8C\u6210\u3002", {
       removedMessages: window.removableIndices.length,
-      vectorResults: vectorResults.length,
+      intentVectorResults: vectorResults.intent.length,
+      sceneVectorResults: vectorResults.scene.length,
+      uniqueVectorResults: uniqueVectorResultCount,
+      weakIntent: queryPlan.weakIntent,
+      intentWeight: queryPlan.intentWeight,
+      sceneWeight: queryPlan.sceneWeight,
       rankedMemories: ranked.length,
       injectedMemories: selected.length,
       estimatedRemovedTokens,
