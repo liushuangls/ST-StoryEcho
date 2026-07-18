@@ -5,6 +5,8 @@
 ```text
 SillyTavern聊天
   |
+  +--> StageSummaryService --> 滚动阶段总结
+  |
   +--> ChunkPlanner ---------> 待处理历史块
   |                               |
   |                               v
@@ -60,6 +62,9 @@ src/
     extractor.ts
     reconciler.ts
     invalidation.ts
+  summary/
+    service.ts
+    prompts.ts
   vector/
     adapter.ts
     openai-compatible-embedding.ts
@@ -155,6 +160,12 @@ interface StoryEchoChatState {
   indexedThroughMessageId: number;
   indexedThroughHash: string;
   indexedPrefixHash: string;
+  stageSummary: {
+    text: string;
+    coveredThroughMessageId: number;
+    coveredThroughHash: string;
+    updatedAt?: string;
+  };
   memories: StoryMemory[];
   pendingRanges: Array<{ startMessageId: number; endMessageId: number }>;
   pendingVectorHashes: number[];
@@ -166,12 +177,14 @@ interface StoryEchoChatState {
 }
 ```
 
+`stageSummary` 是单份滚动摘要，不是无限增长的摘要数组。覆盖游标只有在“上一版总结 + 新分块”成功生成、源消息哈希复核通过并保存后才前进。
+
 ## 4. 权威数据与缓存
 
 数据优先级：
 
 1. 原始聊天消息是事实来源。
-2. `chatMetadata.story_echo` 是剧情记忆的权威存储。
+2. `chatMetadata.story_echo` 是阶段总结与剧情记忆的权威存储。
 3. Vector Storage 是可重建索引。
 4. 运行时检索结果仅存在内存。
 
@@ -302,6 +315,20 @@ https://example.com/v1/chat/completions
 
 统一转换为SillyTavern Custom后端所需的唯一Base URL，禁止重复拼接 `/chat/completions`。默认拒绝非 HTTP(S)协议。是否允许局域网 HTTP由用户明确开启。
 
+### 6.4 滚动阶段总结
+
+`StageSummaryService` 顺序读取尚未覆盖、且已经离开最小原文窗口的连续消息。默认累计 10 个完整“用户 + AI”轮次后，向当前 LLM Provider发送：
+
+```text
+上一版阶段总结（首次为空）
++ 下一批原始聊天
+-> 一份替换旧版本的新阶段总结
+```
+
+输出只保留长期时间线、人物关系、目标、关键变化、未解决问题和当前局势，不承担精确实体检索。服务保存新文本前必须再次计算本批原文哈希；哈希不一致、输出为空或请求失败时不更新文本和覆盖游标。自动路径每次正常生成最多处理一批；主动处理历史允许持续追赶并处理不足整批的尾段。
+
+实际可裁剪边界是以下三项的最小安全覆盖范围：阶段总结游标、剧情抽取游标、配置的最小原文窗口。任何一个后台管线落后，都扩大本次原文窗口而不是丢失未处理历史。
+
 ## 7. 抽取管线
 
 ### 7.1 场景切块
@@ -393,11 +420,28 @@ Vector Storage当前公开响应不保证提供可直接使用的原始相似度
 
 处理原则：
 
-1. 根据当前聊天源消息身份确定保留边界；
-2. 仅删除匹配到的窗口外聊天消息；
-3. 保留系统提示、角色卡、世界书和未知来源注入；
-4. 在第一条保留聊天消息前插入一个 StoryEcho系统块；
-5. 任何识别歧义都应放弃裁剪并记录警告。
+1. 根据当前聊天源消息身份确定“至少 N 轮”的最小原文边界；
+2. 实际原文边界取阶段总结覆盖游标、剧情索引游标和最小原文边界三者中最保守的位置；
+3. 仅删除同时已被阶段总结与剧情索引覆盖、并位于实际边界之外的聊天消息；
+4. 保留角色卡、世界书、已有系统提示和未知来源注入；
+5. 在第一条保留原文之前插入阶段总结 narrator/system 块；
+6. 在当前用户消息之前插入本轮动态召回 narrator/system 块，当前用户消息内容和对象均保持不变；
+7. 保证发送数组最后一条仍为当前 User；
+8. 任何识别歧义都应放弃裁剪并记录警告。
+
+最终时序：
+
+```text
+静态系统区
+<story_echo_summary>滚动阶段总结</story_echo_summary>
+近期原文（所有未总结原文，且至少 N 个完整轮次）
+<story_echo_recall>本轮动态召回</story_echo_recall>  # 请求级 system
+当前用户原始输入                            # User，必须保持最后
+```
+
+SillyTavern 在 `generate_interceptor` 之前已经从持久聊天构造了请求级 `coreChat`。StoryEcho只修改这个临时数组；新增消息使用 SillyTavern narrator 类型以获得真正的 system 语义，不能只设置 `is_system: true`，因为部分 Chat Completion 转换路径会把后者按 assistant 处理。不得调用保存聊天接口。
+
+提示中的冲突规则为“当前用户输入 > 近期原文 > 动态召回 > 阶段总结”。召回块必须声明内容是背景数据而非指令，近期原文出现更新时不得用较老记忆覆盖。
 
 记忆是否位于窗口外按全部 `sourceHistory` 判断，而不只看最近一次合并的 `source`。只要复合记忆中仍有一个有效事实来源已经离开窗口，该记忆仍可召回。注入文本由结构化的事件、场景、原因、当前结果、状态变化、缺失实体和知情范围统一渲染，避免模型生成摘要中的“我/你”在脱离原场景后产生歧义。
 
@@ -410,6 +454,7 @@ Vector Storage当前公开响应不保证提供可直接使用的原始相似度
 - 哈希一致：继续增量抽取，不做额外写入；
 - 已索引游标超过当前聊天末尾，或前缀哈希不一致：判定已发生编辑、删楼、Swipe变更或历史截断；
 - 立即 `purge` 当前向量集合，清空派生记忆、索引游标和待同步队列；
+- 同时清空阶段总结文本与覆盖游标；
 - 从仍然存在的原始聊天重新按分块抽取；重建尚未覆盖裁剪边界前保留完整聊天，不冒险注入旧事实。
 
 这是保守的全派生索引重建，而不是只猜测受影响记忆。编辑和删楼属于低频操作，优先保证被删除的事实、旧分支事实和旧向量不会泄漏；原始聊天仍是唯一事实来源。
@@ -456,7 +501,7 @@ Vector Storage当前公开响应不保证提供可直接使用的原始相似度
 
 ## 15. 长聊天性能
 
-连续聊天不会把完整历史反复发送给后台模型：抽取只处理尚未索引的新分块，默认每 5轮一次；检索查询改写只读取最新用户输入和最近 3条非系统消息；正常角色生成只保留配置的近期窗口和有限条召回记忆。因此 LLM 与 Embedding 总成本随新增剧情线性增长，而单次生成的 StoryEcho模型输入保持有界。首次为已有超长聊天回填索引仍会按分块产生一次性线性成本。
+连续聊天不会把完整历史反复发送给后台模型：阶段总结只读取上一份有界总结和下一批尚未覆盖的原文，默认每 10轮更新一次；抽取只处理尚未索引的新分块，默认每 5轮一次；检索查询改写只读取最新用户输入和最近 3条非系统消息；正常角色生成只保留未总结尾段、至少 N轮近期原文、一个有界总结和有限条召回记忆。因此 LLM 与 Embedding 总成本随新增剧情线性增长，单次生成输入保持有界；自动总结等待满批时，原文最多临时多保留一个总结批次。首次为已有超长聊天回填仍会产生一次性线性成本。
 
 本地路径的主要复杂度如下：
 

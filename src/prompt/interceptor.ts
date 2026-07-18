@@ -1,6 +1,11 @@
 import { DISPLAY_NAME } from '../core/constants';
 import { logger } from '../core/logger';
-import type { InspectionRecord, StoryMemory, TavernChatMessage } from '../core/types';
+import type {
+  InspectionRecord,
+  StoryEchoChatState,
+  StoryMemory,
+  TavernChatMessage,
+} from '../core/types';
 import { emitDiagnosticsUpdated } from '../debug/events';
 import { recordDebugTrace } from '../debug/metrics';
 import { planNextChunk } from '../extraction/chunk-planner';
@@ -16,17 +21,24 @@ import { hasSourceOutsideWindow } from '../retrieval/eligibility';
 import { queryRewriteService } from '../retrieval/query-rewriter';
 import { rankMemories, type RetrievalVectorResults } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
-import { resolveVectorConfig } from '../vector/config';
+import { stageSummaryService } from '../summary/service';
 import type { VectorQueryResult } from '../vector/adapter';
+import { resolveVectorConfig } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import {
   estimateMessageTokens,
   estimateMemoryTokens,
   estimateTokens,
   renderMemoryBlock,
+  renderStageSummaryBlock,
   selectWithinBudget,
 } from './render';
-import { removeMessagesAtIndices, selectRecentWindow } from './window';
+import {
+  alignRetainedStartToTurn,
+  countNonSystemMessages,
+  removeMessagesAtIndices,
+  selectRecentWindow,
+} from './window';
 
 const settingsRepository = new SettingsRepository();
 const memoryRepository = new MemoryRepository();
@@ -52,6 +64,8 @@ function createInspection(
   durationMs = 0,
   estimatedRemovedTokens = 0,
   estimatedInjectedTokens = 0,
+  estimatedSummaryTokens = 0,
+  summaryCoveredThroughMessageId = -1,
 ): InspectionRecord {
   return {
     createdAt: new Date().toISOString(),
@@ -66,9 +80,49 @@ function createInspection(
     estimatedRemovedTokens,
     estimatedInjectedTokens,
     estimatedNetSavedTokens: Math.max(0, estimatedRemovedTokens - estimatedInjectedTokens),
+    estimatedSummaryTokens,
+    summaryCoveredThroughMessageId,
     vectorResultCount,
     durationMs,
     warnings,
+  };
+}
+
+function safeSourceRetainedStart(
+  sourceChat: TavernChatMessage[],
+  minimumRetainedStart: number,
+  state: StoryEchoChatState,
+  summaryEnabled: boolean,
+  unit: 'turns' | 'messages',
+): number {
+  const extractionBoundary = Math.max(0, state.indexedThroughMessageId + 1);
+  const summaryBoundary = summaryEnabled && state.stageSummary.text.trim()
+    ? Math.max(0, state.stageSummary.coveredThroughMessageId + 1)
+    : summaryEnabled ? 0 : minimumRetainedStart;
+  const proposed = Math.min(minimumRetainedStart, extractionBoundary, summaryBoundary);
+  return unit === 'turns'
+    ? alignRetainedStartToTurn(sourceChat, proposed)
+    : proposed;
+}
+
+function requestSystemMessage(
+  mes: string,
+  kind: 'summary' | 'recall',
+): TavernChatMessage {
+  return {
+    is_user: false,
+    is_system: true,
+    name: DISPLAY_NAME,
+    send_date: Date.now(),
+    mes,
+    // SillyTavern's Chat Completion conversion recognizes narrator as a true
+    // request-level system message. is_system alone can be mapped as assistant
+    // after generate_interceptor has already received coreChat.
+    extra: {
+      type: 'narrator',
+      story_echo_injection: true,
+      story_echo_injection_kind: kind,
+    },
   };
 }
 
@@ -85,14 +139,13 @@ export async function storyEchoGenerateInterceptor(
 
   try {
     const startedAt = performance.now();
-    const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
     const sourceChat = getContext().chat;
-    const sourceWindow = selectRecentWindow(
+    const minimumSourceWindow = selectRecentWindow(
       sourceChat,
       settings.recentWindow.size,
       settings.recentWindow.unit,
     );
-    if (!window || !sourceWindow || window.removableIndices.length === 0) {
+    if (!minimumSourceWindow || minimumSourceWindow.removableIndices.length === 0) {
       return;
     }
 
@@ -106,42 +159,83 @@ export async function storyEchoGenerateInterceptor(
     }
 
     const warnings: string[] = [];
-    const requiredIndexedThrough = sourceWindow.retainedStartIndex - 1;
-    if (state.indexedThroughMessageId < requiredIndexedThrough) {
-      if (settings.extraction.automatic) {
-        try {
-          const chunk = planNextChunk(
-            sourceChat,
-            state.indexedThroughMessageId + 1,
-            requiredIndexedThrough,
-            settings.extraction.targetTurnsPerChunk,
-          );
-          if (chunk) {
-            state = await extractionService.processThrough(chunk.endMessageId);
-          }
-        } catch (error) {
-          warnings.push('生成前补充剧情索引失败。');
-          logger.warn('生成前补充剧情索引失败。', error);
+    const desiredCoveredThrough = minimumSourceWindow.retainedStartIndex - 1;
+    if (state.indexedThroughMessageId < desiredCoveredThrough && settings.extraction.automatic) {
+      try {
+        const chunk = planNextChunk(
+          sourceChat,
+          state.indexedThroughMessageId + 1,
+          desiredCoveredThrough,
+          settings.extraction.targetTurnsPerChunk,
+        );
+        if (chunk) {
+          state = await extractionService.processThrough(chunk.endMessageId);
         }
+      } catch (error) {
+        warnings.push('生成前补充剧情索引失败，未覆盖原文将继续保留。');
+        logger.warn('生成前补充剧情索引失败。', error);
+        state = memoryRepository.getExisting() ?? state;
       }
+    }
+    if (!state) {
+      return;
+    }
 
-      if (!state) {
-        return;
+    if (
+      settings.summary.enabled &&
+      settings.summary.automatic &&
+      state.stageSummary.coveredThroughMessageId < desiredCoveredThrough
+    ) {
+      try {
+        const result = await stageSummaryService.processNextThrough(desiredCoveredThrough);
+        state = result.state ?? state;
+      } catch (error) {
+        warnings.push('生成前更新阶段总结失败，未总结原文将继续保留。');
+        logger.warn('生成前更新阶段总结失败。', error);
+        state = memoryRepository.getExisting() ?? state;
       }
     }
 
-    // Automatic extraction reloads the chat state from metadata. Count the
-    // attempt only after that hand-off so the increment cannot be overwritten.
+    // Automatic background work reloads chat metadata. Count the generation
+    // only after both hand-offs so the increment cannot be overwritten.
     state.metrics.generationAttempts += 1;
 
-    if (state.indexedThroughMessageId < requiredIndexedThrough) {
+    if (state.indexedThroughMessageId < desiredCoveredThrough) {
       warnings.push(
-        `剧情索引只覆盖到消息 ${state.indexedThroughMessageId}，尚不能安全裁剪到 ${requiredIndexedThrough}。`,
+        `剧情索引只覆盖到消息 ${state.indexedThroughMessageId}，索引后的原文暂不裁剪。`,
       );
+    }
+    if (
+      settings.summary.enabled &&
+      state.stageSummary.coveredThroughMessageId < desiredCoveredThrough
+    ) {
+      warnings.push(
+        `阶段总结只覆盖到消息 ${state.stageSummary.coveredThroughMessageId}，未总结原文暂不裁剪。`,
+      );
+    }
+
+    const retainedSourceStart = safeSourceRetainedStart(
+      sourceChat,
+      minimumSourceWindow.retainedStartIndex,
+      state,
+      settings.summary.enabled,
+      settings.recentWindow.unit,
+    );
+    const retainedHistoricalMessageCount = countNonSystemMessages(
+      sourceChat,
+      retainedSourceStart,
+      minimumSourceWindow.currentInputIndex,
+    );
+    const window = selectRecentWindow(chat, retainedHistoricalMessageCount, 'messages');
+    if (!window) {
+      return;
+    }
+
+    if (window.removableIndices.length === 0) {
       state.lastInspection = createInspection(
         type,
-        0,
-        chat.length - 1,
+        retainedSourceStart,
+        minimumSourceWindow.currentInputIndex,
         0,
         '',
         [],
@@ -149,33 +243,35 @@ export async function storyEchoGenerateInterceptor(
         warnings,
         0,
         Math.round(performance.now() - startedAt),
+        0,
+        0,
+        0,
+        state.stageSummary.coveredThroughMessageId,
       );
       state.metrics.generationsDeferred += 1;
       state.metrics.lastGenerationAt = new Date().toISOString();
-      recordDebugTrace(state, settings.debug, 'interceptor', '索引未覆盖窗口边界，本次保留完整聊天。', {
+      recordDebugTrace(state, settings.debug, 'interceptor', '派生上下文尚未覆盖裁剪边界，本次保留完整聊天。', {
         indexedThrough: state.indexedThroughMessageId,
-        requiredIndexedThrough,
+        summaryCoveredThrough: state.stageSummary.coveredThroughMessageId,
+        desiredCoveredThrough,
       });
       await memoryRepository.save(state);
       emitDiagnosticsUpdated();
-      logger.warn('索引未覆盖裁剪边界，本次保留完整聊天。', warnings[0]);
       return;
     }
 
     try {
-      state = await extractionService.syncPendingVectors(state);
-    } catch (error) {
-      if (state) {
-        state.metrics.vectorSyncFailures += 1;
-        recordDebugTrace(state, settings.debug, 'vector', '生成前同步向量失败。', {
-          error: error instanceof Error ? error.message : String(error),
-        });
+      const synchronized = await extractionService.syncPendingVectors(state);
+      if (synchronized) {
+        state = synchronized;
       }
+    } catch (error) {
+      state.metrics.vectorSyncFailures += 1;
+      recordDebugTrace(state, settings.debug, 'vector', '生成前同步向量失败。', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       warnings.push('部分剧情记忆尚未完成向量化，将使用可用索引和关键词召回。');
       logger.warn('同步待处理向量失败。', error);
-    }
-    if (!state) {
-      return;
     }
 
     const eligibleMemories = state.memories.filter(
@@ -183,7 +279,7 @@ export async function storyEchoGenerateInterceptor(
         !memory.excluded &&
         memory.status !== 'invalid' &&
         memory.status !== 'superseded' &&
-        hasSourceOutsideWindow(memory, sourceWindow.retainedStartIndex),
+        hasSourceOutsideWindow(memory, retainedSourceStart),
     );
     let queryPlan = buildRetrievalQueryPlan(chat, window.currentInputIndex);
     if (
@@ -212,10 +308,9 @@ export async function storyEchoGenerateInterceptor(
         });
       } catch (error) {
         state.metrics.queryRewriteFailures += 1;
-        const message = error instanceof Error ? error.message : String(error);
         warnings.push('LLM查询改写失败，已回退到本地双路查询。');
         recordDebugTrace(state, settings.debug, 'retrieval', 'LLM检索查询改写失败，使用本地回退。', {
-          error: message,
+          error: error instanceof Error ? error.message : String(error),
         });
         logger.warn('LLM检索查询改写失败，使用本地回退。', error);
       }
@@ -282,29 +377,37 @@ export async function storyEchoGenerateInterceptor(
       settings.recall.maxEvents,
       settings.recall.maxTokens,
     );
-    const memoryBlock = selected.length > 0 ? renderMemoryBlock(selected) : '';
+    const recallBlock = selected.length > 0 ? renderMemoryBlock(selected) : '';
+    const summaryBlock = settings.summary.enabled && state.stageSummary.text
+      ? renderStageSummaryBlock(state.stageSummary.text)
+      : '';
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
-    const estimatedInjectedTokens = memoryBlock ? estimateTokens(memoryBlock) : 0;
+    const estimatedSummaryTokens = summaryBlock ? estimateTokens(summaryBlock) : 0;
+    const estimatedInjectedTokens = estimatedSummaryTokens + (
+      recallBlock ? estimateTokens(recallBlock) : 0
+    );
 
-    const anchor = chat[window.retainedStartIndex];
+    const retainedAnchor = chat[window.retainedStartIndex];
+    const currentInput = chat[window.currentInputIndex];
     removeMessagesAtIndices(chat, window.removableIndices);
 
-    if (memoryBlock) {
-      const anchorIndex = anchor ? chat.indexOf(anchor) : 0;
-      chat.splice(Math.max(0, anchorIndex), 0, {
-        is_user: false,
-        is_system: true,
-        name: DISPLAY_NAME,
-        send_date: Date.now(),
-        mes: memoryBlock,
-        extra: { story_echo_injection: true },
-      });
+    if (summaryBlock) {
+      const anchorIndex = retainedAnchor ? chat.indexOf(retainedAnchor) : 0;
+      chat.splice(Math.max(0, anchorIndex), 0, requestSystemMessage(summaryBlock, 'summary'));
+    }
+    if (recallBlock && currentInput) {
+      const currentInputIndex = chat.indexOf(currentInput);
+      if (currentInputIndex >= 0) {
+        chat.splice(currentInputIndex, 0, requestSystemMessage(recallBlock, 'recall'));
+      } else {
+        warnings.push('找不到当前用户消息，已跳过动态召回注入。');
+      }
     }
 
     state.lastInspection = createInspection(
       type,
-      window.retainedStartIndex,
-      window.currentInputIndex,
+      retainedSourceStart,
+      minimumSourceWindow.currentInputIndex,
       window.removableIndices.length,
       query,
       ranked,
@@ -314,6 +417,8 @@ export async function storyEchoGenerateInterceptor(
       Math.round(performance.now() - startedAt),
       estimatedRemovedTokens,
       estimatedInjectedTokens,
+      estimatedSummaryTokens,
+      state.stageSummary.coveredThroughMessageId,
     );
     state.metrics.generationsTrimmed += 1;
     state.metrics.messagesRemoved += window.removableIndices.length;
@@ -321,8 +426,11 @@ export async function storyEchoGenerateInterceptor(
     state.metrics.estimatedRemovedTokens += estimatedRemovedTokens;
     state.metrics.estimatedInjectedTokens += estimatedInjectedTokens;
     state.metrics.lastGenerationAt = new Date().toISOString();
-    recordDebugTrace(state, settings.debug, 'interceptor', '上下文裁剪与剧情召回完成。', {
+    recordDebugTrace(state, settings.debug, 'interceptor', '上下文裁剪、阶段总结与剧情召回完成。', {
+      retainedSourceStart,
       removedMessages: window.removableIndices.length,
+      summaryCoveredThrough: state.stageSummary.coveredThroughMessageId,
+      summaryInjected: Boolean(summaryBlock),
       intentVectorResults: vectorResults.intent.length,
       sceneVectorResults: vectorResults.scene.length,
       uniqueVectorResults: uniqueVectorResultCount,
@@ -341,6 +449,7 @@ export async function storyEchoGenerateInterceptor(
         .join(','),
       selectedMemoryIds: selected.map((memory) => memory.id).join(','),
       estimatedRemovedTokens,
+      estimatedSummaryTokens,
       estimatedInjectedTokens,
       durationMs: Math.round(performance.now() - startedAt),
     });

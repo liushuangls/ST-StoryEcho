@@ -19,7 +19,14 @@ export type ConsolidationOperation =
   | 'RESOLVE'
   | 'SUPERSEDE'
   | 'IGNORE';
-export type DebugStage = 'extraction' | 'consolidation' | 'vector' | 'retrieval' | 'interceptor' | 'error';
+export type DebugStage =
+  | 'summary'
+  | 'extraction'
+  | 'consolidation'
+  | 'vector'
+  | 'retrieval'
+  | 'interceptor'
+  | 'error';
 
 export interface ExternalEmbeddingSettings {
   baseUrl: string;
@@ -30,12 +37,18 @@ export interface ExternalEmbeddingSettings {
 }
 
 export interface StoryEchoSettings {
-  version: 2;
+  version: 3;
   enabled: boolean;
   debug: boolean;
   recentWindow: {
     size: number;
     unit: WindowUnit;
+  };
+  summary: {
+    enabled: boolean;
+    automatic: boolean;
+    targetTurnsPerUpdate: number;
+    maxTokens: number;
   };
   recall: {
     maxEvents: number;
@@ -131,12 +144,17 @@ export interface InspectionRecord {
   estimatedRemovedTokens: number;
   estimatedInjectedTokens: number;
   estimatedNetSavedTokens: number;
+  estimatedSummaryTokens: number;
+  summaryCoveredThroughMessageId: number;
   vectorResultCount: number;
   durationMs: number;
   warnings: string[];
 }
 
 export interface StoryEchoMetrics {
+  summaryUpdates: number;
+  summaryFailures: number;
+  summaryMessagesCovered: number;
   extractionChunks: number;
   extractionFailures: number;
   candidatesExtracted: number;
@@ -160,10 +178,12 @@ export interface StoryEchoMetrics {
   estimatedRemovedTokens: number;
   estimatedInjectedTokens: number;
   totalExtractionMs: number;
+  totalSummaryMs: number;
   totalConsolidationMs: number;
   totalRetrievalMs: number;
   totalQueryRewriteMs: number;
   lastExtractionAt?: string;
+  lastSummaryAt?: string;
   lastGenerationAt?: string;
 }
 
@@ -185,6 +205,12 @@ export interface StoryEchoChatState {
   indexedThroughMessageId: number;
   indexedThroughHash: string;
   indexedPrefixHash: string;
+  stageSummary: {
+    text: string;
+    coveredThroughMessageId: number;
+    coveredThroughHash: string;
+    updatedAt?: string;
+  };
   memories: StoryMemory[];
   pendingRanges: PendingRange[];
   pendingVectorHashes: number[];

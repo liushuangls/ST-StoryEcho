@@ -6,7 +6,7 @@ export interface WindowSelection {
   removableIndices: number[];
 }
 
-function findCurrentInputIndex(messages: TavernChatMessage[]): number {
+export function findCurrentInputIndex(messages: TavernChatMessage[]): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.is_user && !message.is_system) {
@@ -14,6 +14,52 @@ function findCurrentInputIndex(messages: TavernChatMessage[]): number {
     }
   }
   return -1;
+}
+
+export function alignRetainedStartToTurn(
+  messages: TavernChatMessage[],
+  proposedStartIndex: number,
+): number {
+  let start = Math.min(messages.length, Math.max(0, Math.floor(proposedStartIndex)));
+  if (start <= 0 || start >= messages.length) {
+    return start;
+  }
+  let firstNonSystemIndex = start;
+  while (firstNonSystemIndex < messages.length && messages[firstNonSystemIndex]?.is_system) {
+    firstNonSystemIndex += 1;
+  }
+  if (firstNonSystemIndex >= messages.length) {
+    return start;
+  }
+  if (messages[firstNonSystemIndex]?.is_user) {
+    return firstNonSystemIndex;
+  }
+  for (let index = firstNonSystemIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.is_system) {
+      continue;
+    }
+    if (message?.is_user) {
+      return index;
+    }
+  }
+  return 0;
+}
+
+export function countNonSystemMessages(
+  messages: TavernChatMessage[],
+  startIndex: number,
+  endIndexExclusive: number,
+): number {
+  const start = Math.min(messages.length, Math.max(0, Math.floor(startIndex)));
+  const end = Math.min(messages.length, Math.max(start, Math.floor(endIndexExclusive)));
+  let count = 0;
+  for (let index = start; index < end; index += 1) {
+    if (!messages[index]?.is_system) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 export function selectRecentWindow(

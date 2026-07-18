@@ -18,6 +18,11 @@ function createState(ownerChatId: string): StoryEchoChatState {
     indexedThroughMessageId: -1,
     indexedThroughHash: '',
     indexedPrefixHash: '',
+    stageSummary: {
+      text: '',
+      coveredThroughMessageId: -1,
+      coveredThroughHash: '',
+    },
     memories: [],
     pendingRanges: [],
     pendingVectorHashes: [],
@@ -40,6 +45,7 @@ type StoredState = Omit<
   | 'pendingVectorDeleteHashes'
   | 'vectorFingerprint'
   | 'indexedPrefixHash'
+  | 'stageSummary'
   | 'metrics'
   | 'debugTraces'
 > & {
@@ -48,6 +54,7 @@ type StoredState = Omit<
   pendingVectorDeleteHashes?: number[];
   vectorFingerprint?: string;
   indexedPrefixHash?: string;
+  stageSummary?: StoryEchoChatState['stageSummary'];
   metrics?: StoryEchoChatState['metrics'];
   debugTraces?: StoryEchoChatState['debugTraces'];
 };
@@ -87,6 +94,14 @@ function normalizeState(stored: StoredState): StoryEchoChatState {
         estimatedNetSavedTokens: Number.isFinite(stored.lastInspection.estimatedNetSavedTokens)
           ? stored.lastInspection.estimatedNetSavedTokens
           : 0,
+        estimatedSummaryTokens: Number.isFinite(stored.lastInspection.estimatedSummaryTokens)
+          ? stored.lastInspection.estimatedSummaryTokens
+          : 0,
+        summaryCoveredThroughMessageId: Number.isFinite(
+          stored.lastInspection.summaryCoveredThroughMessageId,
+        )
+          ? stored.lastInspection.summaryCoveredThroughMessageId
+          : -1,
       }
     : undefined;
   return {
@@ -110,6 +125,18 @@ function normalizeState(stored: StoredState): StoryEchoChatState {
       : [],
     vectorFingerprint: typeof stored.vectorFingerprint === 'string' ? stored.vectorFingerprint : '',
     indexedPrefixHash: typeof stored.indexedPrefixHash === 'string' ? stored.indexedPrefixHash : '',
+    stageSummary: {
+      text: typeof stored.stageSummary?.text === 'string' ? stored.stageSummary.text : '',
+      coveredThroughMessageId: Number.isFinite(stored.stageSummary?.coveredThroughMessageId)
+        ? Math.floor(stored.stageSummary!.coveredThroughMessageId)
+        : -1,
+      coveredThroughHash: typeof stored.stageSummary?.coveredThroughHash === 'string'
+        ? stored.stageSummary.coveredThroughHash
+        : '',
+      ...(typeof stored.stageSummary?.updatedAt === 'string'
+        ? { updatedAt: stored.stageSummary.updatedAt }
+        : {}),
+    },
     metrics: normalizeMetrics(stored.metrics),
     debugTraces: Array.isArray(stored.debugTraces) ? stored.debugTraces.slice(-50) : [],
     ...(lastInspection ? { lastInspection } : {}),
@@ -147,6 +174,10 @@ export class MemoryRepository {
       !Array.isArray(stored.pendingVectorDeleteHashes) ||
       typeof stored.vectorFingerprint !== 'string' ||
       typeof stored.indexedPrefixHash !== 'string' ||
+      !stored.stageSummary ||
+      typeof stored.stageSummary.text !== 'string' ||
+      !Number.isFinite(stored.stageSummary.coveredThroughMessageId) ||
+      typeof stored.stageSummary.coveredThroughHash !== 'string' ||
       !stored.metrics ||
       !Array.isArray(stored.debugTraces) ||
       (stored.lastInspection !== undefined &&
@@ -154,7 +185,9 @@ export class MemoryRepository {
           !Number.isFinite(stored.lastInspection.durationMs) ||
           !Number.isFinite(stored.lastInspection.estimatedRemovedTokens) ||
           !Number.isFinite(stored.lastInspection.estimatedInjectedTokens) ||
-          !Number.isFinite(stored.lastInspection.estimatedNetSavedTokens))) ||
+          !Number.isFinite(stored.lastInspection.estimatedNetSavedTokens) ||
+          !Number.isFinite(stored.lastInspection.estimatedSummaryTokens) ||
+          !Number.isFinite(stored.lastInspection.summaryCoveredThroughMessageId))) ||
       stored.memories.some(
         (memory) =>
           !Array.isArray(memory.sourceHistory) ||

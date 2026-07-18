@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { TavernChatMessage } from '../src/core/types';
-import { removeMessagesAtIndices, selectRecentWindow } from '../src/prompt/window';
+import {
+  alignRetainedStartToTurn,
+  countNonSystemMessages,
+  removeMessagesAtIndices,
+  selectRecentWindow,
+} from '../src/prompt/window';
 
 const chat: TavernChatMessage[] = [
   { is_user: false, mes: 'greeting' },
@@ -61,5 +66,33 @@ describe('selectRecentWindow', () => {
       'recent assistant',
       'current input',
     ]);
+  });
+
+  it('backs a summary boundary up to the user that began the retained turn', () => {
+    expect(alignRetainedStartToTurn(chat, 2)).toBe(1);
+    expect(alignRetainedStartToTurn(chat, 3)).toBe(3);
+  });
+
+  it('keeps a complete turn when system messages sit on the summary boundary', () => {
+    const messages: TavernChatMessage[] = [
+      { is_user: true, mes: 'user 1' },
+      { is_user: false, is_system: true, mes: 'narrator' },
+      { is_user: false, mes: 'assistant 1' },
+      { is_user: true, mes: 'current input' },
+    ];
+
+    expect(alignRetainedStartToTurn(messages, 1)).toBe(0);
+  });
+
+  it('translates a source boundary to the exact number of retained prompt messages', () => {
+    const messages: TavernChatMessage[] = [
+      { is_user: false, mes: 'assistant greeting' },
+      { is_user: false, is_system: true, mes: 'system' },
+      { is_user: true, mes: 'user' },
+      { is_user: false, mes: 'assistant' },
+      { is_user: true, mes: 'current' },
+    ];
+
+    expect(countNonSystemMessages(messages, 0, 4)).toBe(3);
   });
 });

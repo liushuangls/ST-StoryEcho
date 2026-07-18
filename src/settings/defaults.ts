@@ -9,6 +9,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
     size: 10,
     unit: 'turns',
   },
+  summary: {
+    enabled: true,
+    automatic: true,
+    targetTurnsPerUpdate: 10,
+    maxTokens: 1_600,
+  },
   recall: {
     maxEvents: 5,
     maxTokens: 1200,

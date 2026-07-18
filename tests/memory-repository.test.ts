@@ -55,6 +55,11 @@ describe('MemoryRepository migration', () => {
     const state = await new MemoryRepository().getOrCreate();
 
     expect(state?.pendingVectorDeleteHashes).toEqual([]);
+    expect(state?.stageSummary).toEqual({
+      text: '',
+      coveredThroughMessageId: -1,
+      coveredThroughHash: '',
+    });
     expect(state?.metrics.actions.SUPERSEDE).toBe(0);
     expect(state?.debugTraces).toEqual([]);
     expect(state?.memories[0]?.sourceHistory).toEqual([state?.memories[0]?.source]);

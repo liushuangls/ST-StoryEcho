@@ -111,6 +111,11 @@ export class ExtractionService {
     current.indexedThroughMessageId = -1;
     current.indexedThroughHash = '';
     current.indexedPrefixHash = '';
+    current.stageSummary = {
+      text: '',
+      coveredThroughMessageId: -1,
+      coveredThroughHash: '',
+    };
     current.memories = [];
     current.pendingRanges = [];
     current.pendingVectorHashes = [];

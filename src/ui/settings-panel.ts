@@ -16,6 +16,7 @@ import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { selectRecentWindow } from '../prompt/window';
 import { SettingsRepository } from '../settings/repository';
+import { stageSummaryService } from '../summary/service';
 import { resolveVectorConfig } from '../vector/config';
 import { resolveEmbeddingClient } from '../vector/embedding-providers';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
@@ -44,7 +45,7 @@ function panelTemplate(): HTMLElement {
         <div class="story-echo-switch-row story-echo-switch-primary">
           <div class="story-echo-switch-copy">
             <span class="story-echo-switch-title">启用滑动窗口与历史剧情召回</span>
-            <span class="story-echo-switch-description">关闭后不裁剪上下文、不抽取历史，也不注入剧情记忆</span>
+            <span class="story-echo-switch-description">关闭后不总结、不裁剪上下文、不抽取历史，也不注入剧情记忆</span>
           </div>
           <div class="story-echo-toggle">
             <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
@@ -58,14 +59,14 @@ function panelTemplate(): HTMLElement {
               <i class="fa-solid fa-sliders" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
                 <span class="story-echo-section-summary-title">上下文与召回</span>
-                <span class="story-echo-section-summary-description">窗口、召回、查询与自动抽取</span>
+                <span class="story-echo-section-summary-description">最小原文、召回、查询与自动抽取</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
           </summary>
           <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field">
-            <span>最近窗口</span>
+            <span>最小保留原文</span>
             <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
           </label>
           <label class="story-echo-field">
@@ -128,6 +129,52 @@ function panelTemplate(): HTMLElement {
           <p class="story-echo-hint story-echo-field-wide">
             LLM改写会在每次需要召回时先生成一句检索查询；失败时自动回退本地双路查询。
           </p>
+          </div>
+        </details>
+
+        <details class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-book-open" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">历史阶段总结</span>
+                <span class="story-echo-section-summary-description">滚动总结、覆盖批次与输出预算</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
+            <div class="story-echo-switch-row story-echo-field-wide">
+              <div class="story-echo-switch-copy">
+                <span class="story-echo-switch-title">启用滚动阶段总结</span>
+                <span class="story-echo-switch-description">用一份有界总结维持窗口外的长期剧情脉络</span>
+              </div>
+              <div class="story-echo-toggle">
+                <input id="story-echo-summary-enabled" class="story-echo-toggle-input" type="checkbox">
+                <label class="story-echo-toggle-label" for="story-echo-summary-enabled" aria-label="启用滚动阶段总结"></label>
+              </div>
+            </div>
+            <div class="story-echo-switch-row story-echo-field-wide">
+              <div class="story-echo-switch-copy">
+                <span class="story-echo-switch-title">自动更新阶段总结</span>
+                <span class="story-echo-switch-description">达到一批后在生成前最多更新一次；失败时保留未总结原文</span>
+              </div>
+              <div class="story-echo-toggle">
+                <input id="story-echo-summary-automatic" class="story-echo-toggle-input" type="checkbox">
+                <label class="story-echo-toggle-label" for="story-echo-summary-automatic" aria-label="自动更新阶段总结"></label>
+              </div>
+            </div>
+            <label class="story-echo-field">
+              <span>每批总结轮数（用户 + AI）</span>
+              <input id="story-echo-summary-turns" class="text_pole" type="number" min="1" max="100" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>总结最大输出 Token</span>
+              <input id="story-echo-summary-max-tokens" class="text_pole" type="number" min="128" max="8192" step="128">
+            </label>
+            <p class="story-echo-hint story-echo-field-wide">
+              实际原文会保留“所有未总结消息”和“最近 N 轮”的并集。总结位于近期原文前；动态召回位于当前 User 前，均不写入聊天记录。
+            </p>
           </div>
         </details>
 
@@ -318,6 +365,10 @@ function panelTemplate(): HTMLElement {
         </div>
 
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
+        <details class="story-echo-diagnostics">
+          <summary>当前阶段总结</summary>
+          <pre id="story-echo-summary">尚无阶段总结。</pre>
+        </details>
         <details class="story-echo-diagnostics" open>
           <summary>测试统计</summary>
           <pre id="story-echo-stats">尚无统计数据。</pre>
@@ -330,7 +381,7 @@ function panelTemplate(): HTMLElement {
           <summary>最近调试轨迹</summary>
           <pre id="story-echo-traces">调试模式关闭或尚无轨迹。</pre>
         </details>
-        <p class="story-echo-hint">调试报告不包含API Key，但会包含检索查询和被召回的剧情文本。</p>
+        <p class="story-echo-hint">调试报告不包含API Key，但会包含阶段总结、检索查询和被召回的剧情文本。</p>
       </div>
     </div>
   `;
@@ -365,6 +416,12 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-enabled').checked = settings.enabled;
   element<HTMLInputElement>(panel, '#story-echo-window-size').value = String(settings.recentWindow.size);
   element<HTMLSelectElement>(panel, '#story-echo-window-unit').value = settings.recentWindow.unit;
+  element<HTMLInputElement>(panel, '#story-echo-summary-enabled').checked = settings.summary.enabled;
+  element<HTMLInputElement>(panel, '#story-echo-summary-automatic').checked = settings.summary.automatic;
+  element<HTMLInputElement>(panel, '#story-echo-summary-turns').value =
+    String(settings.summary.targetTurnsPerUpdate);
+  element<HTMLInputElement>(panel, '#story-echo-summary-max-tokens').value =
+    String(settings.summary.maxTokens);
   element<HTMLInputElement>(panel, '#story-echo-max-events').value = String(settings.recall.maxEvents);
   element<HTMLInputElement>(panel, '#story-echo-max-tokens').value = String(settings.recall.maxTokens);
   element<HTMLInputElement>(panel, '#story-echo-threshold').value = String(settings.recall.scoreThreshold);
@@ -412,6 +469,32 @@ function bindSettings(panel: HTMLElement): void {
   element<HTMLSelectElement>(panel, '#story-echo-window-unit').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.recentWindow.unit = (event.currentTarget as HTMLSelectElement).value as WindowUnit;
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-summary-enabled').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.summary.enabled = (event.currentTarget as HTMLInputElement).checked;
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-summary-automatic').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.summary.automatic = (event.currentTarget as HTMLInputElement).checked;
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-summary-turns').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 10));
+      settings.summary.targetTurnsPerUpdate = Math.min(100, Math.max(1, value));
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-summary-max-tokens').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 1_600));
+      settings.summary.maxTokens = Math.min(8_192, Math.max(128, value));
     });
   });
 
@@ -659,8 +742,13 @@ function bindSettings(panel: HTMLElement): void {
       }
       const target = window.retainedStartIndex - 1;
       await extractionService.processThrough(target, (progress) => {
-        status.textContent = `正在处理消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
+        status.textContent = `正在抽取消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
       });
+      if (settings.summary.enabled) {
+        await stageSummaryService.processAllThrough(target, (progress) => {
+          status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
+        });
+      }
       notify.success('窗口外历史处理完成。');
       await refreshStatus(panel, true);
     } catch (error) {
@@ -742,6 +830,9 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
   const averageExtraction = metrics.extractionChunks > 0
     ? Math.round(metrics.totalExtractionMs / metrics.extractionChunks)
     : 0;
+  const averageSummary = metrics.summaryUpdates > 0
+    ? Math.round(metrics.totalSummaryMs / metrics.summaryUpdates)
+    : 0;
   const averageConsolidation = metrics.consolidationCalls > 0
     ? Math.round(metrics.totalConsolidationMs / metrics.consolidationCalls)
     : 0;
@@ -758,6 +849,7 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
   );
   return [
     `记忆：active ${statusCount('active')} / resolved ${statusCount('resolved')} / superseded ${statusCount('superseded')} / invalid ${statusCount('invalid')}`,
+    `阶段总结：更新${metrics.summaryUpdates}次，失败${metrics.summaryFailures}次，覆盖${metrics.summaryMessagesCovered}条消息，平均${averageSummary}ms/次`,
     `抽取：${metrics.extractionChunks}块，${metrics.candidatesExtracted}候选，失败${metrics.extractionFailures}次，平均${averageExtraction}ms/块`,
     `整理：调用${metrics.consolidationCalls}次，失败回退${metrics.consolidationFailures}次，平均${averageConsolidation}ms`,
     `查询改写：请求${metrics.queryRewriteRequests}次，缓存命中${metrics.queryRewriteCacheHits}次，失败回退${metrics.queryRewriteFailures}次，平均${averageQueryRewrite}ms`,
@@ -765,7 +857,7 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
     `向量：查询${metrics.vectorQueries}次，查询失败${metrics.vectorQueryFailures}次，同步失败${metrics.vectorSyncFailures}次，写入${metrics.vectorItemsInserted}，删除${metrics.vectorItemsDeleted}，重建${metrics.vectorRebuilds}次`,
     `上下文：尝试${metrics.generationAttempts}次，裁剪${metrics.generationsTrimmed}次，延迟裁剪${metrics.generationsDeferred}次，移除${metrics.messagesRemoved}条原文，注入${metrics.memoriesInjected}条记忆`,
     `估算Token：移除${metrics.estimatedRemovedTokens}，注入${metrics.estimatedInjectedTokens}，累计净节省${estimatedNetSaved}`,
-    `最近：抽取 ${metrics.lastExtractionAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
+    `最近：总结 ${metrics.lastSummaryAt ?? '无'} / 抽取 ${metrics.lastExtractionAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
     `调试轨迹：${state.debugTraces.length}/50`,
   ].join('\n');
 }
@@ -783,6 +875,7 @@ function inspectionText(state: NonNullable<ReturnType<MemoryRepository['getExist
     `时间：${inspection.createdAt}`,
     `耗时：${inspection.durationMs}ms`,
     `保留范围：${inspection.retainedStartIndex}～${inspection.retainedEndIndex}`,
+    `阶段总结覆盖到：${inspection.summaryCoveredThroughMessageId}，估算${inspection.estimatedSummaryTokens} Token`,
     `裁剪消息：${inspection.removedMessageCount}`,
     `向量候选：${inspection.vectorResultCount}，排序候选：${inspection.candidateMemoryIds.length}，最终注入：${inspection.selectedMemoryIds.length}`,
     `估算召回Token：${inspection.estimatedRecallTokens}`,
@@ -809,6 +902,7 @@ function tracesText(state: NonNullable<ReturnType<MemoryRepository['getExisting'
 
 async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Promise<void> {
   const target = element<HTMLElement>(panel, '#story-echo-status');
+  const stageSummaryTarget = element<HTMLElement>(panel, '#story-echo-summary');
   const stats = element<HTMLElement>(panel, '#story-echo-stats');
   const inspection = element<HTMLElement>(panel, '#story-echo-inspection');
   const traces = element<HTMLElement>(panel, '#story-echo-traces');
@@ -821,6 +915,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
         ? '当前聊天尚未初始化StoryEcho数据。'
         : '当前没有打开聊天。';
       stats.textContent = '尚无统计数据。';
+      stageSummaryTarget.textContent = '尚无阶段总结。';
       inspection.textContent = '尚无生成记录。';
       traces.textContent = '调试模式关闭或尚无轨迹。';
       return;
@@ -849,14 +944,17 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       `待同步向量：${state.pendingVectorHashes.length}`,
       `待删除向量：${state.pendingVectorDeleteHashes.length}`,
       `已处理到消息：${state.indexedThroughMessageId}`,
+      `阶段总结覆盖：${state.stageSummary.coveredThroughMessageId}`,
       `集合：${state.vectorCollectionId}`,
     ].join('｜');
+    stageSummaryTarget.textContent = state.stageSummary.text || '尚无阶段总结。';
     stats.textContent = statsText(state);
     inspection.textContent = inspectionText(state);
     traces.textContent = tracesText(state);
   } catch (error) {
     const message = error instanceof Error ? error.message : '读取当前聊天状态失败。';
     target.textContent = message;
+    stageSummaryTarget.textContent = '读取失败。';
     stats.textContent = `读取失败：${message}`;
     inspection.textContent = '读取失败。';
     traces.textContent = '读取失败。';

@@ -19,6 +19,9 @@ const MAX_DEBUG_TRACES = 50;
 
 export function createMetrics(): StoryEchoMetrics {
   return {
+    summaryUpdates: 0,
+    summaryFailures: 0,
+    summaryMessagesCovered: 0,
     extractionChunks: 0,
     extractionFailures: 0,
     candidatesExtracted: 0,
@@ -48,6 +51,7 @@ export function createMetrics(): StoryEchoMetrics {
     memoriesInjected: 0,
     estimatedRemovedTokens: 0,
     estimatedInjectedTokens: 0,
+    totalSummaryMs: 0,
     totalExtractionMs: 0,
     totalConsolidationMs: 0,
     totalRetrievalMs: 0,
@@ -69,7 +73,12 @@ export function normalizeMetrics(value: unknown): StoryEchoMetrics {
   const metrics = createMetrics();
 
   for (const key of Object.keys(metrics) as Array<keyof StoryEchoMetrics>) {
-    if (key === 'actions' || key === 'lastExtractionAt' || key === 'lastGenerationAt') {
+    if (
+      key === 'actions' ||
+      key === 'lastSummaryAt' ||
+      key === 'lastExtractionAt' ||
+      key === 'lastGenerationAt'
+    ) {
       continue;
     }
     (metrics[key] as number) = finiteCount(source[key]);
@@ -79,6 +88,9 @@ export function normalizeMetrics(value: unknown): StoryEchoMetrics {
   }
   if (typeof source.lastExtractionAt === 'string') {
     metrics.lastExtractionAt = source.lastExtractionAt;
+  }
+  if (typeof source.lastSummaryAt === 'string') {
+    metrics.lastSummaryAt = source.lastSummaryAt;
   }
   if (typeof source.lastGenerationAt === 'string') {
     metrics.lastGenerationAt = source.lastGenerationAt;

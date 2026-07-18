@@ -75,8 +75,14 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 2,
+      version: 3,
       extraction: { automatic: true, targetTurnsPerChunk: 5 },
+      summary: {
+        enabled: true,
+        automatic: true,
+        targetTurnsPerUpdate: 10,
+        maxTokens: 1_600,
+      },
     });
   });
 });
