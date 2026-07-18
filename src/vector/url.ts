@@ -42,7 +42,3 @@ export function normalizeEmbeddingsUrl(
   url.hash = '';
   return url.toString();
 }
-
-export function corsProxyUrl(targetUrl: string): string {
-  return `/proxy/${encodeURIComponent(targetUrl)}`;
-}

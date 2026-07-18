@@ -210,7 +210,7 @@ interface VectorItem {
 
 - 默认复用 SillyTavern Vector Storage设置；
 - 可选择StoryEcho自定义OpenAI兼容Embedding，包括火山方舟；
-- 自定义模式只在浏览器发起远程API请求，不在浏览器计算向量；
+- 自定义模式由StoryEcho服务端插件发起远程API请求，不在浏览器计算向量；
 - 远程API返回的预生成向量通过SillyTavern现有WebLLM输入通道交给Vector Storage，`insert/query/list/delete/purge`仍由酒馆服务端完成；
 - 自定义模式使用独立模型作用域，不与用户真正的WebLLM集合混用；
 - 服务端 `transformers`、Ollama或远程Embedding提供方均可；
@@ -220,8 +220,9 @@ interface VectorItem {
 
 ```text
 剧情检索文本
-  -> StoryEcho优先直连embedding endpoint
-  -> 跨域失败时回退 /proxy/<embedding-endpoint>
+  -> POST /api/plugins/story-echo/embedding/embeddings
+  -> StoryEcho服务端读取当前用户的Embedding配置与Key
+  -> 服务端调用绑定的embedding endpoint
   -> OpenAI兼容API返回预生成向量
   -> POST /api/vector/insert 或 /api/vector/query
   -> SillyTavern Vector Storage保存/检索
@@ -229,7 +230,7 @@ interface VectorItem {
 
 请求使用标准 `{ input: string[], model, encoding_format: "float" }`，并校验返回数量、顺序、有限数值和统一维度。Base URL会规范化为 `/embeddings`：空路径默认补 `/v1/embeddings`，已有路径（例如方舟 `/api/v3`）直接补 `/embeddings`。
 
-API Key使用独立页面内存SecretVault，不进入向量配置指纹和持久化设置。端点或模型变化会改变 `vectorFingerprint` 并触发当前聊天集合重建；单纯调整超时时间不会重建。
+API Key由服务端插件写入SillyTavern当前用户的 `secrets.json`，不进入向量配置指纹、扩展设置或浏览器存储。Key与端点绑定，服务端代理请求只接收端点指纹而不接收目标URL；端点或模型变化仍会改变 `vectorFingerprint` 并触发当前聊天集合重建，单纯调整超时时间不会重建。
 
 ## 6. LLM Provider
 
@@ -273,26 +274,17 @@ interface OpenAiCompatibleConfig {
 }
 ```
 
-API Key 单独进入运行时 `SecretVault`：
-
-```ts
-interface SecretVault {
-  setSessionKey(value: string): void;
-  hasSessionKey(): boolean;
-  getSessionKey(): string | undefined;
-  clear(): void;
-}
-```
-
-纯 UI 扩展无法安全持久化 Key。第一阶段只在页面内存保存；刷新后重新输入。后续可选服务端插件提供：
+纯UI扩展无法安全持久化Key，因此自定义Provider依赖同仓库提供的服务端插件：
 
 ```text
-POST /api/plugins/story-echo/secrets
-POST /api/plugins/story-echo/chat-completions
-DELETE /api/plugins/story-echo/secrets
+GET    /api/plugins/story-echo/status
+PUT    /api/plugins/story-echo/profiles/:kind
+DELETE /api/plugins/story-echo/profiles/:kind
+POST   /api/plugins/story-echo/llm/chat-completions
+POST   /api/plugins/story-echo/embedding/embeddings
 ```
 
-服务端插件不是核心运行依赖；没有自定义 Provider需求的用户无需安装。
+服务端使用SillyTavern `SecretManager`按用户保存LLM与Embedding配置。保存内容包含Key和唯一允许接收该Key的规范化端点。后续调用只携带端点SHA-256指纹，服务端校验匹配后才发出请求，避免前端把已保存Key转发到任意URL。模型、Prompt和Embedding文本由每次请求提供；服务端限制请求大小、超时、响应大小，拒绝重定向并对错误信息脱敏。
 
 ### 6.3 Base URL规范化
 

@@ -11,11 +11,16 @@ import { resetDiagnostics } from '../debug/metrics';
 import { buildDebugReport } from '../debug/report';
 import { extractionService } from '../extraction/service';
 import { createLlmProvider } from '../llm/provider-factory';
-import { embeddingSecretVault, sessionSecretVault } from '../llm/secret-vault';
 import { normalizeChatCompletionsUrl } from '../llm/url';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { selectRecentWindow } from '../prompt/window';
+import {
+  serverEndpointFingerprint,
+  storyEchoServerClient,
+  type ServerProfileKind,
+  type ServerProfileStatus,
+} from '../server/client';
 import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig } from '../vector/config';
 import { openAiCompatibleEmbeddingClient } from '../vector/openai-compatible-embedding';
@@ -27,6 +32,16 @@ const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
 const memoryRepository = new MemoryRepository();
 const vectorStore = new SillyTavernVectorStore();
+
+type ProfileDisplayState =
+  | { state: 'checking' | 'missing' | 'unavailable' }
+  | { state: 'ready'; hasApiKey: boolean }
+  | { state: 'mismatch'; hasApiKey: boolean };
+
+let profileDisplayStates: Record<ServerProfileKind, ProfileDisplayState> = {
+  llm: { state: 'checking' },
+  embedding: { state: 'checking' },
+};
 
 function panelTemplate(): HTMLElement {
   const panel = document.createElement('div');
@@ -109,8 +124,8 @@ function panelTemplate(): HTMLElement {
             <input id="story-echo-model" class="text_pole" type="text" placeholder="model-name">
           </label>
           <label class="story-echo-field">
-            <span>API Key（仅当前页面内存）</span>
-            <input id="story-echo-api-key" class="text_pole" type="password" autocomplete="off" placeholder="刷新后需要重新输入">
+            <span>API Key（由服务端保管）</span>
+            <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="无Key接口可留空">
           </label>
           <label class="checkbox_label story-echo-inline">
             <input id="story-echo-allow-http" type="checkbox">
@@ -121,9 +136,17 @@ function panelTemplate(): HTMLElement {
             <span>自定义接口失败时回退主连接</span>
           </label>
           <div class="story-echo-field-wide story-echo-key-row">
-            <span id="story-echo-key-status" class="story-echo-secret-empty">API Key未加载</span>
-            <button id="story-echo-clear-key" class="menu_button" type="button">清除Key</button>
+            <span id="story-echo-key-status" class="story-echo-secret-empty">正在检查服务端配置……</span>
+            <div class="story-echo-key-actions">
+              <button id="story-echo-save-key" class="menu_button" type="button">
+                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>保存到服务端</span>
+              </button>
+              <button id="story-echo-clear-key" class="menu_button" type="button">
+                <i class="fa-solid fa-trash" aria-hidden="true"></i><span>删除服务端Key</span>
+              </button>
+            </div>
           </div>
+          <p class="story-echo-hint story-echo-field-wide">Key与当前Base URL绑定；更换Base URL后需要重新保存，修改模型不需要。</p>
         </div>
 
         <div class="story-echo-grid story-echo-section">
@@ -153,8 +176,8 @@ function panelTemplate(): HTMLElement {
             <input id="story-echo-embedding-model" class="text_pole" type="text" maxlength="200" placeholder="doubao-embedding-text-… 或 ep-…">
           </label>
           <label class="story-echo-field story-echo-field-wide">
-            <span>Embedding API Key（仅当前页面内存）</span>
-            <input id="story-echo-embedding-api-key" class="text_pole" type="password" autocomplete="off" placeholder="刷新后需要重新输入">
+            <span>Embedding API Key（由服务端保管）</span>
+            <input id="story-echo-embedding-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="无Key接口可留空">
           </label>
           <label class="checkbox_label story-echo-inline story-echo-field-wide">
             <input id="story-echo-embedding-allow-http" type="checkbox">
@@ -163,16 +186,19 @@ function panelTemplate(): HTMLElement {
           <div class="story-echo-field-wide story-echo-key-row">
             <span id="story-echo-embedding-key-status" class="story-echo-secret-empty">Embedding Key未加载</span>
             <div class="story-echo-key-actions">
+              <button id="story-echo-save-embedding-key" class="menu_button" type="button">
+                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>保存到服务端</span>
+              </button>
               <button id="story-echo-test-embedding" class="menu_button" type="button">
                 <i class="fa-solid fa-vial" aria-hidden="true"></i><span>测试Embedding</span>
               </button>
               <button id="story-echo-clear-embedding-key" class="menu_button" type="button">
-                <i class="fa-solid fa-key" aria-hidden="true"></i><span>清除Key</span>
+                <i class="fa-solid fa-trash" aria-hidden="true"></i><span>删除服务端Key</span>
               </button>
             </div>
           </div>
           <p class="story-echo-hint story-echo-field-wide">
-            优先直连接口；若目标不允许浏览器跨域，会自动回退酒馆CORS代理。火山方舟可直接使用。
+            Key与当前Base URL绑定。Embedding请求由SillyTavern服务端发出，不需要浏览器跨域或CORS代理。
           </p>
         </div>
 
@@ -194,8 +220,8 @@ function panelTemplate(): HTMLElement {
           </button>
         </div>
 
-        <p class="story-echo-hint">
-          LLM与Embedding自定义Key都不会保存到扩展设置；刷新页面后需要重新输入。
+        <p id="story-echo-server-status" class="story-echo-hint">
+          正在检查StoryEcho服务端插件……
         </p>
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
         <details class="story-echo-diagnostics" open>
@@ -230,24 +256,107 @@ function numberValue(input: HTMLInputElement, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function profileStatusText(kind: ServerProfileKind, display: ProfileDisplayState): string {
+  const label = kind === 'llm' ? 'LLM' : 'Embedding';
+  switch (display.state) {
+    case 'checking':
+      return `正在检查${label}服务端配置……`;
+    case 'missing':
+      return `${label}尚未保存到服务端`;
+    case 'unavailable':
+      return 'StoryEcho服务端插件不可用';
+    case 'mismatch':
+      return `${label}已保存，但Base URL已变化，请重新保存`;
+    case 'ready':
+      return display.hasApiKey
+        ? `${label} API Key已由服务端保管`
+        : `${label}服务端配置已保存（无API Key）`;
+  }
+}
+
+function syncProfileStatus(panel: HTMLElement): void {
+  const rows: Array<[ServerProfileKind, string]> = [
+    ['llm', '#story-echo-key-status'],
+    ['embedding', '#story-echo-embedding-key-status'],
+  ];
+  for (const [kind, selector] of rows) {
+    const target = element<HTMLElement>(panel, selector);
+    const display = profileDisplayStates[kind];
+    const loaded = display.state === 'ready';
+    target.textContent = profileStatusText(kind, display);
+    target.classList.toggle('story-echo-secret-loaded', loaded);
+    target.classList.toggle('story-echo-secret-empty', !loaded);
+  }
+}
+
+async function configuredEndpoint(kind: ServerProfileKind, settings: StoryEchoSettings): Promise<string | null> {
+  try {
+    if (kind === 'llm') {
+      if (!settings.llm.custom.baseUrl.trim()) {
+        return null;
+      }
+      return normalizeChatCompletionsUrl(settings.llm.custom.baseUrl, {
+        allowInsecureHttp: settings.llm.custom.allowInsecureHttp,
+      });
+    }
+    return normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
+      allowInsecureHttp: settings.vector.custom.allowInsecureHttp,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function displayStateFor(
+  kind: ServerProfileKind,
+  profile: ServerProfileStatus,
+  settings: StoryEchoSettings,
+): Promise<ProfileDisplayState> {
+  if (!profile.configured || !profile.endpointFingerprint) {
+    return { state: 'missing' };
+  }
+  const endpoint = await configuredEndpoint(kind, settings);
+  const hasApiKey = profile.hasApiKey === true;
+  if (!endpoint || await serverEndpointFingerprint(endpoint) !== profile.endpointFingerprint) {
+    return { state: 'mismatch', hasApiKey };
+  }
+  return { state: 'ready', hasApiKey };
+}
+
+async function refreshServerProfileStatus(panel: HTMLElement): Promise<void> {
+  profileDisplayStates = {
+    llm: { state: 'checking' },
+    embedding: { state: 'checking' },
+  };
+  syncProfileStatus(panel);
+  const serverTarget = element<HTMLElement>(panel, '#story-echo-server-status');
+  serverTarget.textContent = '正在检查StoryEcho服务端插件……';
+  try {
+    const status = await storyEchoServerClient.getStatus();
+    const settings = settingsRepository.get();
+    const [llm, embedding] = await Promise.all([
+      displayStateFor('llm', status.profiles.llm, settings),
+      displayStateFor('embedding', status.profiles.embedding, settings),
+    ]);
+    profileDisplayStates = { llm, embedding };
+    serverTarget.textContent = `StoryEcho服务端插件 ${status.version} 已连接；自定义请求和API Key均由服务端处理。`;
+  } catch (error) {
+    profileDisplayStates = {
+      llm: { state: 'unavailable' },
+      embedding: { state: 'unavailable' },
+    };
+    serverTarget.textContent = error instanceof Error ? error.message : 'StoryEcho服务端插件不可用。';
+  }
+  syncProfileStatus(panel);
+}
+
 function syncVisibility(panel: HTMLElement, settings: StoryEchoSettings): void {
   const custom = element<HTMLElement>(panel, '#story-echo-custom-provider');
   custom.hidden = settings.llm.provider !== 'openai-compatible';
 
   const customEmbedding = element<HTMLElement>(panel, '#story-echo-custom-embedding');
   customEmbedding.hidden = settings.vector.source !== 'openai-compatible';
-
-  const keyStatus = element<HTMLElement>(panel, '#story-echo-key-status');
-  keyStatus.textContent = sessionSecretVault.hasSessionKey() ? 'API Key已加载到当前页面' : 'API Key未加载';
-  keyStatus.classList.toggle('story-echo-secret-loaded', sessionSecretVault.hasSessionKey());
-  keyStatus.classList.toggle('story-echo-secret-empty', !sessionSecretVault.hasSessionKey());
-
-  const embeddingKeyStatus = element<HTMLElement>(panel, '#story-echo-embedding-key-status');
-  embeddingKeyStatus.textContent = embeddingSecretVault.hasSessionKey()
-    ? 'Embedding Key已加载到当前页面'
-    : 'Embedding Key未加载';
-  embeddingKeyStatus.classList.toggle('story-echo-secret-loaded', embeddingSecretVault.hasSessionKey());
-  embeddingKeyStatus.classList.toggle('story-echo-secret-empty', !embeddingSecretVault.hasSessionKey());
+  syncProfileStatus(panel);
 }
 
 function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
@@ -324,6 +433,7 @@ function bindSettings(panel: HTMLElement): void {
       current.llm.provider = (event.currentTarget as HTMLSelectElement).value as LlmProviderId;
     });
     syncVisibility(panel, settings);
+    void refreshServerProfileStatus(panel);
   });
 
   element<HTMLInputElement>(panel, '#story-echo-auto-extract').addEventListener('change', (event) => {
@@ -346,6 +456,7 @@ function bindSettings(panel: HTMLElement): void {
       settingsRepository.update((settings) => {
         settings.llm.custom.baseUrl = '';
       });
+      void refreshServerProfileStatus(panel);
       return;
     }
     try {
@@ -356,6 +467,7 @@ function bindSettings(panel: HTMLElement): void {
         settings.llm.custom.baseUrl = normalized;
       });
       input.value = normalized;
+      void refreshServerProfileStatus(panel);
     } catch (error) {
       input.value = current.llm.custom.baseUrl;
       notify.error(error instanceof Error ? error.message : 'Base URL无效。');
@@ -368,17 +480,11 @@ function bindSettings(panel: HTMLElement): void {
     });
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-api-key').addEventListener('change', (event) => {
-    const input = event.currentTarget as HTMLInputElement;
-    sessionSecretVault.setSessionKey(input.value);
-    input.value = '';
-    syncVisibility(panel, settingsRepository.get());
-  });
-
   element<HTMLInputElement>(panel, '#story-echo-allow-http').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.llm.custom.allowInsecureHttp = (event.currentTarget as HTMLInputElement).checked;
     });
+    void refreshServerProfileStatus(panel);
   });
 
   element<HTMLInputElement>(panel, '#story-echo-fallback-main').addEventListener('change', (event) => {
@@ -387,9 +493,50 @@ function bindSettings(panel: HTMLElement): void {
     });
   });
 
-  element<HTMLButtonElement>(panel, '#story-echo-clear-key').addEventListener('click', () => {
-    sessionSecretVault.clear();
-    syncVisibility(panel, settingsRepository.get());
+  element<HTMLButtonElement>(panel, '#story-echo-save-key').addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const input = element<HTMLInputElement>(panel, '#story-echo-api-key');
+    if (!input.value.trim() && !globalThis.confirm('API Key为空，将保存为无需鉴权的LLM端点。继续？')) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const settings = settingsRepository.get();
+      const endpoint = normalizeChatCompletionsUrl(settings.llm.custom.baseUrl, {
+        allowInsecureHttp: settings.llm.custom.allowInsecureHttp,
+      });
+      await storyEchoServerClient.saveProfile(
+        'llm',
+        endpoint,
+        input.value,
+        settings.llm.custom.allowInsecureHttp,
+      );
+      input.value = '';
+      await refreshServerProfileStatus(panel);
+      notify.success('LLM配置与API Key已保存到SillyTavern服务端。');
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '保存LLM服务端配置失败。');
+    } finally {
+      input.value = '';
+      button.disabled = false;
+    }
+  });
+
+  element<HTMLButtonElement>(panel, '#story-echo-clear-key').addEventListener('click', async (event) => {
+    if (!globalThis.confirm('从SillyTavern服务端永久删除StoryEcho的LLM API Key？')) {
+      return;
+    }
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      await storyEchoServerClient.deleteProfile('llm');
+      await refreshServerProfileStatus(panel);
+      notify.success('LLM服务端配置已删除。');
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '删除LLM服务端配置失败。');
+    } finally {
+      button.disabled = false;
+    }
   });
 
   element<HTMLSelectElement>(panel, '#story-echo-vector-source').addEventListener('change', (event) => {
@@ -397,6 +544,7 @@ function bindSettings(panel: HTMLElement): void {
       current.vector.source = (event.currentTarget as HTMLSelectElement).value as VectorSourceMode;
     });
     syncVisibility(panel, settings);
+    void refreshServerProfileStatus(panel);
     void refreshStatus(panel);
   });
 
@@ -408,6 +556,7 @@ function bindSettings(panel: HTMLElement): void {
       settingsRepository.update((settings) => {
         settings.vector.custom.baseUrl = '';
       });
+      void refreshServerProfileStatus(panel);
       return;
     }
     try {
@@ -419,6 +568,7 @@ function bindSettings(panel: HTMLElement): void {
         settings.vector.custom.baseUrl = baseUrl;
       });
       input.value = baseUrl;
+      void refreshServerProfileStatus(panel);
     } catch (error) {
       input.value = current.vector.custom.baseUrl;
       notify.error(error instanceof Error ? error.message : 'Embedding Base URL无效。');
@@ -431,22 +581,57 @@ function bindSettings(panel: HTMLElement): void {
     });
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-embedding-api-key').addEventListener('change', (event) => {
-    const input = event.currentTarget as HTMLInputElement;
-    embeddingSecretVault.setSessionKey(input.value);
-    input.value = '';
-    syncVisibility(panel, settingsRepository.get());
-  });
-
   element<HTMLInputElement>(panel, '#story-echo-embedding-allow-http').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.vector.custom.allowInsecureHttp = (event.currentTarget as HTMLInputElement).checked;
     });
+    void refreshServerProfileStatus(panel);
   });
 
-  element<HTMLButtonElement>(panel, '#story-echo-clear-embedding-key').addEventListener('click', () => {
-    embeddingSecretVault.clear();
-    syncVisibility(panel, settingsRepository.get());
+  element<HTMLButtonElement>(panel, '#story-echo-save-embedding-key').addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const input = element<HTMLInputElement>(panel, '#story-echo-embedding-api-key');
+    if (!input.value.trim() && !globalThis.confirm('API Key为空，将保存为无需鉴权的Embedding端点。继续？')) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const settings = settingsRepository.get();
+      const endpoint = normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
+        allowInsecureHttp: settings.vector.custom.allowInsecureHttp,
+      });
+      await storyEchoServerClient.saveProfile(
+        'embedding',
+        endpoint,
+        input.value,
+        settings.vector.custom.allowInsecureHttp,
+      );
+      input.value = '';
+      await refreshServerProfileStatus(panel);
+      notify.success('Embedding配置与API Key已保存到SillyTavern服务端。');
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '保存Embedding服务端配置失败。');
+    } finally {
+      input.value = '';
+      button.disabled = false;
+    }
+  });
+
+  element<HTMLButtonElement>(panel, '#story-echo-clear-embedding-key').addEventListener('click', async (event) => {
+    if (!globalThis.confirm('从SillyTavern服务端永久删除StoryEcho的Embedding API Key？')) {
+      return;
+    }
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    try {
+      await storyEchoServerClient.deleteProfile('embedding');
+      await refreshServerProfileStatus(panel);
+      notify.success('Embedding服务端配置已删除。');
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '删除Embedding服务端配置失败。');
+    } finally {
+      button.disabled = false;
+    }
   });
 
   element<HTMLButtonElement>(panel, '#story-echo-test-embedding').addEventListener('click', async (event) => {
@@ -719,5 +904,8 @@ export async function registerSettingsPanel(): Promise<void> {
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);
   });
-  await refreshStatus(panel);
+  await Promise.all([
+    refreshStatus(panel),
+    refreshServerProfileStatus(panel),
+  ]);
 }

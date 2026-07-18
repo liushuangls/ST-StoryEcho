@@ -37,7 +37,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 1;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.4.0";
+var EXTENSION_VERSION = "0.5.0";
 
 // src/debug/events.ts
 var DIAGNOSTICS_UPDATED_EVENT = "storyecho:diagnostics-updated";
@@ -420,6 +420,177 @@ var MainLlmProvider = class {
   }
 };
 
+// src/server/client.ts
+var SERVER_BASE_PATH = "/api/plugins/story-echo";
+var MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+async function readLimitedText(response) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u8FC7\u5927\u3002");
+  }
+  if (!response.body) {
+    const text3 = await response.text();
+    if (text3.length > MAX_RESPONSE_BYTES) {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u8FC7\u5927\u3002");
+    }
+    return text3;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let byteLength = 0;
+  let text2 = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    byteLength += value.byteLength;
+    if (byteLength > MAX_RESPONSE_BYTES) {
+      await reader.cancel();
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u8FC7\u5927\u3002");
+    }
+    text2 += decoder.decode(value, { stream: true });
+  }
+  return text2 + decoder.decode();
+}
+function unavailableMessage(status) {
+  return status === 404 ? "StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u672A\u5B89\u88C5\u6216\u672A\u542F\u7528\u3002\u8BF7\u5B89\u88C5\u670D\u52A1\u7AEF\u63D2\u4EF6\u5E76\u91CD\u542FSillyTavern\u3002" : `StoryEcho\u670D\u52A1\u7AEF\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${status}\uFF09\u3002`;
+}
+function parseServerError(text2, status) {
+  try {
+    const parsed = JSON.parse(text2);
+    if (typeof parsed.error?.message === "string" && parsed.error.message) {
+      return new Error(parsed.error.message);
+    }
+  } catch {
+  }
+  return new Error(unavailableMessage(status));
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function serverEndpointFingerprint(endpoint) {
+  return sha256(endpoint.trim());
+}
+var StoryEchoServerClient = class {
+  constructor(fetchImpl = fetch, requestHeaders = getRequestHeaders) {
+    this.fetchImpl = fetchImpl;
+    this.requestHeaders = requestHeaders;
+  }
+  async getStatus() {
+    const data = await this.request("/status", { method: "GET" });
+    if (!isRecord(data) || data["available"] !== true || typeof data["version"] !== "string" || !isRecord(data["profiles"])) {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u72B6\u6001\u54CD\u5E94\u65E0\u6548\u3002");
+    }
+    const profiles = data["profiles"];
+    return {
+      available: true,
+      version: data["version"],
+      profiles: {
+        llm: this.parseProfileStatus(profiles["llm"]),
+        embedding: this.parseProfileStatus(profiles["embedding"])
+      }
+    };
+  }
+  async saveProfile(kind, endpoint, apiKey, allowInsecureHttp) {
+    const data = await this.request(`/profiles/${kind}`, {
+      method: "PUT",
+      body: { endpoint, apiKey, allowInsecureHttp }
+    });
+    return this.parseProfileStatus(data);
+  }
+  async deleteProfile(kind) {
+    await this.request(`/profiles/${kind}`, { method: "DELETE" });
+  }
+  async complete(request) {
+    const data = await this.request("/llm/chat-completions", {
+      method: "POST",
+      body: {
+        endpointFingerprint: await serverEndpointFingerprint(request.endpoint),
+        model: request.model,
+        timeoutMs: request.timeoutMs,
+        strictJsonSchema: request.strictJsonSchema,
+        system: request.system,
+        prompt: request.prompt,
+        ...request.jsonSchema ? { jsonSchema: request.jsonSchema } : {}
+      },
+      ...request.signal ? { signal: request.signal } : {}
+    });
+    if (!isRecord(data) || typeof data["content"] !== "string") {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u6CA1\u6709\u8FD4\u56DE\u6709\u6548\u7684LLM\u5185\u5BB9\u3002");
+    }
+    return data["content"];
+  }
+  async embed(request) {
+    const data = await this.request("/embedding/embeddings", {
+      method: "POST",
+      body: {
+        endpointFingerprint: await serverEndpointFingerprint(request.endpoint),
+        model: request.model,
+        texts: request.texts,
+        timeoutMs: request.timeoutMs
+      },
+      ...request.signal ? { signal: request.signal } : {}
+    });
+    if (!isRecord(data)) {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u6CA1\u6709\u8FD4\u56DE\u6709\u6548\u7684Embedding\u54CD\u5E94\u3002");
+    }
+    return data.vectors;
+  }
+  parseProfileStatus(value) {
+    if (!isRecord(value) || typeof value["configured"] !== "boolean") {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u914D\u7F6E\u72B6\u6001\u65E0\u6548\u3002");
+    }
+    const result = { configured: value["configured"] };
+    if (typeof value["endpointFingerprint"] === "string") {
+      result.endpointFingerprint = value["endpointFingerprint"];
+    }
+    if (typeof value["updatedAt"] === "string") {
+      result.updatedAt = value["updatedAt"];
+    }
+    if (typeof value["hasApiKey"] === "boolean") {
+      result.hasApiKey = value["hasApiKey"];
+    }
+    return result;
+  }
+  async request(path, options) {
+    const headers = {
+      ...await this.requestHeaders(),
+      "Content-Type": "application/json"
+    };
+    let response;
+    try {
+      response = await this.fetchImpl(`${SERVER_BASE_PATH}${path}`, {
+        method: options.method,
+        headers,
+        ...options.body ? { body: JSON.stringify(options.body) } : {},
+        ...options.signal ? { signal: options.signal } : {}
+      });
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw error;
+      }
+      throw new Error("\u65E0\u6CD5\u8FDE\u63A5StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u3002");
+    }
+    if (response.status === 204) {
+      return {};
+    }
+    const text2 = await readLimitedText(response);
+    if (!response.ok) {
+      throw parseServerError(text2, response.status);
+    }
+    if (!text2) {
+      return {};
+    }
+    try {
+      return JSON.parse(text2);
+    } catch {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86\u975EJSON\u54CD\u5E94\u3002");
+    }
+  }
+};
+var storyEchoServerClient = new StoryEchoServerClient();
+
 // src/llm/url.ts
 function normalizeChatCompletionsUrl(rawUrl, options) {
   const trimmed = rawUrl.trim();
@@ -459,117 +630,30 @@ function normalizeChatCompletionsUrl(rawUrl, options) {
 }
 
 // src/llm/openai-compatible-provider.ts
-var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-function redactSecret(message, secret) {
-  return secret ? message.split(secret).join("[REDACTED]") : message;
-}
-async function readLimitedText(response) {
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-    throw new Error("\u81EA\u5B9A\u4E49LLM\u54CD\u5E94\u8FC7\u5927\u3002");
-  }
-  if (!response.body) {
-    return response.text();
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let byteLength = 0;
-  let text2 = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    byteLength += value.byteLength;
-    if (byteLength > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new Error("\u81EA\u5B9A\u4E49LLM\u54CD\u5E94\u8FC7\u5927\u3002");
-    }
-    text2 += decoder.decode(value, { stream: true });
-  }
-  return text2 + decoder.decode();
-}
-function readContent(response, secret) {
-  const content = response.choices?.[0]?.message?.content;
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map((part) => part.text ?? "").join("");
-  }
-  const message = response.error?.message || "\u81EA\u5B9A\u4E49LLM\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u5185\u5BB9\u3002";
-  throw new Error(redactSecret(message, secret));
-}
 var OpenAiCompatibleProvider = class {
-  constructor(config, secretVault) {
+  constructor(config, serverClient = storyEchoServerClient) {
     this.config = config;
-    this.secretVault = secretVault;
+    this.serverClient = serverClient;
   }
   id = "openai-compatible";
   async complete(request) {
-    if (!this.config.model.trim()) {
+    const model = this.config.model.trim();
+    if (!model) {
       throw new Error("\u81EA\u5B9A\u4E49LLM\u6A21\u578B\u540D\u4E0D\u80FD\u4E3A\u7A7A\u3002");
     }
-    const url = normalizeChatCompletionsUrl(this.config.baseUrl, {
+    const endpoint = normalizeChatCompletionsUrl(this.config.baseUrl, {
       allowInsecureHttp: this.config.allowInsecureHttp
     });
-    const key = this.secretVault.getSessionKey();
-    const controller = new AbortController();
-    const timeoutMs = Math.min(3e5, Math.max(1e3, Math.floor(this.config.timeoutMs)));
-    const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
-    const onAbort = () => controller.abort(request.signal?.reason);
-    request.signal?.addEventListener("abort", onAbort, { once: true });
-    const headers = new Headers({ "Content-Type": "application/json" });
-    if (key) {
-      headers.set("Authorization", `Bearer ${key}`);
-    }
-    const body = {
-      model: this.config.model.trim(),
-      temperature: 0,
-      messages: [
-        { role: "system", content: request.system },
-        { role: "user", content: request.prompt }
-      ]
-    };
-    if (request.jsonSchema && this.config.strictJsonSchema) {
-      body["response_format"] = {
-        type: "json_schema",
-        json_schema: {
-          name: "story_echo_response",
-          strict: true,
-          schema: request.jsonSchema
-        }
-      };
-    }
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-        redirect: "error"
-      });
-      const text2 = await readLimitedText(response);
-      let parsed;
-      try {
-        parsed = JSON.parse(text2);
-      } catch {
-        throw new Error(`\u81EA\u5B9A\u4E49LLM\u8FD4\u56DE\u4E86\u975EJSON\u54CD\u5E94\uFF08HTTP ${response.status}\uFF09\u3002`);
-      }
-      if (!response.ok) {
-        const message = parsed.error?.message || `\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u3002`;
-        throw new Error(redactSecret(message, key));
-      }
-      return readContent(parsed, key);
-    } catch (error) {
-      if (controller.signal.aborted && !request.signal?.aborted) {
-        throw new Error(`\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-      request.signal?.removeEventListener("abort", onAbort);
-    }
+    return this.serverClient.complete({
+      endpoint,
+      model,
+      timeoutMs: this.config.timeoutMs,
+      strictJsonSchema: this.config.strictJsonSchema,
+      system: request.system,
+      prompt: request.prompt,
+      ...request.jsonSchema ? { jsonSchema: request.jsonSchema } : {},
+      ...request.signal ? { signal: request.signal } : {}
+    });
   }
   async testConnection() {
     const response = await this.complete({
@@ -582,30 +666,10 @@ var OpenAiCompatibleProvider = class {
   }
 };
 
-// src/llm/secret-vault.ts
-var SessionSecretVault = class {
-  #apiKey;
-  setSessionKey(value) {
-    const normalized2 = value.trim();
-    this.#apiKey = normalized2.length > 0 ? normalized2 : void 0;
-  }
-  hasSessionKey() {
-    return this.#apiKey !== void 0;
-  }
-  getSessionKey() {
-    return this.#apiKey;
-  }
-  clear() {
-    this.#apiKey = void 0;
-  }
-};
-var sessionSecretVault = new SessionSecretVault();
-var embeddingSecretVault = new SessionSecretVault();
-
 // src/llm/provider-factory.ts
 function createLlmProvider(settings) {
   if (settings.llm.provider === "openai-compatible") {
-    return new OpenAiCompatibleProvider(settings.llm.custom, sessionSecretVault);
+    return new OpenAiCompatibleProvider(settings.llm.custom);
   }
   return new MainLlmProvider();
 }
@@ -1330,20 +1394,20 @@ var DEFAULT_SETTINGS = Object.freeze({
 function cloneDefaults() {
   return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function mergeKnown(defaults, stored) {
   if (Array.isArray(defaults)) {
     return Array.isArray(stored) ? stored : defaults;
   }
-  if (!isRecord(defaults)) {
+  if (!isRecord2(defaults)) {
     if (typeof defaults === "number") {
       return typeof stored === "number" && Number.isFinite(stored) ? stored : defaults;
     }
     return typeof stored === typeof defaults ? stored : defaults;
   }
-  const source = isRecord(stored) ? stored : {};
+  const source = isRecord2(stored) ? stored : {};
   const result = {};
   for (const [key, defaultValue] of Object.entries(defaults)) {
     result[key] = mergeKnown(defaultValue, source[key]);
@@ -1410,9 +1474,6 @@ function normalizeEmbeddingsUrl(rawUrl, options) {
   }
   url.hash = "";
   return url.toString();
-}
-function corsProxyUrl(targetUrl) {
-  return `/proxy/${encodeURIComponent(targetUrl)}`;
 }
 
 // src/vector/config.ts
@@ -1510,160 +1571,43 @@ function resolveVectorConfig(settings) {
 }
 
 // src/vector/openai-compatible-embedding.ts
-var MAX_RESPONSE_BYTES2 = 32 * 1024 * 1024;
-function parseErrorBody(value) {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return "";
+function parseVectors(value, expectedCount) {
+  if (!Array.isArray(value)) {
+    throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u7F3A\u5C11\u5411\u91CF\u6570\u7EC4\u3002");
   }
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (typeof parsed.error === "string") {
-      return parsed.error.slice(0, 500);
-    }
-    if (typeof parsed.error?.message === "string") {
-      return parsed.error.message.slice(0, 500);
-    }
-    if (typeof parsed.message === "string") {
-      return parsed.message.slice(0, 500);
-    }
-  } catch {
-  }
-  return trimmed.replace(/\s+/g, " ").slice(0, 500);
-}
-function redactSecret2(value, secret) {
-  return value.split(secret).join("[REDACTED]");
-}
-async function readLimitedText2(response) {
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES2) {
-    throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\uFF0C\u5DF2\u62D2\u7EDD\u5904\u7406\u3002");
-  }
-  if (!response.body) {
-    const text3 = await response.text();
-    if (text3.length > MAX_RESPONSE_BYTES2) {
-      throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\uFF0C\u5DF2\u62D2\u7EDD\u5904\u7406\u3002");
-    }
-    return text3;
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let byteLength = 0;
-  let text2 = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    byteLength += value.byteLength;
-    if (byteLength > MAX_RESPONSE_BYTES2) {
-      await reader.cancel();
-      throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\uFF0C\u5DF2\u62D2\u7EDD\u5904\u7406\u3002");
-    }
-    text2 += decoder.decode(value, { stream: true });
-  }
-  return text2 + decoder.decode();
-}
-function parseVectors(data, expectedCount) {
-  if (typeof data !== "object" || data === null || !Array.isArray(data.data)) {
-    throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11data\u6570\u7EC4\u3002");
-  }
-  const items = [...data.data].sort((left, right) => Number(left.index ?? 0) - Number(right.index ?? 0));
-  if (items.length !== expectedCount) {
-    throw new Error(`Embedding\u63A5\u53E3\u8FD4\u56DE${items.length}\u6761\u5411\u91CF\uFF0C\u9884\u671F${expectedCount}\u6761\u3002`);
+  if (value.length !== expectedCount) {
+    throw new Error(`StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE${value.length}\u6761\u5411\u91CF\uFF0C\u9884\u671F${expectedCount}\u6761\u3002`);
   }
   let dimension;
-  return items.map((item) => {
-    if (!Array.isArray(item.embedding) || item.embedding.length === 0) {
-      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u7A7A\u5411\u91CF\u3002");
+  return value.map((item) => {
+    const rawVector = Array.isArray(item) ? item : item.embedding;
+    if (!Array.isArray(rawVector) || rawVector.length === 0) {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86\u7A7A\u5411\u91CF\u3002");
     }
-    const vector = item.embedding.map(Number);
-    if (vector.some((value) => !Number.isFinite(value))) {
-      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u5411\u91CF\u6570\u503C\u3002");
+    const vector = rawVector.map(Number);
+    if (vector.some((number) => !Number.isFinite(number))) {
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86\u65E0\u6548\u5411\u91CF\u6570\u503C\u3002");
     }
     dimension ??= vector.length;
     if (vector.length !== dimension) {
-      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u7684\u5411\u91CF\u7EF4\u5EA6\u4E0D\u4E00\u81F4\u3002");
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u7684\u5411\u91CF\u7EF4\u5EA6\u4E0D\u4E00\u81F4\u3002");
     }
     return vector;
   });
 }
 var OpenAiCompatibleEmbeddingClient = class {
-  constructor(fetchImpl = fetch, requestHeaders = getRequestHeaders) {
-    this.fetchImpl = fetchImpl;
-    this.requestHeaders = requestHeaders;
+  constructor(serverClient = storyEchoServerClient) {
+    this.serverClient = serverClient;
   }
   async embed(request) {
     if (request.texts.length === 0) {
       return [];
     }
-    const apiKey = embeddingSecretVault.getSessionKey();
-    if (!apiKey) {
-      throw new Error("\u5C1A\u672A\u52A0\u8F7DEmbedding API Key\u3002\u8BF7\u5728StoryEcho\u8BBE\u7F6E\u4E2D\u8F93\u5165\u3002");
-    }
     if (!request.model.trim()) {
       throw new Error("Embedding\u6A21\u578B\u4E0D\u80FD\u4E3A\u7A7A\u3002");
     }
-    const timeoutMs = Math.min(3e5, Math.max(1e3, Math.floor(request.timeoutMs)));
-    const controller = new AbortController();
-    const timeoutId = globalThis.setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const requestBody2 = JSON.stringify({
-        input: request.texts,
-        model: request.model,
-        encoding_format: "float"
-      });
-      const directHeaders = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      };
-      let response;
-      try {
-        response = await this.fetchImpl(request.endpoint, {
-          method: "POST",
-          headers: directHeaders,
-          body: requestBody2,
-          signal: controller.signal,
-          redirect: "error"
-        });
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          throw error;
-        }
-        const proxyHeaders = await this.requestHeaders();
-        response = await this.fetchImpl(corsProxyUrl(request.endpoint), {
-          method: "POST",
-          headers: {
-            ...proxyHeaders,
-            ...directHeaders
-          },
-          body: requestBody2,
-          signal: controller.signal
-        });
-      }
-      const responseText = await readLimitedText2(response);
-      if (!response.ok) {
-        const detail = redactSecret2(parseErrorBody(responseText), apiKey);
-        if (response.status === 404 && responseText.includes("CORS proxy is disabled")) {
-          throw new Error("SillyTavern CORS\u4EE3\u7406\u672A\u542F\u7528\u3002\u8BF7\u5728config.yaml\u8BBE\u7F6EenableCorsProxy: true\u5E76\u91CD\u542F\u9152\u9986\u3002");
-        }
-        throw new Error(`Embedding\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09${detail ? `\uFF1A${detail}` : ""}`);
-      }
-      let data;
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u7684\u4E0D\u662F\u6709\u6548JSON\u3002");
-      }
-      return parseVectors(data, request.texts.length);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new Error(`Embedding\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
-      }
-      throw error;
-    } finally {
-      globalThis.clearTimeout(timeoutId);
-    }
+    const vectors = await this.serverClient.embed(request);
+    return parseVectors(vectors, request.texts.length);
   }
 };
 var openAiCompatibleEmbeddingClient = new OpenAiCompatibleEmbeddingClient();
@@ -2688,6 +2632,10 @@ var PANEL_ID = "story-echo-settings";
 var settingsRepository2 = new SettingsRepository();
 var memoryRepository2 = new MemoryRepository();
 var vectorStore2 = new SillyTavernVectorStore();
+var profileDisplayStates = {
+  llm: { state: "checking" },
+  embedding: { state: "checking" }
+};
 function panelTemplate() {
   const panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -2769,8 +2717,8 @@ function panelTemplate() {
             <input id="story-echo-model" class="text_pole" type="text" placeholder="model-name">
           </label>
           <label class="story-echo-field">
-            <span>API Key\uFF08\u4EC5\u5F53\u524D\u9875\u9762\u5185\u5B58\uFF09</span>
-            <input id="story-echo-api-key" class="text_pole" type="password" autocomplete="off" placeholder="\u5237\u65B0\u540E\u9700\u8981\u91CD\u65B0\u8F93\u5165">
+            <span>API Key\uFF08\u7531\u670D\u52A1\u7AEF\u4FDD\u7BA1\uFF09</span>
+            <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0Key\u63A5\u53E3\u53EF\u7559\u7A7A">
           </label>
           <label class="checkbox_label story-echo-inline">
             <input id="story-echo-allow-http" type="checkbox">
@@ -2781,9 +2729,17 @@ function panelTemplate() {
             <span>\u81EA\u5B9A\u4E49\u63A5\u53E3\u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5</span>
           </label>
           <div class="story-echo-field-wide story-echo-key-row">
-            <span id="story-echo-key-status" class="story-echo-secret-empty">API Key\u672A\u52A0\u8F7D</span>
-            <button id="story-echo-clear-key" class="menu_button" type="button">\u6E05\u9664Key</button>
+            <span id="story-echo-key-status" class="story-echo-secret-empty">\u6B63\u5728\u68C0\u67E5\u670D\u52A1\u7AEF\u914D\u7F6E\u2026\u2026</span>
+            <div class="story-echo-key-actions">
+              <button id="story-echo-save-key" class="menu_button" type="button">
+                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u5230\u670D\u52A1\u7AEF</span>
+              </button>
+              <button id="story-echo-clear-key" class="menu_button" type="button">
+                <i class="fa-solid fa-trash" aria-hidden="true"></i><span>\u5220\u9664\u670D\u52A1\u7AEFKey</span>
+              </button>
+            </div>
           </div>
+          <p class="story-echo-hint story-echo-field-wide">Key\u4E0E\u5F53\u524DBase URL\u7ED1\u5B9A\uFF1B\u66F4\u6362Base URL\u540E\u9700\u8981\u91CD\u65B0\u4FDD\u5B58\uFF0C\u4FEE\u6539\u6A21\u578B\u4E0D\u9700\u8981\u3002</p>
         </div>
 
         <div class="story-echo-grid story-echo-section">
@@ -2813,8 +2769,8 @@ function panelTemplate() {
             <input id="story-echo-embedding-model" class="text_pole" type="text" maxlength="200" placeholder="doubao-embedding-text-\u2026 \u6216 ep-\u2026">
           </label>
           <label class="story-echo-field story-echo-field-wide">
-            <span>Embedding API Key\uFF08\u4EC5\u5F53\u524D\u9875\u9762\u5185\u5B58\uFF09</span>
-            <input id="story-echo-embedding-api-key" class="text_pole" type="password" autocomplete="off" placeholder="\u5237\u65B0\u540E\u9700\u8981\u91CD\u65B0\u8F93\u5165">
+            <span>Embedding API Key\uFF08\u7531\u670D\u52A1\u7AEF\u4FDD\u7BA1\uFF09</span>
+            <input id="story-echo-embedding-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0Key\u63A5\u53E3\u53EF\u7559\u7A7A">
           </label>
           <label class="checkbox_label story-echo-inline story-echo-field-wide">
             <input id="story-echo-embedding-allow-http" type="checkbox">
@@ -2823,16 +2779,19 @@ function panelTemplate() {
           <div class="story-echo-field-wide story-echo-key-row">
             <span id="story-echo-embedding-key-status" class="story-echo-secret-empty">Embedding Key\u672A\u52A0\u8F7D</span>
             <div class="story-echo-key-actions">
+              <button id="story-echo-save-embedding-key" class="menu_button" type="button">
+                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u5230\u670D\u52A1\u7AEF</span>
+              </button>
               <button id="story-echo-test-embedding" class="menu_button" type="button">
                 <i class="fa-solid fa-vial" aria-hidden="true"></i><span>\u6D4B\u8BD5Embedding</span>
               </button>
               <button id="story-echo-clear-embedding-key" class="menu_button" type="button">
-                <i class="fa-solid fa-key" aria-hidden="true"></i><span>\u6E05\u9664Key</span>
+                <i class="fa-solid fa-trash" aria-hidden="true"></i><span>\u5220\u9664\u670D\u52A1\u7AEFKey</span>
               </button>
             </div>
           </div>
           <p class="story-echo-hint story-echo-field-wide">
-            \u4F18\u5148\u76F4\u8FDE\u63A5\u53E3\uFF1B\u82E5\u76EE\u6807\u4E0D\u5141\u8BB8\u6D4F\u89C8\u5668\u8DE8\u57DF\uFF0C\u4F1A\u81EA\u52A8\u56DE\u9000\u9152\u9986CORS\u4EE3\u7406\u3002\u706B\u5C71\u65B9\u821F\u53EF\u76F4\u63A5\u4F7F\u7528\u3002
+            Key\u4E0E\u5F53\u524DBase URL\u7ED1\u5B9A\u3002Embedding\u8BF7\u6C42\u7531SillyTavern\u670D\u52A1\u7AEF\u53D1\u51FA\uFF0C\u4E0D\u9700\u8981\u6D4F\u89C8\u5668\u8DE8\u57DF\u6216CORS\u4EE3\u7406\u3002
           </p>
         </div>
 
@@ -2854,8 +2813,8 @@ function panelTemplate() {
           </button>
         </div>
 
-        <p class="story-echo-hint">
-          LLM\u4E0EEmbedding\u81EA\u5B9A\u4E49Key\u90FD\u4E0D\u4F1A\u4FDD\u5B58\u5230\u6269\u5C55\u8BBE\u7F6E\uFF1B\u5237\u65B0\u9875\u9762\u540E\u9700\u8981\u91CD\u65B0\u8F93\u5165\u3002
+        <p id="story-echo-server-status" class="story-echo-hint">
+          \u6B63\u5728\u68C0\u67E5StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u2026\u2026
         </p>
         <div id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u2026\u2026</div>
         <details class="story-echo-diagnostics" open>
@@ -2887,19 +2846,95 @@ function numberValue(input, fallback) {
   const value = Number(input.value);
   return Number.isFinite(value) ? value : fallback;
 }
+function profileStatusText(kind, display) {
+  const label = kind === "llm" ? "LLM" : "Embedding";
+  switch (display.state) {
+    case "checking":
+      return `\u6B63\u5728\u68C0\u67E5${label}\u670D\u52A1\u7AEF\u914D\u7F6E\u2026\u2026`;
+    case "missing":
+      return `${label}\u5C1A\u672A\u4FDD\u5B58\u5230\u670D\u52A1\u7AEF`;
+    case "unavailable":
+      return "StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u4E0D\u53EF\u7528";
+    case "mismatch":
+      return `${label}\u5DF2\u4FDD\u5B58\uFF0C\u4F46Base URL\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u4FDD\u5B58`;
+    case "ready":
+      return display.hasApiKey ? `${label} API Key\u5DF2\u7531\u670D\u52A1\u7AEF\u4FDD\u7BA1` : `${label}\u670D\u52A1\u7AEF\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF08\u65E0API Key\uFF09`;
+  }
+}
+function syncProfileStatus(panel) {
+  const rows = [
+    ["llm", "#story-echo-key-status"],
+    ["embedding", "#story-echo-embedding-key-status"]
+  ];
+  for (const [kind, selector] of rows) {
+    const target = element(panel, selector);
+    const display = profileDisplayStates[kind];
+    const loaded = display.state === "ready";
+    target.textContent = profileStatusText(kind, display);
+    target.classList.toggle("story-echo-secret-loaded", loaded);
+    target.classList.toggle("story-echo-secret-empty", !loaded);
+  }
+}
+async function configuredEndpoint(kind, settings) {
+  try {
+    if (kind === "llm") {
+      if (!settings.llm.custom.baseUrl.trim()) {
+        return null;
+      }
+      return normalizeChatCompletionsUrl(settings.llm.custom.baseUrl, {
+        allowInsecureHttp: settings.llm.custom.allowInsecureHttp
+      });
+    }
+    return normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
+      allowInsecureHttp: settings.vector.custom.allowInsecureHttp
+    });
+  } catch {
+    return null;
+  }
+}
+async function displayStateFor(kind, profile, settings) {
+  if (!profile.configured || !profile.endpointFingerprint) {
+    return { state: "missing" };
+  }
+  const endpoint = await configuredEndpoint(kind, settings);
+  const hasApiKey = profile.hasApiKey === true;
+  if (!endpoint || await serverEndpointFingerprint(endpoint) !== profile.endpointFingerprint) {
+    return { state: "mismatch", hasApiKey };
+  }
+  return { state: "ready", hasApiKey };
+}
+async function refreshServerProfileStatus(panel) {
+  profileDisplayStates = {
+    llm: { state: "checking" },
+    embedding: { state: "checking" }
+  };
+  syncProfileStatus(panel);
+  const serverTarget = element(panel, "#story-echo-server-status");
+  serverTarget.textContent = "\u6B63\u5728\u68C0\u67E5StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u2026\u2026";
+  try {
+    const status = await storyEchoServerClient.getStatus();
+    const settings = settingsRepository2.get();
+    const [llm, embedding] = await Promise.all([
+      displayStateFor("llm", status.profiles.llm, settings),
+      displayStateFor("embedding", status.profiles.embedding, settings)
+    ]);
+    profileDisplayStates = { llm, embedding };
+    serverTarget.textContent = `StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6 ${status.version} \u5DF2\u8FDE\u63A5\uFF1B\u81EA\u5B9A\u4E49\u8BF7\u6C42\u548CAPI Key\u5747\u7531\u670D\u52A1\u7AEF\u5904\u7406\u3002`;
+  } catch (error) {
+    profileDisplayStates = {
+      llm: { state: "unavailable" },
+      embedding: { state: "unavailable" }
+    };
+    serverTarget.textContent = error instanceof Error ? error.message : "StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u4E0D\u53EF\u7528\u3002";
+  }
+  syncProfileStatus(panel);
+}
 function syncVisibility(panel, settings) {
   const custom = element(panel, "#story-echo-custom-provider");
   custom.hidden = settings.llm.provider !== "openai-compatible";
   const customEmbedding = element(panel, "#story-echo-custom-embedding");
   customEmbedding.hidden = settings.vector.source !== "openai-compatible";
-  const keyStatus = element(panel, "#story-echo-key-status");
-  keyStatus.textContent = sessionSecretVault.hasSessionKey() ? "API Key\u5DF2\u52A0\u8F7D\u5230\u5F53\u524D\u9875\u9762" : "API Key\u672A\u52A0\u8F7D";
-  keyStatus.classList.toggle("story-echo-secret-loaded", sessionSecretVault.hasSessionKey());
-  keyStatus.classList.toggle("story-echo-secret-empty", !sessionSecretVault.hasSessionKey());
-  const embeddingKeyStatus = element(panel, "#story-echo-embedding-key-status");
-  embeddingKeyStatus.textContent = embeddingSecretVault.hasSessionKey() ? "Embedding Key\u5DF2\u52A0\u8F7D\u5230\u5F53\u524D\u9875\u9762" : "Embedding Key\u672A\u52A0\u8F7D";
-  embeddingKeyStatus.classList.toggle("story-echo-secret-loaded", embeddingSecretVault.hasSessionKey());
-  embeddingKeyStatus.classList.toggle("story-echo-secret-empty", !embeddingSecretVault.hasSessionKey());
+  syncProfileStatus(panel);
 }
 function syncForm(panel, settings) {
   element(panel, "#story-echo-enabled").checked = settings.enabled;
@@ -2966,6 +3001,7 @@ function bindSettings(panel) {
       current.llm.provider = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
+    void refreshServerProfileStatus(panel);
   });
   element(panel, "#story-echo-auto-extract").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
@@ -2985,6 +3021,7 @@ function bindSettings(panel) {
       settingsRepository2.update((settings) => {
         settings.llm.custom.baseUrl = "";
       });
+      void refreshServerProfileStatus(panel);
       return;
     }
     try {
@@ -2995,6 +3032,7 @@ function bindSettings(panel) {
         settings.llm.custom.baseUrl = normalized2;
       });
       input.value = normalized2;
+      void refreshServerProfileStatus(panel);
     } catch (error) {
       input.value = current.llm.custom.baseUrl;
       notify.error(error instanceof Error ? error.message : "Base URL\u65E0\u6548\u3002");
@@ -3005,31 +3043,67 @@ function bindSettings(panel) {
       settings.llm.custom.model = event.currentTarget.value.trim();
     });
   });
-  element(panel, "#story-echo-api-key").addEventListener("change", (event) => {
-    const input = event.currentTarget;
-    sessionSecretVault.setSessionKey(input.value);
-    input.value = "";
-    syncVisibility(panel, settingsRepository2.get());
-  });
   element(panel, "#story-echo-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.allowInsecureHttp = event.currentTarget.checked;
     });
+    void refreshServerProfileStatus(panel);
   });
   element(panel, "#story-echo-fallback-main").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.fallbackToMain = event.currentTarget.checked;
     });
   });
-  element(panel, "#story-echo-clear-key").addEventListener("click", () => {
-    sessionSecretVault.clear();
-    syncVisibility(panel, settingsRepository2.get());
+  element(panel, "#story-echo-save-key").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const input = element(panel, "#story-echo-api-key");
+    if (!input.value.trim() && !globalThis.confirm("API Key\u4E3A\u7A7A\uFF0C\u5C06\u4FDD\u5B58\u4E3A\u65E0\u9700\u9274\u6743\u7684LLM\u7AEF\u70B9\u3002\u7EE7\u7EED\uFF1F")) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const settings = settingsRepository2.get();
+      const endpoint = normalizeChatCompletionsUrl(settings.llm.custom.baseUrl, {
+        allowInsecureHttp: settings.llm.custom.allowInsecureHttp
+      });
+      await storyEchoServerClient.saveProfile(
+        "llm",
+        endpoint,
+        input.value,
+        settings.llm.custom.allowInsecureHttp
+      );
+      input.value = "";
+      await refreshServerProfileStatus(panel);
+      notify.success("LLM\u914D\u7F6E\u4E0EAPI Key\u5DF2\u4FDD\u5B58\u5230SillyTavern\u670D\u52A1\u7AEF\u3002");
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : "\u4FDD\u5B58LLM\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
+    } finally {
+      input.value = "";
+      button.disabled = false;
+    }
+  });
+  element(panel, "#story-echo-clear-key").addEventListener("click", async (event) => {
+    if (!globalThis.confirm("\u4ECESillyTavern\u670D\u52A1\u7AEF\u6C38\u4E45\u5220\u9664StoryEcho\u7684LLM API Key\uFF1F")) {
+      return;
+    }
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await storyEchoServerClient.deleteProfile("llm");
+      await refreshServerProfileStatus(panel);
+      notify.success("LLM\u670D\u52A1\u7AEF\u914D\u7F6E\u5DF2\u5220\u9664\u3002");
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : "\u5220\u9664LLM\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
+    } finally {
+      button.disabled = false;
+    }
   });
   element(panel, "#story-echo-vector-source").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.vector.source = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
+    void refreshServerProfileStatus(panel);
     void refreshStatus(panel);
   });
   element(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
@@ -3040,6 +3114,7 @@ function bindSettings(panel) {
       settingsRepository2.update((settings) => {
         settings.vector.custom.baseUrl = "";
       });
+      void refreshServerProfileStatus(panel);
       return;
     }
     try {
@@ -3051,6 +3126,7 @@ function bindSettings(panel) {
         settings.vector.custom.baseUrl = baseUrl;
       });
       input.value = baseUrl;
+      void refreshServerProfileStatus(panel);
     } catch (error) {
       input.value = current.vector.custom.baseUrl;
       notify.error(error instanceof Error ? error.message : "Embedding Base URL\u65E0\u6548\u3002");
@@ -3061,20 +3137,55 @@ function bindSettings(panel) {
       settings.vector.custom.model = event.currentTarget.value.trim();
     });
   });
-  element(panel, "#story-echo-embedding-api-key").addEventListener("change", (event) => {
-    const input = event.currentTarget;
-    embeddingSecretVault.setSessionKey(input.value);
-    input.value = "";
-    syncVisibility(panel, settingsRepository2.get());
-  });
   element(panel, "#story-echo-embedding-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.allowInsecureHttp = event.currentTarget.checked;
     });
+    void refreshServerProfileStatus(panel);
   });
-  element(panel, "#story-echo-clear-embedding-key").addEventListener("click", () => {
-    embeddingSecretVault.clear();
-    syncVisibility(panel, settingsRepository2.get());
+  element(panel, "#story-echo-save-embedding-key").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const input = element(panel, "#story-echo-embedding-api-key");
+    if (!input.value.trim() && !globalThis.confirm("API Key\u4E3A\u7A7A\uFF0C\u5C06\u4FDD\u5B58\u4E3A\u65E0\u9700\u9274\u6743\u7684Embedding\u7AEF\u70B9\u3002\u7EE7\u7EED\uFF1F")) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      const settings = settingsRepository2.get();
+      const endpoint = normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
+        allowInsecureHttp: settings.vector.custom.allowInsecureHttp
+      });
+      await storyEchoServerClient.saveProfile(
+        "embedding",
+        endpoint,
+        input.value,
+        settings.vector.custom.allowInsecureHttp
+      );
+      input.value = "";
+      await refreshServerProfileStatus(panel);
+      notify.success("Embedding\u914D\u7F6E\u4E0EAPI Key\u5DF2\u4FDD\u5B58\u5230SillyTavern\u670D\u52A1\u7AEF\u3002");
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : "\u4FDD\u5B58Embedding\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
+    } finally {
+      input.value = "";
+      button.disabled = false;
+    }
+  });
+  element(panel, "#story-echo-clear-embedding-key").addEventListener("click", async (event) => {
+    if (!globalThis.confirm("\u4ECESillyTavern\u670D\u52A1\u7AEF\u6C38\u4E45\u5220\u9664StoryEcho\u7684Embedding API Key\uFF1F")) {
+      return;
+    }
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await storyEchoServerClient.deleteProfile("embedding");
+      await refreshServerProfileStatus(panel);
+      notify.success("Embedding\u670D\u52A1\u7AEF\u914D\u7F6E\u5DF2\u5220\u9664\u3002");
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : "\u5220\u9664Embedding\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
+    } finally {
+      button.disabled = false;
+    }
   });
   element(panel, "#story-echo-test-embedding").addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -3318,7 +3429,10 @@ async function registerSettingsPanel() {
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);
   });
-  await refreshStatus(panel);
+  await Promise.all([
+    refreshStatus(panel),
+    refreshServerProfileStatus(panel)
+  ]);
 }
 
 // src/index.ts

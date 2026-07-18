@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { corsProxyUrl, normalizeEmbeddingsUrl } from '../src/vector/url';
+import { normalizeEmbeddingsUrl } from '../src/vector/url';
 
 describe('normalizeEmbeddingsUrl', () => {
   it.each([
@@ -28,11 +28,5 @@ describe('normalizeEmbeddingsUrl', () => {
     expect(() => normalizeEmbeddingsUrl('https://example.com/v1?key=secret', {
       allowInsecureHttp: false,
     })).toThrow('不能包含查询参数');
-  });
-
-  it('encodes the target URL into the SillyTavern CORS proxy path', () => {
-    expect(corsProxyUrl('https://example.com/v1/embeddings')).toBe(
-      '/proxy/https%3A%2F%2Fexample.com%2Fv1%2Fembeddings',
-    );
   });
 });

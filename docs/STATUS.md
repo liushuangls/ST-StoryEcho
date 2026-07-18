@@ -8,7 +8,7 @@
 - 扩展设置面板；
 - 最近窗口按轮次或消息计算；
 - 默认主连接 LLM Provider；
-- 自定义 OpenAI兼容 Base URL、模型和会话内 Key；
+- 自定义 OpenAI兼容 Base URL、模型和服务端持久化 Key；
 - 自定义 Provider失败后可回退主连接；
 - 剧情抽取 Prompt、JSON Schema和响应校验；
 - 历史切块和手动处理窗口外历史；
@@ -21,7 +21,8 @@
 - Vector Storage插入、查询、列出、删除和清理 Adapter；
 - 自定义OpenAI兼容Embedding，包括火山方舟普通API与Coding Plan Base URL；
 - 远程预生成向量写入Vector Storage，继续由酒馆服务端保存和检索；
-- 自定义Embedding独立页面内存Key、URL校验、连接测试和CORS代理错误提示；
+- 自定义LLM与Embedding的服务端密钥保管、按用户隔离、端点绑定和连接测试；
+- 自定义LLM与Embedding请求全部由SillyTavern服务端发出；
 - 待同步向量队列；
 - Embedding来源或模型变化检测与自动重建；
 - 生成前安全检查、单分块追赶索引、窗口裁剪和记忆块注入；
@@ -41,7 +42,6 @@
 - Vector Storage全部来源的参数适配；
 - 后台低优先级自动抽取调度；
 - 精确 Token计数；
-- 可选服务端自定义 LLM/Embedding密钥代理；
 - 在真实 SillyTavern实例中的兼容性测试；
 - 正式发布、许可证和升级迁移策略。
 
@@ -49,7 +49,7 @@
 
 - 扩展默认关闭；
 - LLM默认使用主连接；
-- 自定义 Key不持久化；
+- 自定义 Key只进入SillyTavern服务端 `secrets.json`，不进入扩展设置、聊天数据或浏览器持久化存储；
 - 索引没有覆盖裁剪边界时保留完整聊天；
 - 单次正常生成最多同步执行一个抽取分块，避免旧聊天首次启用时长时间阻塞；
 - 检索或抽取失败时放行正常生成；
