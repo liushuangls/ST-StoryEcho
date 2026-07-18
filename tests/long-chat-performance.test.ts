@@ -80,7 +80,21 @@ describe('hundreds-floor local performance', () => {
     const shortlistAverageMs = averageDuration(30, () => {
       shortlistCount = shortlistMemories(candidates, memories, new Set()).length;
     });
-    const metadataBytes = new TextEncoder().encode(JSON.stringify(chatState(memories))).byteLength;
+    const state = chatState(memories);
+    state.stageSummary.entries = Array.from({ length: 23 }, (_, index) => ({
+      text: `第${index + 1}阶段总结：${'关键剧情与人物关系。'.repeat(20)}`,
+      sourceStartMessageId: index * 20,
+      sourceEndMessageId: index * 20 + 19,
+      sourceHash: `summary-source-${index}`,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }));
+    state.stageSummary.coveredThroughMessageId = 459;
+    state.stageSummary.coveredThroughHash = 'summary-source-22';
+    let summaryWindowCount = 0;
+    const summaryWindowAverageMs = averageDuration(1_000, () => {
+      summaryWindowCount = state.stageSummary.entries.slice(-4).length;
+    });
+    const metadataBytes = new TextEncoder().encode(JSON.stringify(state)).byteLength;
 
     console.info('[StoryEcho long-chat benchmark]', JSON.stringify({
       messages: messages.length,
@@ -89,6 +103,8 @@ describe('hundreds-floor local performance', () => {
       tokenEstimateAverageMs: Number(tokenEstimateAverageMs.toFixed(3)),
       rankingAverageMs: Number(rankingAverageMs.toFixed(3)),
       shortlistAverageMs: Number(shortlistAverageMs.toFixed(3)),
+      stageSummaries: state.stageSummary.entries.length,
+      summaryWindowAverageMs: Number(summaryWindowAverageMs.toFixed(3)),
       metadataBytes,
     }));
 
@@ -96,10 +112,12 @@ describe('hundreds-floor local performance', () => {
     expect(estimatedTokens).toBeGreaterThan(0);
     expect(rankedCount).toBe(15);
     expect(shortlistCount).toBe(3);
+    expect(summaryWindowCount).toBe(4);
     expect(windowAverageMs).toBeLessThan(20);
     expect(tokenEstimateAverageMs).toBeLessThan(20);
     expect(rankingAverageMs).toBeLessThan(50);
     expect(shortlistAverageMs).toBeLessThan(100);
+    expect(summaryWindowAverageMs).toBeLessThan(5);
     expect(metadataBytes).toBeLessThan(1_000_000);
   });
 });

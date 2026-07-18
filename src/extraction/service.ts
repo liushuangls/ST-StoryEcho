@@ -112,7 +112,7 @@ export class ExtractionService {
     current.indexedThroughHash = '';
     current.indexedPrefixHash = '';
     current.stageSummary = {
-      text: '',
+      entries: [],
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     };

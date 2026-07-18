@@ -26,7 +26,8 @@ export function buildDebugReport(
       stageSummary: {
         coveredThroughMessageId: state.stageSummary.coveredThroughMessageId,
         updatedAt: state.stageSummary.updatedAt ?? null,
-        text: state.stageSummary.text,
+        entryCount: state.stageSummary.entries.length,
+        entries: state.stageSummary.entries,
       },
       memoryStatus,
       vectorCount,

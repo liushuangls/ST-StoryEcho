@@ -37,7 +37,7 @@ export interface ExternalEmbeddingSettings {
 }
 
 export interface StoryEchoSettings {
-  version: 3;
+  version: 4;
   enabled: boolean;
   debug: boolean;
   recentWindow: {
@@ -48,6 +48,7 @@ export interface StoryEchoSettings {
     enabled: boolean;
     automatic: boolean;
     targetTurnsPerUpdate: number;
+    windowSize: number;
     maxTokens: number;
   };
   recall: {
@@ -131,6 +132,14 @@ export interface PendingRange {
   endMessageId: number;
 }
 
+export interface StageSummaryEntry {
+  text: string;
+  sourceStartMessageId: number;
+  sourceEndMessageId: number;
+  sourceHash: string;
+  updatedAt: string;
+}
+
 export interface InspectionRecord {
   createdAt: string;
   generationType: string;
@@ -206,7 +215,7 @@ export interface StoryEchoChatState {
   indexedThroughHash: string;
   indexedPrefixHash: string;
   stageSummary: {
-    text: string;
+    entries: StageSummaryEntry[];
     coveredThroughMessageId: number;
     coveredThroughHash: string;
     updatedAt?: string;

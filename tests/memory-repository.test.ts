@@ -56,7 +56,7 @@ describe('MemoryRepository migration', () => {
 
     expect(state?.pendingVectorDeleteHashes).toEqual([]);
     expect(state?.stageSummary).toEqual({
-      text: '',
+      entries: [],
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     });
@@ -68,6 +68,57 @@ describe('MemoryRepository migration', () => {
     expect(state?.memories[0]?.unresolvedThreads).toEqual([]);
     expect(state?.lastInspection?.durationMs).toBe(0);
     expect(state?.lastInspection?.vectorResultCount).toBe(0);
+    expect(saveMetadata).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a 0.8 rolling summary as one legacy stage entry', async () => {
+    const saveMetadata = vi.fn(async () => undefined);
+    const context: SillyTavernContext = {
+      chat: [],
+      chatId: 'chat-id',
+      extensionSettings: {},
+      chatMetadata: {
+        story_echo: {
+          schemaVersion: 1,
+          chatUuid: 'chat-uuid',
+          ownerChatId: 'chat-id',
+          vectorCollectionId: 'story_echo_chat-uuid_v1',
+          indexedThroughMessageId: 4,
+          indexedThroughHash: 'source-1',
+          indexedPrefixHash: '',
+          stageSummary: {
+            text: '旧版滚动总结',
+            coveredThroughMessageId: 4,
+            coveredThroughHash: 'legacy-summary-hash',
+            updatedAt: '2026-01-02T00:00:00.000Z',
+          },
+          memories: [],
+          pendingRanges: [],
+          pendingVectorHashes: [],
+          pendingVectorDeleteHashes: [],
+          vectorFingerprint: '',
+        },
+      },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata,
+      generateRaw: vi.fn(async () => ''),
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+
+    const state = await new MemoryRepository().getOrCreate();
+
+    expect(state?.stageSummary).toEqual({
+      entries: [{
+        text: '旧版滚动总结',
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 4,
+        sourceHash: 'legacy-summary-hash',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      }],
+      coveredThroughMessageId: 4,
+      coveredThroughHash: 'legacy-summary-hash',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    });
     expect(saveMetadata).toHaveBeenCalledOnce();
   });
 });

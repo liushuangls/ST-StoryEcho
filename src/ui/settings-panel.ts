@@ -138,7 +138,7 @@ function panelTemplate(): HTMLElement {
               <i class="fa-solid fa-book-open" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
                 <span class="story-echo-section-summary-title">历史阶段总结</span>
-                <span class="story-echo-section-summary-description">滚动总结、覆盖批次与输出预算</span>
+                <span class="story-echo-section-summary-description">总结间隔 N、携带窗口 S 与输出预算</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -146,12 +146,12 @@ function panelTemplate(): HTMLElement {
           <div class="story-echo-grid story-echo-section-body">
             <div class="story-echo-switch-row story-echo-field-wide">
               <div class="story-echo-switch-copy">
-                <span class="story-echo-switch-title">启用滚动阶段总结</span>
-                <span class="story-echo-switch-description">用一份有界总结维持窗口外的长期剧情脉络</span>
+                <span class="story-echo-switch-title">启用分批阶段总结</span>
+                <span class="story-echo-switch-description">窗口外每满一批就新增一条独立总结</span>
               </div>
               <div class="story-echo-toggle">
                 <input id="story-echo-summary-enabled" class="story-echo-toggle-input" type="checkbox">
-                <label class="story-echo-toggle-label" for="story-echo-summary-enabled" aria-label="启用滚动阶段总结"></label>
+                <label class="story-echo-toggle-label" for="story-echo-summary-enabled" aria-label="启用分批阶段总结"></label>
               </div>
             </div>
             <div class="story-echo-switch-row story-echo-field-wide">
@@ -165,15 +165,19 @@ function panelTemplate(): HTMLElement {
               </div>
             </div>
             <label class="story-echo-field">
-              <span>每批总结轮数（用户 + AI）</span>
+              <span>总结间隔 N（用户 + AI 轮次）</span>
               <input id="story-echo-summary-turns" class="text_pole" type="number" min="1" max="100" step="1">
             </label>
             <label class="story-echo-field">
-              <span>总结最大输出 Token</span>
+              <span>总结窗口 S（最多携带条数）</span>
+              <input id="story-echo-summary-window" class="text_pole" type="number" min="1" max="100" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>每条总结最大输出 Token</span>
               <input id="story-echo-summary-max-tokens" class="text_pole" type="number" min="128" max="8192" step="128">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              实际原文会保留“所有未总结消息”和“最近 N 轮”的并集。总结位于近期原文前；动态召回位于当前 User 前，均不写入聊天记录。
+              最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文；每次请求只带最近 S 条总结。总结位于近期原文前，动态召回位于当前 User 前，均不写入聊天记录。
             </p>
           </div>
         </details>
@@ -420,6 +424,8 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-summary-automatic').checked = settings.summary.automatic;
   element<HTMLInputElement>(panel, '#story-echo-summary-turns').value =
     String(settings.summary.targetTurnsPerUpdate);
+  element<HTMLInputElement>(panel, '#story-echo-summary-window').value =
+    String(settings.summary.windowSize);
   element<HTMLInputElement>(panel, '#story-echo-summary-max-tokens').value =
     String(settings.summary.maxTokens);
   element<HTMLInputElement>(panel, '#story-echo-max-events').value = String(settings.recall.maxEvents);
@@ -488,6 +494,13 @@ function bindSettings(panel: HTMLElement): void {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 10));
       settings.summary.targetTurnsPerUpdate = Math.min(100, Math.max(1, value));
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-summary-window').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 4));
+      settings.summary.windowSize = Math.min(100, Math.max(1, value));
     });
   });
 
@@ -749,7 +762,7 @@ function bindSettings(panel: HTMLElement): void {
           status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
         });
       }
-      notify.success('窗口外历史处理完成。');
+      notify.success('窗口外历史处理完成；不足 N 轮的尾部原文会继续保留。');
       await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : '历史处理失败。');
@@ -944,10 +957,20 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       `待同步向量：${state.pendingVectorHashes.length}`,
       `待删除向量：${state.pendingVectorDeleteHashes.length}`,
       `已处理到消息：${state.indexedThroughMessageId}`,
-      `阶段总结覆盖：${state.stageSummary.coveredThroughMessageId}`,
+      `阶段总结：${state.stageSummary.entries.length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
       `集合：${state.vectorCollectionId}`,
     ].join('｜');
-    stageSummaryTarget.textContent = state.stageSummary.text || '尚无阶段总结。';
+    const summaryWindowSize = Math.max(1, Math.floor(settingsRepository.get().summary.windowSize));
+    const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);
+    stageSummaryTarget.textContent = visibleSummaries.length > 0
+      ? [
+          `已保存 ${state.stageSummary.entries.length} 条；正常请求携带最近 ${visibleSummaries.length} 条。`,
+          ...visibleSummaries.map((entry, index) => [
+            `#${state.stageSummary.entries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
+            entry.text,
+          ].join('\n')),
+        ].join('\n\n')
+      : '尚无阶段总结。';
     stats.textContent = statsText(state);
     inspection.textContent = inspectionText(state);
     traces.textContent = tracesText(state);

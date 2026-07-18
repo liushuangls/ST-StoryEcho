@@ -96,7 +96,7 @@ function safeSourceRetainedStart(
   unit: 'turns' | 'messages',
 ): number {
   const extractionBoundary = Math.max(0, state.indexedThroughMessageId + 1);
-  const summaryBoundary = summaryEnabled && state.stageSummary.text.trim()
+  const summaryBoundary = summaryEnabled && state.stageSummary.entries.length > 0
     ? Math.max(0, state.stageSummary.coveredThroughMessageId + 1)
     : summaryEnabled ? 0 : minimumRetainedStart;
   const proposed = Math.min(minimumRetainedStart, extractionBoundary, summaryBoundary);
@@ -378,11 +378,20 @@ export async function storyEchoGenerateInterceptor(
       settings.recall.maxTokens,
     );
     const recallBlock = selected.length > 0 ? renderMemoryBlock(selected) : '';
-    const summaryBlock = settings.summary.enabled && state.stageSummary.text
-      ? renderStageSummaryBlock(state.stageSummary.text)
-      : '';
+    const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
+    const summaryEntries = settings.summary.enabled
+      ? state.stageSummary.entries.slice(-summaryWindowSize)
+      : [];
+    const summaryBlocks = summaryEntries.map((entry) => renderStageSummaryBlock(
+      entry.text,
+      entry.sourceStartMessageId,
+      entry.sourceEndMessageId,
+    ));
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
-    const estimatedSummaryTokens = summaryBlock ? estimateTokens(summaryBlock) : 0;
+    const estimatedSummaryTokens = summaryBlocks.reduce(
+      (total, block) => total + estimateTokens(block),
+      0,
+    );
     const estimatedInjectedTokens = estimatedSummaryTokens + (
       recallBlock ? estimateTokens(recallBlock) : 0
     );
@@ -391,9 +400,13 @@ export async function storyEchoGenerateInterceptor(
     const currentInput = chat[window.currentInputIndex];
     removeMessagesAtIndices(chat, window.removableIndices);
 
-    if (summaryBlock) {
+    if (summaryBlocks.length > 0) {
       const anchorIndex = retainedAnchor ? chat.indexOf(retainedAnchor) : 0;
-      chat.splice(Math.max(0, anchorIndex), 0, requestSystemMessage(summaryBlock, 'summary'));
+      chat.splice(
+        Math.max(0, anchorIndex),
+        0,
+        ...summaryBlocks.map((block) => requestSystemMessage(block, 'summary')),
+      );
     }
     if (recallBlock && currentInput) {
       const currentInputIndex = chat.indexOf(currentInput);
@@ -430,7 +443,8 @@ export async function storyEchoGenerateInterceptor(
       retainedSourceStart,
       removedMessages: window.removableIndices.length,
       summaryCoveredThrough: state.stageSummary.coveredThroughMessageId,
-      summaryInjected: Boolean(summaryBlock),
+      summaryEntriesStored: state.stageSummary.entries.length,
+      summaryEntriesInjected: summaryBlocks.length,
       intentVectorResults: vectorResults.intent.length,
       sceneVectorResults: vectorResults.scene.length,
       uniqueVectorResults: uniqueVectorResultCount,

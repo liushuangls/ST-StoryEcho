@@ -75,13 +75,44 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 3,
+      version: 4,
       extraction: { automatic: true, targetTurnsPerChunk: 5 },
       summary: {
         enabled: true,
         automatic: true,
         targetTurnsPerUpdate: 10,
+        windowSize: 4,
         maxTokens: 1_600,
+      },
+    });
+  });
+
+  it('adds the default S window when upgrading 0.8 settings', () => {
+    const extensionSettings: Record<string, unknown> = {
+      story_echo: {
+        version: 3,
+        recentWindow: { size: 12, unit: 'turns' },
+        summary: {
+          enabled: true,
+          automatic: true,
+          targetTurnsPerUpdate: 8,
+          maxTokens: 2_048,
+        },
+      },
+    };
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    expect(new SettingsRepository().get()).toMatchObject({
+      version: 4,
+      recentWindow: { size: 12, unit: 'turns' },
+      summary: {
+        enabled: true,
+        automatic: true,
+        targetTurnsPerUpdate: 8,
+        windowSize: 4,
+        maxTokens: 2_048,
       },
     });
   });

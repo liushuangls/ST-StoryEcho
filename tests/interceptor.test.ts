@@ -38,9 +38,15 @@ async function installContext(options: {
   state.ownerChatId = 'chat-id';
   state.indexedThroughMessageId = 2;
   state.stageSummary = {
-    text: options.summaryCoveredThrough === undefined || options.summaryCoveredThrough < 0
-      ? ''
-      : '较早时，林雨开始保管银色钥匙。',
+    entries: options.summaryCoveredThrough === undefined || options.summaryCoveredThrough < 0
+      ? []
+      : [{
+          text: '较早时，林雨开始保管银色钥匙。',
+          sourceStartMessageId: 0,
+          sourceEndMessageId: options.summaryCoveredThrough,
+          sourceHash: 'summary-source',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }],
     coveredThroughMessageId: options.summaryCoveredThrough ?? 2,
     coveredThroughHash: options.summaryCoveredThrough === undefined || options.summaryCoveredThrough < 0
       ? ''
@@ -136,5 +142,53 @@ describe('StoryEcho request ordering', () => {
     const stored = context.chatMetadata[MODULE_ID];
     expect(stored.lastInspection?.removedMessageCount).toBe(1);
     expect(stored.metrics.generationsTrimmed).toBe(1);
+  });
+
+  it('injects only the latest S independent summaries in chronological order', async () => {
+    const { context, settings } = await installContext({
+      withMemory: false,
+      summaryCoveredThrough: 2,
+    });
+    settings.summary.windowSize = 2;
+    const stored = context.chatMetadata[MODULE_ID];
+    stored.stageSummary = {
+      entries: [
+        {
+          text: '第一阶段',
+          sourceStartMessageId: 0,
+          sourceEndMessageId: 0,
+          sourceHash: 'summary-1',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          text: '第二阶段',
+          sourceStartMessageId: 1,
+          sourceEndMessageId: 1,
+          sourceHash: 'summary-2',
+          updatedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          text: '第三阶段',
+          sourceStartMessageId: 2,
+          sourceEndMessageId: 2,
+          sourceHash: 'summary-3',
+          updatedAt: '2026-01-03T00:00:00.000Z',
+        },
+      ],
+      coveredThroughMessageId: 2,
+      coveredThroughHash: 'summary-3',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    };
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    const summaries = promptChat.filter(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
+    );
+    expect(summaries).toHaveLength(2);
+    expect(summaries[0]?.mes).toContain('第二阶段');
+    expect(summaries[1]?.mes).toContain('第三阶段');
+    expect(summaries.map((message) => message.mes)).not.toContain(expect.stringContaining('第一阶段'));
   });
 });

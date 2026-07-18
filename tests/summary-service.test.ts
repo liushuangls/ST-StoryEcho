@@ -34,10 +34,9 @@ function installContext(
   return { context, settings, state };
 }
 
-describe('rolling stage summary', () => {
-  it('builds an update prompt from the previous summary and exact message ids', () => {
+describe('independent stage summaries', () => {
+  it('builds an independent batch prompt with exact message ids', () => {
     const prompt = buildStageSummaryPrompt(
-      '此前在旧港发现线索。',
       [
         { is_user: true, name: '刘爽', mes: '转移到新港。' },
         { is_user: false, name: 'Assistant', mes: '众人抵达新港。' },
@@ -45,10 +44,10 @@ describe('rolling stage summary', () => {
       12,
     );
 
-    expect(prompt).toContain('此前在旧港发现线索。');
     expect(prompt).toContain('消息 12 到 13');
     expect(prompt).toContain('"messageId":12');
     expect(prompt).toContain('"messageId":13');
+    expect(prompt).not.toContain('previous_summary');
   });
 
   it('waits for a complete automatic batch and keeps the coverage cursor unchanged', async () => {
@@ -66,7 +65,7 @@ describe('rolling stage summary', () => {
     expect(generateRaw).not.toHaveBeenCalled();
   });
 
-  it('rewrites one bounded summary and advances the cursor for a complete batch', async () => {
+  it('appends one bounded summary entry and advances the cursor for a complete batch', async () => {
     const generateRaw = vi.fn(async (_options: unknown) => '众人在旧港取得钥匙，随后抵达新港。');
     const { context } = installContext([
       { is_user: false, mes: 'greeting' },
@@ -80,8 +79,12 @@ describe('rolling stage summary', () => {
 
     expect(result.updatedChunks).toBe(1);
     expect(result.state?.stageSummary).toMatchObject({
-      text: '众人在旧港取得钥匙，随后抵达新港。',
       coveredThroughMessageId: 4,
+      entries: [{
+        text: '众人在旧港取得钥匙，随后抵达新港。',
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 4,
+      }],
     });
     expect(result.state?.stageSummary.coveredThroughHash).not.toBe('');
     expect(result.state?.metrics.summaryUpdates).toBe(1);
@@ -90,7 +93,7 @@ describe('rolling stage summary', () => {
     expect(generateRaw.mock.calls[0]?.[0]).toMatchObject({ responseLength: 1_600 });
   });
 
-  it('lets manual processing summarize a final partial batch', async () => {
+  it('keeps a final partial manual batch as raw history until it reaches N turns', async () => {
     const generateRaw = vi.fn(async () => '旧港阶段结束。');
     installContext([
       { is_user: false, mes: 'greeting' },
@@ -100,9 +103,45 @@ describe('rolling stage summary', () => {
 
     const result = await new StageSummaryService().processAllThrough(2);
 
-    expect(result.updatedChunks).toBe(1);
-    expect(result.state?.stageSummary.coveredThroughMessageId).toBe(2);
-    expect(generateRaw).toHaveBeenCalledOnce();
+    expect(result.updatedChunks).toBe(0);
+    expect(result.state?.stageSummary.coveredThroughMessageId).toBe(-1);
+    expect(result.state?.stageSummary.entries).toEqual([]);
+    expect(generateRaw).not.toHaveBeenCalled();
+  });
+
+  it('creates immutable entries for successive batches without feeding an old summary back', async () => {
+    const generateRaw = vi.fn()
+      .mockResolvedValueOnce('第一阶段总结')
+      .mockResolvedValueOnce('第二阶段总结');
+    installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+      { is_user: true, mes: 'u2' },
+      { is_user: false, mes: 'a2' },
+      { is_user: true, mes: 'u3' },
+      { is_user: false, mes: 'a3' },
+      { is_user: true, mes: 'u4' },
+      { is_user: false, mes: 'a4' },
+    ], generateRaw, 2);
+
+    const result = await new StageSummaryService().processAllThrough(7);
+
+    expect(result.updatedChunks).toBe(2);
+    expect(result.state?.stageSummary.entries).toMatchObject([
+      {
+        text: '第一阶段总结',
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 3,
+      },
+      {
+        text: '第二阶段总结',
+        sourceStartMessageId: 4,
+        sourceEndMessageId: 7,
+      },
+    ]);
+    const secondPrompt = String(generateRaw.mock.calls[1]?.[0]?.prompt ?? '');
+    expect(secondPrompt).not.toContain('第一阶段总结');
+    expect(secondPrompt).toContain('消息 4 到 7');
   });
 
   it('discards an update when its source messages change during the request', async () => {
@@ -120,7 +159,7 @@ describe('rolling stage summary', () => {
     await expect(new StageSummaryService().processNextThrough(1)).rejects.toThrow(/源消息发生变化/);
     const stored = installed.context.chatMetadata[MODULE_ID];
     expect(stored.stageSummary).toMatchObject({
-      text: '',
+      entries: [],
       coveredThroughMessageId: -1,
     });
     expect(stored.metrics.summaryFailures).toBe(1);
@@ -147,7 +186,7 @@ describe('rolling stage summary', () => {
 
     await expect(new StageSummaryService().processNextThrough(1)).rejects.toThrow(/源消息发生变化/);
     expect(activeContext.chatMetadata[MODULE_ID].stageSummary).toMatchObject({
-      text: '',
+      entries: [],
       coveredThroughMessageId: -1,
     });
     expect(activeContext.chatMetadata[MODULE_ID].metrics.summaryFailures).toBe(1);

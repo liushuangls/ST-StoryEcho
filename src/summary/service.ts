@@ -25,7 +25,6 @@ export interface StageSummaryRunResult {
 
 interface StageSummaryRunOptions {
   maxChunks: number;
-  allowPartialFinalChunk: boolean;
   onProgress?: (progress: StageSummaryProgress) => void;
 }
 
@@ -54,10 +53,6 @@ function countCompletedTurns(messages: TavernChatMessage[]): number {
     }
   }
   return completed;
-}
-
-function sourceCharacters(messages: TavernChatMessage[]): number {
-  return messages.reduce((total, message) => total + message.mes.length, 0);
 }
 
 function normalizeSummary(raw: string): string {
@@ -97,7 +92,6 @@ export class StageSummaryService {
   ): Promise<StageSummaryRunResult> {
     return this.enqueue(targetEndMessageId, {
       maxChunks: 1,
-      allowPartialFinalChunk: false,
       ...(onProgress ? { onProgress } : {}),
     });
   }
@@ -108,7 +102,6 @@ export class StageSummaryService {
   ): Promise<StageSummaryRunResult> {
     return this.enqueue(targetEndMessageId, {
       maxChunks: Number.MAX_SAFE_INTEGER,
-      allowPartialFinalChunk: true,
       ...(onProgress ? { onProgress } : {}),
     });
   }
@@ -179,15 +172,7 @@ export class StageSummaryService {
         const hasFullTurnBatch = (
           countCompletedTurns(snapshot) >= settings.summary.targetTurnsPerUpdate
         );
-        const nextMessageCharacters = context.chat[chunk.endMessageId + 1]?.mes.length ?? 0;
-        const wasCharacterLimited = (
-          sourceCharacters(snapshot) >= MAX_SUMMARY_SOURCE_CHARACTERS ||
-          (
-            chunk.endMessageId < maximumEnd &&
-            sourceCharacters(snapshot) + nextMessageCharacters > MAX_SUMMARY_SOURCE_CHARACTERS
-          )
-        );
-        if (!options.allowPartialFinalChunk && !hasFullTurnBatch && !wasCharacterLimited) {
+        if (!hasFullTurnBatch) {
           break;
         }
 
@@ -196,7 +181,6 @@ export class StageSummaryService {
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
           prompt: buildStageSummaryPrompt(
-            state.stageSummary.text,
             snapshot,
             chunk.startMessageId,
           ),
@@ -218,8 +202,15 @@ export class StageSummaryService {
 
         assertChatOwner(state);
         const updatedAt = new Date().toISOString();
-        state.stageSummary = {
+        state.stageSummary.entries.push({
           text,
+          sourceStartMessageId: chunk.startMessageId,
+          sourceEndMessageId: chunk.endMessageId,
+          sourceHash: snapshotHash,
+          updatedAt,
+        });
+        state.stageSummary = {
+          entries: state.stageSummary.entries,
           coveredThroughMessageId: chunk.endMessageId,
           coveredThroughHash: snapshotHash,
           updatedAt,
@@ -228,9 +219,10 @@ export class StageSummaryService {
         state.metrics.summaryMessagesCovered += snapshot.length;
         state.metrics.totalSummaryMs += Math.round(performance.now() - startedAt);
         state.metrics.lastSummaryAt = updatedAt;
-        recordDebugTrace(state, settings.debug, 'summary', '滚动阶段总结已更新。', {
+        recordDebugTrace(state, settings.debug, 'summary', '阶段总结条目已生成。', {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           summaryCharacters: text.length,
+          summaryEntries: state.stageSummary.entries.length,
         });
         await this.memoryRepository.save(state);
         updatedChunks += 1;
@@ -243,7 +235,7 @@ export class StageSummaryService {
       }
     } catch (error) {
       state.metrics.summaryFailures += 1;
-      recordDebugTrace(state, settings.debug, 'error', '滚动阶段总结失败。', {
+      recordDebugTrace(state, settings.debug, 'error', '阶段总结条目生成失败。', {
         error: error instanceof Error ? error.message : String(error),
         startMessageId: start,
         targetEndMessageId: maximumEnd,

@@ -79,6 +79,18 @@ describe('ExtractionService vector synchronization', () => {
     state.ownerChatId = 'chat-id';
     state.indexedThroughMessageId = 2;
     state.indexedPrefixHash = 'prefix-before-delete';
+    state.stageSummary = {
+      entries: [{
+        text: '删除前的阶段总结',
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 2,
+        sourceHash: 'summary-before-delete',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      }],
+      coveredThroughMessageId: 2,
+      coveredThroughHash: 'summary-before-delete',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
     const context = {
       chat: [
         { is_user: true, mes: '第一层' },
@@ -106,6 +118,8 @@ describe('ExtractionService vector synchronization', () => {
     expect(result?.indexedThroughMessageId).toBe(-1);
     expect(result?.indexedPrefixHash).toBe('');
     expect(result?.memories).toEqual([]);
+    expect(result?.stageSummary.entries).toEqual([]);
+    expect(result?.stageSummary.coveredThroughMessageId).toBe(-1);
     expect(result?.pendingVectorHashes).toEqual([]);
     expect(result?.debugTraces.at(-1)?.message).toContain('删楼层');
     expect(fetchMock).toHaveBeenCalledWith('/api/vector/purge', expect.any(Object));
@@ -117,6 +131,18 @@ describe('ExtractionService vector synchronization', () => {
     inherited.ownerChatId = 'original-chat';
     inherited.indexedThroughMessageId = 4;
     inherited.indexedPrefixHash = 'original-prefix';
+    inherited.stageSummary = {
+      entries: [{
+        text: '父分支阶段总结',
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 4,
+        sourceHash: 'parent-summary',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      }],
+      coveredThroughMessageId: 4,
+      coveredThroughHash: 'parent-summary',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
     const context = {
       chat: [
         { is_user: true, mes: '分支保留的第一层' },
@@ -146,6 +172,7 @@ describe('ExtractionService vector synchronization', () => {
     expect(reconciled?.ownerChatId).toBe('branch-chat');
     expect(reconciled?.indexedThroughMessageId).toBe(-1);
     expect(reconciled?.memories).toEqual([]);
+    expect(reconciled?.stageSummary.entries).toEqual([]);
     expect(reconciled?.vectorCollectionId).not.toBe(inherited.vectorCollectionId);
   });
 });

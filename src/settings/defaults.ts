@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     enabled: true,
     automatic: true,
     targetTurnsPerUpdate: 10,
+    windowSize: 4,
     maxTokens: 1_600,
   },
   recall: {

@@ -68,7 +68,7 @@ export function chatState(memories: StoryMemory[] = []): StoryEchoChatState {
     indexedThroughHash: 'source-1',
     indexedPrefixHash: '',
     stageSummary: {
-      text: '',
+      entries: [],
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     },

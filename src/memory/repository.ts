@@ -1,5 +1,9 @@
 import { CHAT_STATE_VERSION, MODULE_ID, VECTOR_COLLECTION_PREFIX } from '../core/constants';
-import type { StoryEchoChatState, StoryMemory } from '../core/types';
+import type {
+  StageSummaryEntry,
+  StoryEchoChatState,
+  StoryMemory,
+} from '../core/types';
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { createUuid } from '../core/uuid';
@@ -19,7 +23,7 @@ function createState(ownerChatId: string): StoryEchoChatState {
     indexedThroughHash: '',
     indexedPrefixHash: '',
     stageSummary: {
-      text: '',
+      entries: [],
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     },
@@ -38,6 +42,14 @@ type StoredMemory = Omit<
   'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'
 > & Partial<Pick<StoryMemory, 'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'>>;
 
+interface StoredStageSummary {
+  entries?: unknown;
+  text?: unknown;
+  coveredThroughMessageId?: unknown;
+  coveredThroughHash?: unknown;
+  updatedAt?: unknown;
+}
+
 type StoredState = Omit<
   StoryEchoChatState,
   | 'memories'
@@ -54,10 +66,101 @@ type StoredState = Omit<
   pendingVectorDeleteHashes?: number[];
   vectorFingerprint?: string;
   indexedPrefixHash?: string;
-  stageSummary?: StoryEchoChatState['stageSummary'];
+  stageSummary?: StoredStageSummary;
   metrics?: StoryEchoChatState['metrics'];
   debugTraces?: StoryEchoChatState['debugTraces'];
 };
+
+const LEGACY_SUMMARY_UPDATED_AT = '1970-01-01T00:00:00.000Z';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const text = typeof value['text'] === 'string' ? value['text'].trim() : '';
+  const sourceStartMessageId = Number(value['sourceStartMessageId']);
+  const sourceEndMessageId = Number(value['sourceEndMessageId']);
+  if (
+    !text ||
+    !Number.isFinite(sourceStartMessageId) ||
+    !Number.isFinite(sourceEndMessageId) ||
+    sourceStartMessageId < 0 ||
+    sourceEndMessageId < sourceStartMessageId
+  ) {
+    return null;
+  }
+  return {
+    text,
+    sourceStartMessageId: Math.floor(sourceStartMessageId),
+    sourceEndMessageId: Math.floor(sourceEndMessageId),
+    sourceHash: typeof value['sourceHash'] === 'string' ? value['sourceHash'] : '',
+    updatedAt: typeof value['updatedAt'] === 'string'
+      ? value['updatedAt']
+      : LEGACY_SUMMARY_UPDATED_AT,
+  };
+}
+
+function normalizeStageSummary(value: StoredStageSummary | undefined): StoryEchoChatState['stageSummary'] {
+  const entries: StageSummaryEntry[] = [];
+  const storedEntries = Array.isArray(value?.entries) ? value.entries : [];
+  let expectedStartMessageId = 0;
+  for (const candidate of storedEntries) {
+    const entry = normalizeStageSummaryEntry(candidate);
+    if (!entry || entry.sourceStartMessageId !== expectedStartMessageId) {
+      break;
+    }
+    entries.push(entry);
+    expectedStartMessageId = entry.sourceEndMessageId + 1;
+  }
+
+  // 0.8.x stored one rolling summary. Preserve it as a single legacy entry so
+  // upgrading never discards already compressed history; all later entries
+  // are generated independently.
+  if (entries.length === 0) {
+    const legacyText = typeof value?.text === 'string' ? value.text.trim() : '';
+    const legacyEnd = Number(value?.coveredThroughMessageId);
+    if (legacyText && Number.isFinite(legacyEnd) && legacyEnd >= 0) {
+      entries.push({
+        text: legacyText,
+        sourceStartMessageId: 0,
+        sourceEndMessageId: Math.floor(legacyEnd),
+        sourceHash: typeof value?.coveredThroughHash === 'string' ? value.coveredThroughHash : '',
+        updatedAt: typeof value?.updatedAt === 'string'
+          ? value.updatedAt
+          : LEGACY_SUMMARY_UPDATED_AT,
+      });
+    }
+  }
+
+  const latest = entries.at(-1);
+  return {
+    entries,
+    coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+    coveredThroughHash: latest?.sourceHash ?? '',
+    ...(latest ? { updatedAt: latest.updatedAt } : {}),
+  };
+}
+
+function isCurrentStageSummary(value: StoredStageSummary | undefined): boolean {
+  if (
+    !value ||
+    !Array.isArray(value.entries) ||
+    !Number.isFinite(value.coveredThroughMessageId) ||
+    typeof value.coveredThroughHash !== 'string'
+  ) {
+    return false;
+  }
+  const normalized = normalizeStageSummary(value);
+  return (
+    normalized.entries.length === value.entries.length &&
+    normalized.coveredThroughMessageId === value.coveredThroughMessageId &&
+    normalized.coveredThroughHash === value.coveredThroughHash
+  );
+}
 
 function isStateBase(value: unknown): value is StoredState {
   if (typeof value !== 'object' || value === null) {
@@ -125,18 +228,7 @@ function normalizeState(stored: StoredState): StoryEchoChatState {
       : [],
     vectorFingerprint: typeof stored.vectorFingerprint === 'string' ? stored.vectorFingerprint : '',
     indexedPrefixHash: typeof stored.indexedPrefixHash === 'string' ? stored.indexedPrefixHash : '',
-    stageSummary: {
-      text: typeof stored.stageSummary?.text === 'string' ? stored.stageSummary.text : '',
-      coveredThroughMessageId: Number.isFinite(stored.stageSummary?.coveredThroughMessageId)
-        ? Math.floor(stored.stageSummary!.coveredThroughMessageId)
-        : -1,
-      coveredThroughHash: typeof stored.stageSummary?.coveredThroughHash === 'string'
-        ? stored.stageSummary.coveredThroughHash
-        : '',
-      ...(typeof stored.stageSummary?.updatedAt === 'string'
-        ? { updatedAt: stored.stageSummary.updatedAt }
-        : {}),
-    },
+    stageSummary: normalizeStageSummary(stored.stageSummary),
     metrics: normalizeMetrics(stored.metrics),
     debugTraces: Array.isArray(stored.debugTraces) ? stored.debugTraces.slice(-50) : [],
     ...(lastInspection ? { lastInspection } : {}),
@@ -174,10 +266,7 @@ export class MemoryRepository {
       !Array.isArray(stored.pendingVectorDeleteHashes) ||
       typeof stored.vectorFingerprint !== 'string' ||
       typeof stored.indexedPrefixHash !== 'string' ||
-      !stored.stageSummary ||
-      typeof stored.stageSummary.text !== 'string' ||
-      !Number.isFinite(stored.stageSummary.coveredThroughMessageId) ||
-      typeof stored.stageSummary.coveredThroughHash !== 'string' ||
+      !isCurrentStageSummary(stored.stageSummary) ||
       !stored.metrics ||
       !Array.isArray(stored.debugTraces) ||
       (stored.lastInspection !== undefined &&
