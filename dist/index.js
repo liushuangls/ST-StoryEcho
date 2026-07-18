@@ -570,7 +570,7 @@ var StoryEchoServerClient = class {
       if (options.signal?.aborted) {
         throw error;
       }
-      throw new Error("\u65E0\u6CD5\u8FDE\u63A5StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u3002");
+      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u672A\u5B89\u88C5\u3001\u672A\u542F\u7528\u6216\u6682\u65F6\u65E0\u6CD5\u8FDE\u63A5\u3002");
     }
     if (response.status === 204) {
       return {};
@@ -3244,7 +3244,10 @@ function bindSettings(panel) {
     }
   });
   element(panel, "#story-echo-refresh-status").addEventListener("click", async () => {
-    await refreshStatus(panel);
+    await Promise.all([
+      refreshStatus(panel),
+      refreshServerProfileStatus(panel)
+    ]);
   });
   element(panel, "#story-echo-copy-debug").addEventListener("click", async () => {
     const state = memoryRepository2.getExisting();
@@ -3433,6 +3436,11 @@ async function registerSettingsPanel() {
     refreshStatus(panel),
     refreshServerProfileStatus(panel)
   ]);
+  globalThis.setTimeout(() => {
+    if (panel.isConnected) {
+      void refreshServerProfileStatus(panel);
+    }
+  }, 4e3);
 }
 
 // src/index.ts

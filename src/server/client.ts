@@ -229,7 +229,7 @@ export class StoryEchoServerClient {
       if (options.signal?.aborted) {
         throw error;
       }
-      throw new Error('无法连接StoryEcho服务端插件。');
+      throw new Error('StoryEcho服务端插件未安装、未启用或暂时无法连接。');
     }
     if (response.status === 204) {
       return {};

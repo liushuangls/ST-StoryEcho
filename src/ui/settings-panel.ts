@@ -694,7 +694,10 @@ function bindSettings(panel: HTMLElement): void {
   });
 
   element<HTMLButtonElement>(panel, '#story-echo-refresh-status').addEventListener('click', async () => {
-    await refreshStatus(panel);
+    await Promise.all([
+      refreshStatus(panel),
+      refreshServerProfileStatus(panel),
+    ]);
   });
 
   element<HTMLButtonElement>(panel, '#story-echo-copy-debug').addEventListener('click', async () => {
@@ -908,4 +911,9 @@ export async function registerSettingsPanel(): Promise<void> {
     refreshStatus(panel),
     refreshServerProfileStatus(panel),
   ]);
+  globalThis.setTimeout(() => {
+    if (panel.isConnected) {
+      void refreshServerProfileStatus(panel);
+    }
+  }, 4_000);
 }
