@@ -14,12 +14,15 @@ function request(overrides: Partial<Parameters<OpenAiCompatibleEmbeddingClient['
 
 describe('OpenAiCompatibleEmbeddingClient', () => {
   it('calls external embedding endpoints through the SillyTavern proxy', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-      data: [
-        { index: 1, embedding: [0.3, 0.4] },
-        { index: 0, embedding: [0.1, 0.2] },
-      ],
-    }), { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(function (this: unknown) {
+      expect(this).toBe(globalThis);
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [
+          { index: 1, embedding: [0.3, 0.4] },
+          { index: 0, embedding: [0.1, 0.2] },
+        ],
+      }), { status: 200 }));
+    });
     const client = new OpenAiCompatibleEmbeddingClient(
       fetchMock,
       async () => ({ 'X-CSRF-Token': 'csrf' }),

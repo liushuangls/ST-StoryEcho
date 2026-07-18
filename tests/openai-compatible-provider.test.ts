@@ -9,9 +9,12 @@ function customConfig(): StoryEchoSettings['llm']['custom'] {
 
 describe('OpenAiCompatibleProvider', () => {
   it('uses the SillyTavern custom backend so the server sends the LLM request', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-      choices: [{ message: { content: 'OK' } }],
-    }), { status: 200 }));
+    const fetchMock = vi.fn<typeof fetch>(function (this: unknown) {
+      expect(this).toBe(globalThis);
+      return Promise.resolve(new Response(JSON.stringify({
+        choices: [{ message: { content: 'OK' } }],
+      }), { status: 200 }));
+    });
     const config = customConfig();
     config.baseUrl = 'https://example.com/v1/chat/completions';
     config.model = 'model-name';

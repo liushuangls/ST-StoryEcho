@@ -139,7 +139,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
 
       let response: Response;
       try {
-        response = await this.fetchImpl(requestUrl, {
+        response = await this.fetchImpl.call(globalThis, requestUrl, {
           method: 'POST',
           headers,
           body: JSON.stringify({

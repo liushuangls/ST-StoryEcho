@@ -126,7 +126,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     };
 
     try {
-      const response = await this.fetchImpl(GENERATE_ENDPOINT, {
+      const response = await this.fetchImpl.call(globalThis, GENERATE_ENDPOINT, {
         method: 'POST',
         headers: {
           ...await this.requestHeaders(),
