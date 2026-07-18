@@ -10,6 +10,7 @@ import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
 import { resetDiagnostics } from '../debug/metrics';
 import { buildDebugReport } from '../debug/report';
 import { extractionService } from '../extraction/service';
+import { fetchCustomLlmModels } from '../llm/model-list';
 import { createLlmProvider } from '../llm/provider-factory';
 import { normalizeChatCompletionsBaseUrl } from '../llm/url';
 import { MemoryRepository } from '../memory/repository';
@@ -95,13 +96,6 @@ function panelTemplate(): HTMLElement {
               <option value="local">本地快速规则</option>
             </select>
           </label>
-          <label class="story-echo-field">
-            <span>LLM来源</span>
-            <select id="story-echo-provider" class="text_pole">
-              <option value="main">SillyTavern主连接（默认）</option>
-              <option value="openai-compatible">自定义OpenAI兼容接口</option>
-            </select>
-          </label>
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">自动补充历史索引</span>
@@ -182,53 +176,89 @@ function panelTemplate(): HTMLElement {
           </div>
         </details>
 
-        <details id="story-echo-custom-provider" class="story-echo-subsection story-echo-collapsible">
+        <details class="story-echo-section story-echo-collapsible" open>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-cloud" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">自定义 LLM 接口</span>
-                <span class="story-echo-section-summary-description">地址、模型、密钥与回退策略</span>
+                <span class="story-echo-section-summary-title">模型来源</span>
+                <span class="story-echo-section-summary-description">主连接或自定义 OpenAI 兼容接口</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
           </summary>
-          <div class="story-echo-grid story-echo-section-body">
-          <label class="story-echo-field story-echo-field-wide">
-            <span>Base URL</span>
-            <input id="story-echo-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://example.com/v1">
-          </label>
-          <label class="story-echo-field">
-            <span>模型</span>
-            <input id="story-echo-model" class="text_pole" type="text" maxlength="200" placeholder="model-name">
-          </label>
-          <label class="story-echo-field">
-            <span>API Key（随酒馆设置同步）</span>
-            <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="无Key接口可留空">
-          </label>
-          <div class="story-echo-switch-row story-echo-field-wide">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">允许不安全 HTTP</span>
-              <span class="story-echo-switch-description">仅建议用于可信的局域网服务</span>
+          <div class="story-echo-model-source-body story-echo-section-body">
+            <label class="story-echo-field story-echo-model-source-select">
+              <span>模型来源</span>
+              <select id="story-echo-provider" class="text_pole">
+                <option value="main">SillyTavern 主连接（默认）</option>
+                <option value="openai-compatible">自定义</option>
+              </select>
+            </label>
+
+            <div id="story-echo-custom-provider" class="story-echo-model-provider-fields">
+              <label class="story-echo-model-card">
+                <span class="story-echo-model-card-title">API 地址</span>
+                <input id="story-echo-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://example.com/v1">
+              </label>
+
+              <label class="story-echo-model-card">
+                <span class="story-echo-model-card-title">API 密钥</span>
+                <span class="story-echo-model-card-description">随酒馆扩展设置同步；无 Key 接口可留空</span>
+                <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="无 Key 接口可留空">
+              </label>
+
+              <div class="story-echo-model-card">
+                <label class="story-echo-field">
+                  <span class="story-echo-model-card-title">模型名称</span>
+                  <input id="story-echo-model" class="text_pole" type="text" maxlength="200" placeholder="model-name">
+                </label>
+                <div class="story-echo-model-picker">
+                  <select id="story-echo-model-select" class="text_pole" aria-label="从模型列表选择">
+                    <option value="">（从列表选择）</option>
+                  </select>
+                  <button id="story-echo-fetch-models" class="menu_button story-echo-action-primary" type="button">
+                    <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i><span>获取模型</span>
+                  </button>
+                </div>
+              </div>
+
+              <details class="story-echo-model-advanced story-echo-collapsible">
+                <summary class="story-echo-section-summary">
+                  <span class="story-echo-section-summary-main">
+                    <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+                    <span class="story-echo-section-summary-title">高级参数</span>
+                  </span>
+                  <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+                </summary>
+                <div class="story-echo-grid story-echo-section-body">
+                  <div class="story-echo-switch-row story-echo-field-wide">
+                    <div class="story-echo-switch-copy">
+                      <span class="story-echo-switch-title">允许不安全 HTTP</span>
+                      <span class="story-echo-switch-description">仅建议用于可信的局域网服务</span>
+                    </div>
+                    <div class="story-echo-toggle">
+                      <input id="story-echo-allow-http" class="story-echo-toggle-input" type="checkbox">
+                      <label class="story-echo-toggle-label" for="story-echo-allow-http" aria-label="允许自定义 LLM 使用不安全 HTTP"></label>
+                    </div>
+                  </div>
+                  <div class="story-echo-switch-row story-echo-field-wide">
+                    <div class="story-echo-switch-copy">
+                      <span class="story-echo-switch-title">失败时回退主连接</span>
+                      <span class="story-echo-switch-description">自定义 LLM 请求失败后尝试 SillyTavern 主连接</span>
+                    </div>
+                    <div class="story-echo-toggle">
+                      <input id="story-echo-fallback-main" class="story-echo-toggle-input" type="checkbox">
+                      <label class="story-echo-toggle-label" for="story-echo-fallback-main" aria-label="自定义 LLM 失败时回退主连接"></label>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <p class="story-echo-hint">
+                LLM Key以明文保存在当前用户的扩展设置中并随酒馆同步；模型列表和生成请求均由SillyTavern后端转发，浏览器不会直接连接LLM接口。
+              </p>
             </div>
-            <div class="story-echo-toggle">
-              <input id="story-echo-allow-http" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-allow-http" aria-label="允许自定义 LLM 使用不安全 HTTP"></label>
-            </div>
-          </div>
-          <div class="story-echo-switch-row story-echo-field-wide">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">失败时回退主连接</span>
-              <span class="story-echo-switch-description">自定义 LLM 请求失败后尝试 SillyTavern 主连接</span>
-            </div>
-            <div class="story-echo-toggle">
-              <input id="story-echo-fallback-main" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-fallback-main" aria-label="自定义 LLM 失败时回退主连接"></label>
-            </div>
-          </div>
-          <p class="story-echo-hint story-echo-field-wide">
-            LLM Key以明文保存在当前用户的扩展设置中并随酒馆同步；请求由SillyTavern后端转发，浏览器不会直接连接LLM接口。
-          </p>
           </div>
         </details>
 
@@ -405,6 +435,32 @@ function numberValue(input: HTMLInputElement, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function populateCustomModelOptions(
+  panel: HTMLElement,
+  models: readonly string[],
+  currentModel: string,
+): void {
+  const select = element<HTMLSelectElement>(panel, '#story-echo-model-select');
+  select.replaceChildren();
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '（从列表选择）';
+  select.append(placeholder);
+  for (const model of models) {
+    const option = document.createElement('option');
+    option.value = model;
+    option.textContent = model;
+    select.append(option);
+  }
+  if (currentModel && !models.includes(currentModel)) {
+    const current = document.createElement('option');
+    current.value = currentModel;
+    current.textContent = `${currentModel}（当前设置）`;
+    select.append(current);
+  }
+  select.value = currentModel || '';
+}
+
 function syncVisibility(panel: HTMLElement, settings: StoryEchoSettings): void {
   const custom = element<HTMLElement>(panel, '#story-echo-custom-provider');
   custom.hidden = settings.llm.provider !== 'openai-compatible';
@@ -439,6 +495,7 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-debug').checked = settings.debug;
   element<HTMLInputElement>(panel, '#story-echo-base-url').value = settings.llm.custom.baseUrl;
   element<HTMLInputElement>(panel, '#story-echo-model').value = settings.llm.custom.model;
+  element<HTMLSelectElement>(panel, '#story-echo-model-select').value = '';
   element<HTMLInputElement>(panel, '#story-echo-allow-http').checked = settings.llm.custom.allowInsecureHttp;
   element<HTMLInputElement>(panel, '#story-echo-fallback-main').checked = settings.llm.custom.fallbackToMain;
   element<HTMLInputElement>(panel, '#story-echo-api-key').value = settings.llm.custom.apiKey;
@@ -586,10 +643,46 @@ function bindSettings(panel: HTMLElement): void {
     }
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-model').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-model').addEventListener('input', (event) => {
+    const model = (event.currentTarget as HTMLInputElement).value.trim();
     settingsRepository.update((settings) => {
-      settings.llm.custom.model = (event.currentTarget as HTMLInputElement).value.trim();
+      settings.llm.custom.model = model;
     });
+    const select = element<HTMLSelectElement>(panel, '#story-echo-model-select');
+    select.value = [...select.options].some((option) => option.value === model) ? model : '';
+  });
+
+  element<HTMLSelectElement>(panel, '#story-echo-model-select').addEventListener('change', (event) => {
+    const model = (event.currentTarget as HTMLSelectElement).value;
+    if (!model) {
+      return;
+    }
+    element<HTMLInputElement>(panel, '#story-echo-model').value = model;
+    settingsRepository.update((settings) => {
+      settings.llm.custom.model = model;
+    });
+  });
+
+  element<HTMLButtonElement>(panel, '#story-echo-fetch-models').addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const label = button.querySelector<HTMLElement>('span');
+    button.disabled = true;
+    if (label) {
+      label.textContent = '获取中…';
+    }
+    try {
+      const settings = settingsRepository.get();
+      const models = await fetchCustomLlmModels(settings.llm.custom);
+      populateCustomModelOptions(panel, models, settings.llm.custom.model.trim());
+      notify.success(`已获取 ${models.length} 个模型。`);
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '获取模型列表失败。');
+    } finally {
+      button.disabled = false;
+      if (label) {
+        label.textContent = '获取模型';
+      }
+    }
   });
 
   element<HTMLInputElement>(panel, '#story-echo-api-key').addEventListener('input', (event) => {

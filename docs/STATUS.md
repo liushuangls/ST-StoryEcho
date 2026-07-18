@@ -9,6 +9,7 @@
 - 最小原文窗口 `W` 按轮次或消息计算；
 - 默认主连接 LLM Provider；
 - 自定义 OpenAI 兼容 LLM，经 SillyTavern 自带后端转发；
+- 截图式模型来源面板，自定义接口支持手填模型或经酒馆后端获取模型列表；
 - 自定义 LLM 失败后可回退主连接；
 - 自定义 OpenAI 兼容 Embedding；
 - 火山方舟多模态 Embedding，支持专用请求/响应格式、4路并发和旧方舟Key迁移；

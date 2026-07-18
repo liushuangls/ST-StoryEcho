@@ -37,7 +37,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 4;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.9.0";
+var EXTENSION_VERSION = "0.9.1";
 
 // src/debug/events.ts
 var DIAGNOSTICS_UPDATED_EVENT = "storyecho:diagnostics-updated";
@@ -4251,6 +4251,112 @@ function buildDebugReport(state, settings, vectorCount = "unknown") {
   );
 }
 
+// src/llm/model-list.ts
+var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
+var MAX_RESPONSE_BYTES3 = 2 * 1024 * 1024;
+function isRecord6(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+async function readLimitedText2(response) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES3) {
+    throw new Error("\u6A21\u578B\u5217\u8868\u54CD\u5E94\u8FC7\u5927\u3002");
+  }
+  const text2 = await response.text();
+  if (new TextEncoder().encode(text2).byteLength > MAX_RESPONSE_BYTES3) {
+    throw new Error("\u6A21\u578B\u5217\u8868\u54CD\u5E94\u8FC7\u5927\u3002");
+  }
+  return text2;
+}
+function errorMessage(payload, response, apiKey) {
+  let detail = "";
+  if (isRecord6(payload)) {
+    const error = payload["error"];
+    if (typeof error === "string") {
+      detail = error;
+    } else if (isRecord6(error) && typeof error["message"] === "string") {
+      detail = error["message"];
+    } else if (typeof payload["message"] === "string") {
+      detail = payload["message"];
+    }
+  }
+  const redacted = apiKey ? detail.split(apiKey).join("[REDACTED]") : detail;
+  const suffix = redacted.trim().replace(/\s+/g, " ").slice(0, 500);
+  const base = `\u83B7\u53D6\u6A21\u578B\u5217\u8868\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u3002`;
+  return suffix ? `${base} ${suffix}` : base;
+}
+function parseCustomModelList(payload) {
+  const root = isRecord6(payload) ? payload : null;
+  const candidates = Array.isArray(root?.["models"]) ? root["models"] : Array.isArray(root?.["data"]) ? root["data"] : Array.isArray(payload) ? payload : [];
+  const names = candidates.map((candidate) => {
+    if (typeof candidate === "string") {
+      return candidate.trim();
+    }
+    if (!isRecord6(candidate)) {
+      return "";
+    }
+    const value = candidate["id"] ?? candidate["model"] ?? candidate["name"];
+    return typeof value === "string" ? value.trim() : "";
+  }).filter((name) => name.length > 0 && name.length <= 200);
+  return [...new Set(names)].sort((left, right) => left.localeCompare(right));
+}
+async function fetchCustomLlmModels(config, fetchImpl = fetch, requestHeaders = getRequestHeaders) {
+  const baseUrl = normalizeChatCompletionsBaseUrl(config.baseUrl, {
+    allowInsecureHttp: config.allowInsecureHttp
+  });
+  const apiKey = config.apiKey.trim();
+  if (apiKey.length > 16384) {
+    throw new Error("\u81EA\u5B9A\u4E49LLM API Key\u8FC7\u957F\u3002");
+  }
+  if (/[\r\n]/.test(apiKey)) {
+    throw new Error("\u81EA\u5B9A\u4E49LLM API Key\u4E0D\u80FD\u5305\u542B\u6362\u884C\u7B26\u3002");
+  }
+  const controller = new AbortController();
+  const timeoutMs = Math.min(3e5, Math.max(1e3, Math.floor(config.timeoutMs)));
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl.call(globalThis, STATUS_ENDPOINT, {
+      method: "POST",
+      headers: {
+        ...await requestHeaders(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        reverse_proxy: baseUrl,
+        proxy_password: "",
+        chat_completion_source: "custom",
+        custom_url: baseUrl,
+        custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : ""
+      }),
+      signal: controller.signal
+    });
+    const text2 = await readLimitedText2(response);
+    let payload = null;
+    try {
+      payload = text2 ? JSON.parse(text2) : null;
+    } catch {
+      if (response.ok) {
+        throw new Error("SillyTavern\u540E\u7AEF\u8FD4\u56DE\u4E86\u975EJSON\u7684\u6A21\u578B\u5217\u8868\u3002");
+      }
+    }
+    if (!response.ok) {
+      throw new Error(errorMessage(payload, response, apiKey));
+    }
+    const models = parseCustomModelList(payload);
+    if (models.length === 0) {
+      throw new Error("\u63A5\u53E3\u8FD4\u56DE\u6210\u529F\uFF0C\u4F46\u6CA1\u6709\u53EF\u7528\u6A21\u578B\u3002");
+    }
+    return models;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`\u83B7\u53D6\u6A21\u578B\u5217\u8868\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+    }
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
 // src/ui/notifications.ts
 function toastr() {
   return globalThis.toastr;
@@ -4343,13 +4449,6 @@ function panelTemplate() {
               <option value="local">\u672C\u5730\u5FEB\u901F\u89C4\u5219</option>
             </select>
           </label>
-          <label class="story-echo-field">
-            <span>LLM\u6765\u6E90</span>
-            <select id="story-echo-provider" class="text_pole">
-              <option value="main">SillyTavern\u4E3B\u8FDE\u63A5\uFF08\u9ED8\u8BA4\uFF09</option>
-              <option value="openai-compatible">\u81EA\u5B9A\u4E49OpenAI\u517C\u5BB9\u63A5\u53E3</option>
-            </select>
-          </label>
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">\u81EA\u52A8\u8865\u5145\u5386\u53F2\u7D22\u5F15</span>
@@ -4430,53 +4529,89 @@ function panelTemplate() {
           </div>
         </details>
 
-        <details id="story-echo-custom-provider" class="story-echo-subsection story-echo-collapsible">
+        <details class="story-echo-section story-echo-collapsible" open>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-cloud" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">\u81EA\u5B9A\u4E49 LLM \u63A5\u53E3</span>
-                <span class="story-echo-section-summary-description">\u5730\u5740\u3001\u6A21\u578B\u3001\u5BC6\u94A5\u4E0E\u56DE\u9000\u7B56\u7565</span>
+                <span class="story-echo-section-summary-title">\u6A21\u578B\u6765\u6E90</span>
+                <span class="story-echo-section-summary-description">\u4E3B\u8FDE\u63A5\u6216\u81EA\u5B9A\u4E49 OpenAI \u517C\u5BB9\u63A5\u53E3</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
           </summary>
-          <div class="story-echo-grid story-echo-section-body">
-          <label class="story-echo-field story-echo-field-wide">
-            <span>Base URL</span>
-            <input id="story-echo-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://example.com/v1">
-          </label>
-          <label class="story-echo-field">
-            <span>\u6A21\u578B</span>
-            <input id="story-echo-model" class="text_pole" type="text" maxlength="200" placeholder="model-name">
-          </label>
-          <label class="story-echo-field">
-            <span>API Key\uFF08\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF09</span>
-            <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0Key\u63A5\u53E3\u53EF\u7559\u7A7A">
-          </label>
-          <div class="story-echo-switch-row story-echo-field-wide">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">\u5141\u8BB8\u4E0D\u5B89\u5168 HTTP</span>
-              <span class="story-echo-switch-description">\u4EC5\u5EFA\u8BAE\u7528\u4E8E\u53EF\u4FE1\u7684\u5C40\u57DF\u7F51\u670D\u52A1</span>
+          <div class="story-echo-model-source-body story-echo-section-body">
+            <label class="story-echo-field story-echo-model-source-select">
+              <span>\u6A21\u578B\u6765\u6E90</span>
+              <select id="story-echo-provider" class="text_pole">
+                <option value="main">SillyTavern \u4E3B\u8FDE\u63A5\uFF08\u9ED8\u8BA4\uFF09</option>
+                <option value="openai-compatible">\u81EA\u5B9A\u4E49</option>
+              </select>
+            </label>
+
+            <div id="story-echo-custom-provider" class="story-echo-model-provider-fields">
+              <label class="story-echo-model-card">
+                <span class="story-echo-model-card-title">API \u5730\u5740</span>
+                <input id="story-echo-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://example.com/v1">
+              </label>
+
+              <label class="story-echo-model-card">
+                <span class="story-echo-model-card-title">API \u5BC6\u94A5</span>
+                <span class="story-echo-model-card-description">\u968F\u9152\u9986\u6269\u5C55\u8BBE\u7F6E\u540C\u6B65\uFF1B\u65E0 Key \u63A5\u53E3\u53EF\u7559\u7A7A</span>
+                <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0 Key \u63A5\u53E3\u53EF\u7559\u7A7A">
+              </label>
+
+              <div class="story-echo-model-card">
+                <label class="story-echo-field">
+                  <span class="story-echo-model-card-title">\u6A21\u578B\u540D\u79F0</span>
+                  <input id="story-echo-model" class="text_pole" type="text" maxlength="200" placeholder="model-name">
+                </label>
+                <div class="story-echo-model-picker">
+                  <select id="story-echo-model-select" class="text_pole" aria-label="\u4ECE\u6A21\u578B\u5217\u8868\u9009\u62E9">
+                    <option value="">\uFF08\u4ECE\u5217\u8868\u9009\u62E9\uFF09</option>
+                  </select>
+                  <button id="story-echo-fetch-models" class="menu_button story-echo-action-primary" type="button">
+                    <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i><span>\u83B7\u53D6\u6A21\u578B</span>
+                  </button>
+                </div>
+              </div>
+
+              <details class="story-echo-model-advanced story-echo-collapsible">
+                <summary class="story-echo-section-summary">
+                  <span class="story-echo-section-summary-main">
+                    <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+                    <span class="story-echo-section-summary-title">\u9AD8\u7EA7\u53C2\u6570</span>
+                  </span>
+                  <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+                </summary>
+                <div class="story-echo-grid story-echo-section-body">
+                  <div class="story-echo-switch-row story-echo-field-wide">
+                    <div class="story-echo-switch-copy">
+                      <span class="story-echo-switch-title">\u5141\u8BB8\u4E0D\u5B89\u5168 HTTP</span>
+                      <span class="story-echo-switch-description">\u4EC5\u5EFA\u8BAE\u7528\u4E8E\u53EF\u4FE1\u7684\u5C40\u57DF\u7F51\u670D\u52A1</span>
+                    </div>
+                    <div class="story-echo-toggle">
+                      <input id="story-echo-allow-http" class="story-echo-toggle-input" type="checkbox">
+                      <label class="story-echo-toggle-label" for="story-echo-allow-http" aria-label="\u5141\u8BB8\u81EA\u5B9A\u4E49 LLM \u4F7F\u7528\u4E0D\u5B89\u5168 HTTP"></label>
+                    </div>
+                  </div>
+                  <div class="story-echo-switch-row story-echo-field-wide">
+                    <div class="story-echo-switch-copy">
+                      <span class="story-echo-switch-title">\u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5</span>
+                      <span class="story-echo-switch-description">\u81EA\u5B9A\u4E49 LLM \u8BF7\u6C42\u5931\u8D25\u540E\u5C1D\u8BD5 SillyTavern \u4E3B\u8FDE\u63A5</span>
+                    </div>
+                    <div class="story-echo-toggle">
+                      <input id="story-echo-fallback-main" class="story-echo-toggle-input" type="checkbox">
+                      <label class="story-echo-toggle-label" for="story-echo-fallback-main" aria-label="\u81EA\u5B9A\u4E49 LLM \u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5"></label>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <p class="story-echo-hint">
+                LLM Key\u4EE5\u660E\u6587\u4FDD\u5B58\u5728\u5F53\u524D\u7528\u6237\u7684\u6269\u5C55\u8BBE\u7F6E\u4E2D\u5E76\u968F\u9152\u9986\u540C\u6B65\uFF1B\u6A21\u578B\u5217\u8868\u548C\u751F\u6210\u8BF7\u6C42\u5747\u7531SillyTavern\u540E\u7AEF\u8F6C\u53D1\uFF0C\u6D4F\u89C8\u5668\u4E0D\u4F1A\u76F4\u63A5\u8FDE\u63A5LLM\u63A5\u53E3\u3002
+              </p>
             </div>
-            <div class="story-echo-toggle">
-              <input id="story-echo-allow-http" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-allow-http" aria-label="\u5141\u8BB8\u81EA\u5B9A\u4E49 LLM \u4F7F\u7528\u4E0D\u5B89\u5168 HTTP"></label>
-            </div>
-          </div>
-          <div class="story-echo-switch-row story-echo-field-wide">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">\u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5</span>
-              <span class="story-echo-switch-description">\u81EA\u5B9A\u4E49 LLM \u8BF7\u6C42\u5931\u8D25\u540E\u5C1D\u8BD5 SillyTavern \u4E3B\u8FDE\u63A5</span>
-            </div>
-            <div class="story-echo-toggle">
-              <input id="story-echo-fallback-main" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-fallback-main" aria-label="\u81EA\u5B9A\u4E49 LLM \u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5"></label>
-            </div>
-          </div>
-          <p class="story-echo-hint story-echo-field-wide">
-            LLM Key\u4EE5\u660E\u6587\u4FDD\u5B58\u5728\u5F53\u524D\u7528\u6237\u7684\u6269\u5C55\u8BBE\u7F6E\u4E2D\u5E76\u968F\u9152\u9986\u540C\u6B65\uFF1B\u8BF7\u6C42\u7531SillyTavern\u540E\u7AEF\u8F6C\u53D1\uFF0C\u6D4F\u89C8\u5668\u4E0D\u4F1A\u76F4\u63A5\u8FDE\u63A5LLM\u63A5\u53E3\u3002
-          </p>
           </div>
         </details>
 
@@ -4650,6 +4785,27 @@ function numberValue(input, fallback) {
   const value = Number(input.value);
   return Number.isFinite(value) ? value : fallback;
 }
+function populateCustomModelOptions(panel, models, currentModel) {
+  const select = element(panel, "#story-echo-model-select");
+  select.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "\uFF08\u4ECE\u5217\u8868\u9009\u62E9\uFF09";
+  select.append(placeholder);
+  for (const model of models) {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    select.append(option);
+  }
+  if (currentModel && !models.includes(currentModel)) {
+    const current = document.createElement("option");
+    current.value = currentModel;
+    current.textContent = `${currentModel}\uFF08\u5F53\u524D\u8BBE\u7F6E\uFF09`;
+    select.append(current);
+  }
+  select.value = currentModel || "";
+}
 function syncVisibility(panel, settings) {
   const custom = element(panel, "#story-echo-custom-provider");
   custom.hidden = settings.llm.provider !== "openai-compatible";
@@ -4677,6 +4833,7 @@ function syncForm(panel, settings) {
   element(panel, "#story-echo-debug").checked = settings.debug;
   element(panel, "#story-echo-base-url").value = settings.llm.custom.baseUrl;
   element(panel, "#story-echo-model").value = settings.llm.custom.model;
+  element(panel, "#story-echo-model-select").value = "";
   element(panel, "#story-echo-allow-http").checked = settings.llm.custom.allowInsecureHttp;
   element(panel, "#story-echo-fallback-main").checked = settings.llm.custom.fallbackToMain;
   element(panel, "#story-echo-api-key").value = settings.llm.custom.apiKey;
@@ -4801,10 +4958,44 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "Base URL\u65E0\u6548\u3002");
     }
   });
-  element(panel, "#story-echo-model").addEventListener("change", (event) => {
+  element(panel, "#story-echo-model").addEventListener("input", (event) => {
+    const model = event.currentTarget.value.trim();
     settingsRepository2.update((settings) => {
-      settings.llm.custom.model = event.currentTarget.value.trim();
+      settings.llm.custom.model = model;
     });
+    const select = element(panel, "#story-echo-model-select");
+    select.value = [...select.options].some((option) => option.value === model) ? model : "";
+  });
+  element(panel, "#story-echo-model-select").addEventListener("change", (event) => {
+    const model = event.currentTarget.value;
+    if (!model) {
+      return;
+    }
+    element(panel, "#story-echo-model").value = model;
+    settingsRepository2.update((settings) => {
+      settings.llm.custom.model = model;
+    });
+  });
+  element(panel, "#story-echo-fetch-models").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const label = button.querySelector("span");
+    button.disabled = true;
+    if (label) {
+      label.textContent = "\u83B7\u53D6\u4E2D\u2026";
+    }
+    try {
+      const settings = settingsRepository2.get();
+      const models = await fetchCustomLlmModels(settings.llm.custom);
+      populateCustomModelOptions(panel, models, settings.llm.custom.model.trim());
+      notify.success(`\u5DF2\u83B7\u53D6 ${models.length} \u4E2A\u6A21\u578B\u3002`);
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : "\u83B7\u53D6\u6A21\u578B\u5217\u8868\u5931\u8D25\u3002");
+    } finally {
+      button.disabled = false;
+      if (label) {
+        label.textContent = "\u83B7\u53D6\u6A21\u578B";
+      }
+    }
   });
   element(panel, "#story-echo-api-key").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
