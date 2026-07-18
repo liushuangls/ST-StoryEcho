@@ -1,5 +1,10 @@
 import { logger } from '../core/logger';
-import type { LlmProviderId, StoryEchoSettings, WindowUnit } from '../core/types';
+import type {
+  LlmProviderId,
+  RetrievalQueryMode,
+  StoryEchoSettings,
+  WindowUnit,
+} from '../core/types';
 import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
 import { resetDiagnostics } from '../debug/metrics';
 import { buildDebugReport } from '../debug/report';
@@ -61,6 +66,13 @@ function panelTemplate(): HTMLElement {
             <input id="story-echo-threshold" class="text_pole" type="number" min="0" max="1" step="0.01">
           </label>
           <label class="story-echo-field">
+            <span>检索查询构造</span>
+            <select id="story-echo-query-mode" class="text_pole">
+              <option value="llm">LLM上下文改写（推荐）</option>
+              <option value="local">本地快速规则</option>
+            </select>
+          </label>
+          <label class="story-echo-field">
             <span>LLM来源</span>
             <select id="story-echo-provider" class="text_pole">
               <option value="main">SillyTavern主连接（默认）</option>
@@ -75,6 +87,9 @@ function panelTemplate(): HTMLElement {
             <input id="story-echo-debug" type="checkbox">
             <span>调试模式（保留最近50条运行轨迹）</span>
           </label>
+          <p class="story-echo-hint story-echo-field-wide">
+            LLM改写会在每次需要召回时先生成一句检索查询；失败时自动回退本地双路查询。
+          </p>
         </div>
 
         <div id="story-echo-custom-provider" class="story-echo-grid">
@@ -98,18 +113,28 @@ function panelTemplate(): HTMLElement {
             <input id="story-echo-fallback-main" type="checkbox">
             <span>自定义接口失败时回退主连接</span>
           </label>
-          <div class="story-echo-field-wide story-echo-inline">
+          <div class="story-echo-field-wide story-echo-key-row">
             <span id="story-echo-key-status" class="story-echo-secret-empty">API Key未加载</span>
             <button id="story-echo-clear-key" class="menu_button" type="button">清除Key</button>
           </div>
         </div>
 
-        <div class="story-echo-inline">
-          <button id="story-echo-test-llm" class="menu_button" type="button">测试LLM连接</button>
-          <button id="story-echo-process-history" class="menu_button" type="button">处理窗口外历史</button>
-          <button id="story-echo-refresh-status" class="menu_button" type="button">刷新状态</button>
-          <button id="story-echo-copy-debug" class="menu_button" type="button">复制调试报告</button>
-          <button id="story-echo-reset-stats" class="menu_button" type="button">重置统计</button>
+        <div class="story-echo-actions" role="group" aria-label="StoryEcho操作">
+          <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
+            <i class="fa-solid fa-plug" aria-hidden="true"></i><span>测试LLM连接</span>
+          </button>
+          <button id="story-echo-process-history" class="menu_button story-echo-action-primary" type="button">
+            <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i><span>处理窗口外历史</span>
+          </button>
+          <button id="story-echo-refresh-status" class="menu_button" type="button">
+            <i class="fa-solid fa-rotate" aria-hidden="true"></i><span>刷新状态</span>
+          </button>
+          <button id="story-echo-copy-debug" class="menu_button" type="button">
+            <i class="fa-solid fa-copy" aria-hidden="true"></i><span>复制调试报告</span>
+          </button>
+          <button id="story-echo-reset-stats" class="menu_button" type="button">
+            <i class="fa-solid fa-arrow-rotate-left" aria-hidden="true"></i><span>重置统计</span>
+          </button>
         </div>
 
         <p class="story-echo-hint">
@@ -165,6 +190,7 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-max-events').value = String(settings.recall.maxEvents);
   element<HTMLInputElement>(panel, '#story-echo-max-tokens').value = String(settings.recall.maxTokens);
   element<HTMLInputElement>(panel, '#story-echo-threshold').value = String(settings.recall.scoreThreshold);
+  element<HTMLSelectElement>(panel, '#story-echo-query-mode').value = settings.recall.queryMode;
   element<HTMLSelectElement>(panel, '#story-echo-provider').value = settings.llm.provider;
   element<HTMLInputElement>(panel, '#story-echo-auto-extract').checked = settings.extraction.automatic;
   element<HTMLInputElement>(panel, '#story-echo-debug').checked = settings.debug;
@@ -211,6 +237,12 @@ function bindSettings(panel: HTMLElement): void {
     settingsRepository.update((settings) => {
       const value = numberValue(event.currentTarget as HTMLInputElement, 0.25);
       settings.recall.scoreThreshold = Math.min(1, Math.max(0, value));
+    });
+  });
+
+  element<HTMLSelectElement>(panel, '#story-echo-query-mode').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.recall.queryMode = (event.currentTarget as HTMLSelectElement).value as RetrievalQueryMode;
     });
   });
 
@@ -400,6 +432,13 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
   const averageConsolidation = metrics.consolidationCalls > 0
     ? Math.round(metrics.totalConsolidationMs / metrics.consolidationCalls)
     : 0;
+  const completedQueryRewrites = Math.max(
+    0,
+    metrics.queryRewriteRequests - metrics.queryRewriteFailures - metrics.queryRewriteCacheHits,
+  );
+  const averageQueryRewrite = completedQueryRewrites > 0
+    ? Math.round(metrics.totalQueryRewriteMs / completedQueryRewrites)
+    : 0;
   const estimatedNetSaved = Math.max(
     0,
     metrics.estimatedRemovedTokens - metrics.estimatedInjectedTokens,
@@ -408,6 +447,7 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
     `记忆：active ${statusCount('active')} / resolved ${statusCount('resolved')} / superseded ${statusCount('superseded')} / invalid ${statusCount('invalid')}`,
     `抽取：${metrics.extractionChunks}块，${metrics.candidatesExtracted}候选，失败${metrics.extractionFailures}次，平均${averageExtraction}ms/块`,
     `整理：调用${metrics.consolidationCalls}次，失败回退${metrics.consolidationFailures}次，平均${averageConsolidation}ms`,
+    `查询改写：请求${metrics.queryRewriteRequests}次，缓存命中${metrics.queryRewriteCacheHits}次，失败回退${metrics.queryRewriteFailures}次，平均${averageQueryRewrite}ms`,
     `动作：CREATE ${metrics.actions.CREATE} / MERGE ${metrics.actions.MERGE} / UPDATE ${metrics.actions.UPDATE} / RESOLVE ${metrics.actions.RESOLVE} / SUPERSEDE ${metrics.actions.SUPERSEDE} / IGNORE ${metrics.actions.IGNORE}`,
     `向量：查询${metrics.vectorQueries}次，查询失败${metrics.vectorQueryFailures}次，同步失败${metrics.vectorSyncFailures}次，写入${metrics.vectorItemsInserted}，删除${metrics.vectorItemsDeleted}，重建${metrics.vectorRebuilds}次`,
     `上下文：尝试${metrics.generationAttempts}次，裁剪${metrics.generationsTrimmed}次，延迟裁剪${metrics.generationsDeferred}次，移除${metrics.messagesRemoved}条原文，注入${metrics.memoriesInjected}条记忆`,

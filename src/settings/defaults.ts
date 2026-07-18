@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     maxEvents: 5,
     maxTokens: 1200,
     scoreThreshold: 0.25,
+    queryMode: 'llm',
   },
   extraction: {
     automatic: true,

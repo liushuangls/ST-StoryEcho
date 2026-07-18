@@ -34,8 +34,8 @@ export function rankMemories(
     .map((memory) => {
       const intentRank = intentRankByHash.get(memory.vectorHash);
       const sceneRank = sceneRankByHash.get(memory.vectorHash);
-      const intentMatches = exactEntityMatches(queryPlan.intentQuery, memory);
-      const sceneMatches = exactEntityMatches(queryPlan.sceneQuery, memory);
+      const intentMatches = exactEntityMatches(queryPlan.keywordIntentQuery, memory);
+      const sceneMatches = exactEntityMatches(queryPlan.keywordSceneQuery, memory);
       const vectorRankScore =
         reciprocalRankScore(intentRank) * queryPlan.intentWeight +
         reciprocalRankScore(sceneRank) * queryPlan.sceneWeight;

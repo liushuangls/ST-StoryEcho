@@ -13,6 +13,9 @@ const WEAK_INTENT_PATTERNS = [
 export interface RetrievalQueryPlan {
   intentQuery: string;
   sceneQuery: string;
+  keywordIntentQuery: string;
+  keywordSceneQuery: string;
+  strategy: 'llm' | 'local';
   weakIntent: boolean;
   intentWeight: number;
   sceneWeight: number;
@@ -61,8 +64,26 @@ export function buildRetrievalQueryPlan(
   return {
     intentQuery,
     sceneQuery,
+    keywordIntentQuery: intentQuery,
+    keywordSceneQuery: sceneQuery,
+    strategy: 'local',
     weakIntent,
     intentWeight: weakIntent ? 0.25 : 1,
     sceneWeight: weakIntent ? 1 : 0.35,
+  };
+}
+
+export function withRewrittenRetrievalQuery(
+  localPlan: RetrievalQueryPlan,
+  rewrittenQuery: string,
+): RetrievalQueryPlan {
+  return {
+    ...localPlan,
+    intentQuery: rewrittenQuery.trim(),
+    sceneQuery: '',
+    strategy: 'llm',
+    weakIntent: false,
+    intentWeight: 1,
+    sceneWeight: 0,
   };
 }

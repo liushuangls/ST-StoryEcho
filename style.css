@@ -1,3 +1,12 @@
+#story-echo-settings,
+#story-echo-settings .inline-drawer-content {
+  min-width: 0;
+}
+
+#story-echo-settings [hidden] {
+  display: none !important;
+}
+
 #story-echo-settings .story-echo-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -8,6 +17,18 @@
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+}
+
+#story-echo-settings .story-echo-field > .text_pole {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+}
+
+#story-echo-settings #story-echo-custom-provider {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--SmartThemeBorderColor);
 }
 
 #story-echo-settings .story-echo-field-wide {
@@ -21,6 +42,55 @@
   gap: 0.5rem;
 }
 
+#story-echo-settings .story-echo-key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+#story-echo-settings .story-echo-key-row .menu_button {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 6rem;
+  margin: 0;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.55rem;
+  margin: 0.85rem 0 0.65rem;
+  width: 100%;
+}
+
+#story-echo-settings .story-echo-actions .menu_button {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  width: 100%;
+  min-width: 0;
+  min-height: 2.65rem;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
+}
+
+#story-echo-settings .story-echo-actions .menu_button i {
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+
+#story-echo-settings .story-echo-action-primary {
+  border-color: var(--SmartThemeQuoteColor);
+}
+
 #story-echo-settings .story-echo-hint {
   color: var(--SmartThemeQuoteColor);
   font-size: 0.9em;
@@ -30,6 +100,7 @@
 #story-echo-settings .story-echo-status {
   border: 1px solid var(--SmartThemeBorderColor);
   border-radius: 6px;
+  margin-top: 0.65rem;
   padding: 0.6rem;
 }
 

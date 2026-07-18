@@ -13,6 +13,8 @@ describe('diagnostics metrics', () => {
     expect(metrics.actions.CREATE).toBe(2);
     expect(metrics.actions.SUPERSEDE).toBe(0);
     expect(metrics.vectorSyncFailures).toBe(0);
+    expect(metrics.queryRewriteRequests).toBe(0);
+    expect(metrics.queryRewriteFailures).toBe(0);
   });
 
   it('keeps only the most recent 50 debug traces', () => {

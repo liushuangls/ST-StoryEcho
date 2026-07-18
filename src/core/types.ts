@@ -1,5 +1,6 @@
 export type WindowUnit = 'turns' | 'messages';
 export type LlmProviderId = 'main' | 'openai-compatible';
+export type RetrievalQueryMode = 'llm' | 'local';
 export type MemoryType =
   | 'event'
   | 'state_change'
@@ -31,6 +32,7 @@ export interface StoryEchoSettings {
     maxEvents: number;
     maxTokens: number;
     scoreThreshold: number;
+    queryMode: RetrievalQueryMode;
   };
   extraction: {
     automatic: boolean;
@@ -135,6 +137,9 @@ export interface StoryEchoMetrics {
   vectorItemsInserted: number;
   vectorItemsDeleted: number;
   vectorRebuilds: number;
+  queryRewriteRequests: number;
+  queryRewriteFailures: number;
+  queryRewriteCacheHits: number;
   generationAttempts: number;
   generationsTrimmed: number;
   generationsDeferred: number;
@@ -145,6 +150,7 @@ export interface StoryEchoMetrics {
   totalExtractionMs: number;
   totalConsolidationMs: number;
   totalRetrievalMs: number;
+  totalQueryRewriteMs: number;
   lastExtractionAt?: string;
   lastGenerationAt?: string;
 }

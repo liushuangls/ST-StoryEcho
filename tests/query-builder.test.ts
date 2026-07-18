@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildRetrievalQueryPlan,
   isWeakRetrievalIntent,
+  withRewrittenRetrievalQuery,
 } from '../src/retrieval/query-builder';
 
 describe('buildRetrievalQueryPlan', () => {
@@ -34,6 +35,24 @@ describe('buildRetrievalQueryPlan', () => {
     expect(plan.weakIntent).toBe(true);
     expect(plan.intentWeight).toBe(0.25);
     expect(plan.sceneWeight).toBe(1);
+  });
+
+  it('uses an LLM rewrite for vectors while preserving raw text for exact entity matching', () => {
+    const local = buildRetrievalQueryPlan([
+      { is_user: false, mes: '林雨带着钥匙进入钟楼。' },
+      { is_user: true, mes: '我跟上去' },
+    ], 1);
+    const rewritten = withRewrittenRetrievalQuery(local, '林雨进入钟楼后的去向和钥匙线索');
+
+    expect(rewritten).toMatchObject({
+      strategy: 'llm',
+      intentQuery: '林雨进入钟楼后的去向和钥匙线索',
+      sceneQuery: '',
+      keywordIntentQuery: '我跟上去',
+      keywordSceneQuery: '林雨带着钥匙进入钟楼。',
+      intentWeight: 1,
+      sceneWeight: 0,
+    });
   });
 });
 

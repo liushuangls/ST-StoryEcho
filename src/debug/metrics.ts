@@ -37,6 +37,9 @@ export function createMetrics(): StoryEchoMetrics {
     vectorItemsInserted: 0,
     vectorItemsDeleted: 0,
     vectorRebuilds: 0,
+    queryRewriteRequests: 0,
+    queryRewriteFailures: 0,
+    queryRewriteCacheHits: 0,
     generationAttempts: 0,
     generationsTrimmed: 0,
     generationsDeferred: 0,
@@ -47,6 +50,7 @@ export function createMetrics(): StoryEchoMetrics {
     totalExtractionMs: 0,
     totalConsolidationMs: 0,
     totalRetrievalMs: 0,
+    totalQueryRewriteMs: 0,
   };
 }
 

@@ -8,7 +8,11 @@ import { extractionService } from '../extraction/service';
 import { isInternalGeneration } from '../llm/internal-generation';
 import { MemoryRepository } from '../memory/repository';
 import { getContext } from '../platform/sillytavern';
-import { buildRetrievalQueryPlan } from '../retrieval/query-builder';
+import {
+  buildRetrievalQueryPlan,
+  withRewrittenRetrievalQuery,
+} from '../retrieval/query-builder';
+import { queryRewriteService } from '../retrieval/query-rewriter';
 import { rankMemories, type RetrievalVectorResults } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig } from '../vector/config';
@@ -163,11 +167,6 @@ export async function storyEchoGenerateInterceptor(
       return;
     }
 
-    const queryPlan = buildRetrievalQueryPlan(chat, window.currentInputIndex);
-    const query = [
-      `用户意图（权重 ${queryPlan.intentWeight}${queryPlan.weakIntent ? '，弱语义' : ''}）：${queryPlan.intentQuery || '（空）'}`,
-      `场景补充（权重 ${queryPlan.sceneWeight}）：${queryPlan.sceneQuery || '（空）'}`,
-    ].join('\n');
     const eligibleMemories = state.memories.filter(
       (memory) =>
         !memory.excluded &&
@@ -175,6 +174,53 @@ export async function storyEchoGenerateInterceptor(
         memory.status !== 'superseded' &&
         memory.source.endMessageId < sourceWindow.retainedStartIndex,
     );
+    let queryPlan = buildRetrievalQueryPlan(chat, window.currentInputIndex);
+    if (
+      settings.recall.queryMode === 'llm' &&
+      settings.recall.maxEvents > 0 &&
+      eligibleMemories.length > 0
+    ) {
+      state.metrics.queryRewriteRequests += 1;
+      try {
+        const rewrite = await queryRewriteService.rewrite(
+          settings,
+          chat,
+          window.currentInputIndex,
+          state.chatUuid,
+        );
+        if (rewrite.cacheHit) {
+          state.metrics.queryRewriteCacheHits += 1;
+        } else {
+          state.metrics.totalQueryRewriteMs += rewrite.durationMs;
+        }
+        queryPlan = withRewrittenRetrievalQuery(queryPlan, rewrite.query);
+        recordDebugTrace(state, settings.debug, 'retrieval', 'LLM检索查询改写完成。', {
+          query: rewrite.query,
+          cacheHit: rewrite.cacheHit,
+          durationMs: rewrite.durationMs,
+        });
+      } catch (error) {
+        state.metrics.queryRewriteFailures += 1;
+        const message = error instanceof Error ? error.message : String(error);
+        warnings.push('LLM查询改写失败，已回退到本地双路查询。');
+        recordDebugTrace(state, settings.debug, 'retrieval', 'LLM检索查询改写失败，使用本地回退。', {
+          error: message,
+        });
+        logger.warn('LLM检索查询改写失败，使用本地回退。', error);
+      }
+    }
+    const query = queryPlan.strategy === 'llm'
+      ? [
+          '策略：LLM上下文改写',
+          `改写查询：${queryPlan.intentQuery}`,
+          `原始用户：${queryPlan.keywordIntentQuery || '（空）'}`,
+          `场景尾部：${queryPlan.keywordSceneQuery || '（空）'}`,
+        ].join('\n')
+      : [
+          `策略：${settings.recall.queryMode === 'llm' ? '本地回退' : '本地快速模式'}`,
+          `用户意图（权重 ${queryPlan.intentWeight}${queryPlan.weakIntent ? '，弱语义' : ''}）：${queryPlan.intentQuery || '（空）'}`,
+          `场景补充（权重 ${queryPlan.sceneWeight}）：${queryPlan.sceneQuery || '（空）'}`,
+        ].join('\n');
 
     const vectorResults: RetrievalVectorResults = { intent: [], scene: [] };
     if (
@@ -186,7 +232,7 @@ export async function storyEchoGenerateInterceptor(
       const topK = Math.max(settings.recall.maxEvents * 3, settings.recall.maxEvents);
       const vectorConfig = resolveVectorConfig(settings);
       const queryVectorChannel = async (
-        channel: '用户意图' | '场景补充',
+        channel: string,
         searchText: string,
       ): Promise<VectorQueryResult[]> => {
         if (!searchText) {
@@ -209,7 +255,7 @@ export async function storyEchoGenerateInterceptor(
         }
       };
       [vectorResults.intent, vectorResults.scene] = await Promise.all([
-        queryVectorChannel('用户意图', queryPlan.intentQuery),
+        queryVectorChannel(queryPlan.strategy === 'llm' ? 'LLM改写' : '用户意图', queryPlan.intentQuery),
         queryVectorChannel('场景补充', queryPlan.sceneQuery),
       ]);
       state.metrics.totalRetrievalMs += Math.round(performance.now() - queryStartedAt);
@@ -277,6 +323,7 @@ export async function storyEchoGenerateInterceptor(
       intentVectorResults: vectorResults.intent.length,
       sceneVectorResults: vectorResults.scene.length,
       uniqueVectorResults: uniqueVectorResultCount,
+      queryStrategy: queryPlan.strategy,
       weakIntent: queryPlan.weakIntent,
       intentWeight: queryPlan.intentWeight,
       sceneWeight: queryPlan.sceneWeight,
