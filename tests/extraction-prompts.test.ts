@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildExtractionPrompt } from '../src/extraction/prompts';
+import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from '../src/extraction/prompts';
 
 describe('buildExtractionPrompt', () => {
   it('keeps source ids while excluding system messages from story extraction', () => {
@@ -13,5 +13,13 @@ describe('buildExtractionPrompt', () => {
     expect(prompt).toContain('"messageId":20');
     expect(prompt).toContain('"messageId":22');
     expect(prompt).not.toContain('hidden system note');
+  });
+
+  it('spells out the fixed candidate field names for providers that ignore JSON Schema', () => {
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('type、scene、event');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('truthStatus只能是');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('不要改名为secret、content、confidence');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('importance低于0.6的普通事件不要输出');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('一闪而过的猜测');
   });
 });

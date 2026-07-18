@@ -1,7 +1,7 @@
 export type WindowUnit = 'turns' | 'messages';
 export type LlmProviderId = 'main' | 'openai-compatible';
 export type RetrievalQueryMode = 'llm' | 'local';
-export type VectorSourceMode = 'inherit' | 'openai-compatible';
+export type VectorSourceMode = 'inherit' | 'openai-compatible' | 'volcengine-multimodal';
 export type MemoryType =
   | 'event'
   | 'state_change'
@@ -21,8 +21,16 @@ export type ConsolidationOperation =
   | 'IGNORE';
 export type DebugStage = 'extraction' | 'consolidation' | 'vector' | 'retrieval' | 'interceptor' | 'error';
 
+export interface ExternalEmbeddingSettings {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  timeoutMs: number;
+  allowInsecureHttp: boolean;
+}
+
 export interface StoryEchoSettings {
-  version: 1;
+  version: 2;
   enabled: boolean;
   debug: boolean;
   recentWindow: {
@@ -54,13 +62,8 @@ export interface StoryEchoSettings {
   vector: {
     source: VectorSourceMode | string;
     model: string;
-    custom: {
-      baseUrl: string;
-      model: string;
-      apiKey: string;
-      timeoutMs: number;
-      allowInsecureHttp: boolean;
-    };
+    custom: ExternalEmbeddingSettings;
+    volcengine: ExternalEmbeddingSettings;
   };
 }
 
@@ -204,6 +207,7 @@ export interface LlmRequest {
   system: string;
   prompt: string;
   jsonSchema?: Record<string, unknown>;
+  maxTokens?: number;
   signal?: AbortSignal;
 }
 

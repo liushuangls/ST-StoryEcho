@@ -150,6 +150,7 @@ export class QueryRewriteService {
       system: QUERY_REWRITE_SYSTEM_PROMPT,
       prompt,
       jsonSchema: QUERY_REWRITE_SCHEMA,
+      maxTokens: 768,
     });
     const query = parseQueryRewriteResponse(raw);
     this.cache.set(cacheKey, query);

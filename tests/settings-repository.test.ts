@@ -17,17 +17,66 @@ describe('SettingsRepository credential persistence', () => {
     repository.update((settings) => {
       settings.llm.custom.apiKey = 'llm-secret';
       settings.vector.custom.apiKey = 'embedding-secret';
+      settings.vector.volcengine.apiKey = 'volcengine-secret';
     });
 
     expect(extensionSettings['story_echo']).toMatchObject({
       llm: { custom: { apiKey: 'llm-secret' } },
-      vector: { custom: { apiKey: 'embedding-secret' } },
+      vector: {
+        custom: { apiKey: 'embedding-secret' },
+        volcengine: { apiKey: 'volcengine-secret' },
+      },
     });
     expect(saveSettingsDebounced).toHaveBeenCalledOnce();
 
     expect(new SettingsRepository().get()).toMatchObject({
       llm: { custom: { apiKey: 'llm-secret' } },
-      vector: { custom: { apiKey: 'embedding-secret' } },
+      vector: {
+        custom: { apiKey: 'embedding-secret' },
+        volcengine: { apiKey: 'volcengine-secret' },
+      },
+    });
+  });
+
+  it('migrates an existing Volcengine custom key into the dedicated provider once', () => {
+    const extensionSettings: Record<string, unknown> = {
+      story_echo: {
+        vector: {
+          custom: {
+            baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+            model: 'doubao-embedding-large-text-250515',
+            apiKey: 'legacy-ark-secret',
+            timeoutMs: 45_000,
+          },
+        },
+      },
+    };
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    expect(new SettingsRepository().get().vector.volcengine).toMatchObject({
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      model: 'doubao-embedding-vision-251215',
+      apiKey: 'legacy-ark-secret',
+      timeoutMs: 45_000,
+    });
+  });
+
+  it('migrates the legacy three-turn extraction batch to the faster default', () => {
+    const extensionSettings: Record<string, unknown> = {
+      story_echo: {
+        version: 1,
+        extraction: { automatic: true, targetTurnsPerChunk: 3 },
+      },
+    };
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    expect(new SettingsRepository().get()).toMatchObject({
+      version: 2,
+      extraction: { automatic: true, targetTurnsPerChunk: 5 },
     });
   });
 });

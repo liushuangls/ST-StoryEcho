@@ -209,7 +209,7 @@ interface VectorItem {
 向量来源选择原则：
 
 - 默认复用 SillyTavern Vector Storage设置；
-- 可选择StoryEcho自定义OpenAI兼容Embedding，包括火山方舟；
+- 可选择StoryEcho自定义OpenAI兼容Embedding，或火山方舟多模态Embedding；
 - 自定义模式由浏览器通过SillyTavern内置`/proxy/`请求远程Embedding API并校验返回向量；
 - 远程API返回的预生成向量通过SillyTavern现有WebLLM输入通道交给Vector Storage，`insert/query/list/delete/purge`仍由酒馆服务端完成；
 - 自定义模式使用独立模型作用域，不与用户真正的WebLLM集合混用；
@@ -228,6 +228,10 @@ interface VectorItem {
 ```
 
 请求使用标准 `{ input: string[], model }`，Bearer Key可选，并校验返回数量、顺序、有限数值和统一维度。Base URL会规范化为 `/embeddings`：空路径默认补 `/v1/embeddings`，已有路径（例如方舟 `/api/v3`）直接补 `/embeddings`。外部地址只在请求时自动添加酒馆 `/proxy/` 前缀；同源地址保持直连以避免循环代理。
+
+### 5.2 火山方舟多模态Embedding
+
+火山方舟 `/embeddings/multimodal` 不使用OpenAI Embeddings的批量结构：多个`input`成员表示一份多模态内容，而不是多条独立文本。因此StoryEcho为每段剧情文本分别发送一次`{ type: "text", text }`请求，以最多4个并发请求取得`data.embedding`，再按原输入顺序交给同一套Vector Storage预生成向量通道。模型、Endpoint ID、Base URL和Key独立于OpenAI兼容来源保存。
 
 API Key保存在SillyTavern当前用户的 `extensionSettings.story_echo`，以明文换取持久化和多端同步。Key和超时不进入向量配置指纹；端点或模型变化会改变 `vectorFingerprint` 并触发当前聊天集合重建，单纯轮换Key或调整超时不会重建。
 
@@ -301,13 +305,12 @@ https://example.com/v1/chat/completions
 
 ### 7.1 场景切块
 
-初版采用固定轮次加边界提示：
+当前按用户消息计数切块：
 
-- 最小 2轮；
-- 目标 3轮；
-- 最大 4轮；
-- 前后重叠 1条消息；
-- 当前最近窗口内的消息暂不强制抽取。
+- 每批目标轮数可在设置中调整，默认 5轮；
+- 单块最多 32,000字符，避免长回复无限放大请求；
+- 当前最近窗口内的消息暂不强制抽取；
+- 索引游标确保每条消息只进入一个成功提交的分块，失败范围保留待重试。
 
 后续由 LLM或规则检测地点、时间和参与者变化。
 
@@ -316,11 +319,10 @@ https://example.com/v1/chat/completions
 输入仅包含：
 
 - 当前历史块；
-- 前一块最后一条场景摘要；
 - 抽取规则；
 - JSON Schema。
 
-输出高召回候选事件，不直接写入存储。
+输出候选事件，不直接写入存储。解析后还会执行确定性的质量门槛：无持续结构、低重要度的普通事件会被拒绝；带原因、结果、状态变化、未解决线索或明确知情范围的事件会获得最低重要度校正。`unresolvedThreads`还必须能在源片段中找到明确疑问、未解状态或待办目标信号；模型仅因信息缺失而杜撰的“去向不明”“内容未知”会被移除。解析数量、拒绝数量、移除的伪线索和拒绝原因写入调试轨迹。
 
 ### 7.3 合并整理
 
@@ -336,7 +338,9 @@ https://example.com/v1/chat/completions
 
 第一版实现先使用 Vector Storage与实体/状态槽匹配生成最多 16 条旧记忆候选，再进行一次结构化 LLM整理。模型失败时采用保守规则：检索文本完全相同则 `IGNORE`；同一实体同一属性值不变则 `MERGE`；值变化则 `SUPERSEDE`；其余 `CREATE`。手工编辑的记忆不得被自动修改。
 
-`MERGE/UPDATE/RESOLVE` 原地保留记忆 ID并追加 `sourceHistory`；`SUPERSEDE` 将旧记忆标为 `superseded`、记录新旧 ID关系并创建最新有效记忆。任何检索文本变化都会分配新向量哈希，同时把旧哈希放入 `pendingVectorDeleteHashes`，防止旧事实继续被语义召回。
+`MERGE/UPDATE/RESOLVE` 原地保留记忆 ID并追加 `sourceHistory`；`MERGE` 会合并而非覆盖双方的原因、结果和补充文本。`SUPERSEDE` 将旧记忆标为 `superseded`、记录新旧 ID关系并创建最新有效记忆。任何检索文本变化都会分配新向量哈希，同时把旧哈希放入 `pendingVectorDeleteHashes`，防止旧事实继续被语义召回。
+
+使用主连接时，StoryEcho在单次后台请求的 `CHAT_COMPLETION_SETTINGS_READY` 生命周期内把已有的推理强度降为 `low`，请求结束立即移除监听器；用户正常角色生成的预设不被修改。主连接不强制发送 JSON Schema，而是由严格 Prompt和容错解析器校验结果，以兼容会对结构化请求返回空对象的后端。
 
 ## 8. 查询与排序
 
@@ -352,11 +356,12 @@ LLM改写成功时，`Retriever` 使用改写后的一句话执行一次 Vector 
 intentVectorRankScore * intentWeight
 + sceneVectorRankScore * sceneWeight
 + weightedExactEntityMatch
++ currentStateIntentBonus
 + importance
 - resolvedPenalty
 ```
 
-Vector Storage当前公开响应不保证提供可直接使用的原始相似度分数，因此当前将返回顺序转换为倒数排名分数；本地双路模式再进行加权融合。后续若服务端接口开放 score，再替换该部分。
+Vector Storage当前公开响应不保证提供可直接使用的原始相似度分数，因此当前将返回顺序转换为倒数排名分数；本地双路模式再进行加权融合。查询包含“现在、位置、状态、持有者”等当前状态意图时，状态变化记忆额外加权，避免相关承诺因向量排名第一而挤掉最新有效状态。后续若服务端接口开放 score，再替换该部分。
 
 ## 9. Token预算
 
@@ -390,6 +395,8 @@ Vector Storage当前公开响应不保证提供可直接使用的原始相似度
 4. 在第一条保留聊天消息前插入一个 StoryEcho系统块；
 5. 任何识别歧义都应放弃裁剪并记录警告。
 
+记忆是否位于窗口外按全部 `sourceHistory` 判断，而不只看最近一次合并的 `source`。只要复合记忆中仍有一个有效事实来源已经离开窗口，该记忆仍可召回。注入文本由结构化的事件、场景、原因、当前结果、状态变化、缺失实体和知情范围统一渲染，避免模型生成摘要中的“我/你”在脱离原场景后产生歧义。
+
 ## 11. 消息变更与分支
 
 ### 11.1 编辑、删除、Swipe
@@ -413,10 +420,10 @@ Vector Storage当前公开响应不保证提供可直接使用的原始相似度
 
 ## 12. 安全
 
-- 不把 Key写入 `extensionSettings`、`chatMetadata`、角色卡、日志或错误上报。
+- 自定义 Key仅写入当前用户的 `extensionSettings.story_echo`以实现持久化和多端同步；不写入 `chatMetadata`、角色卡、Vector Storage、日志或错误上报。
 - 自定义请求只允许 HTTP(S)，默认要求 HTTPS。
 - 自定义响应进行大小限制和 JSON校验。
-- 所有模型输出按 Schema校验，拒绝未知字段和非法枚举。
+- 自定义接口可使用 JSON Schema约束输出；所有提供方的返回仍须经过本地解析、字段白名单、枚举与长度边界校验，未知字段不会写入记忆。
 - UI渲染用户与模型内容前使用 DOM API或 DOMPurify，不拼接未转义 HTML。
 - 不使用 `eval`或动态函数执行。
 - Vector Storage集合 ID只使用 UUID和固定前缀。
@@ -432,7 +439,7 @@ Vector Storage当前公开响应不保证提供可直接使用的原始相似度
 - `info`：手动重建、迁移完成；
 - `debug`：候选、排名和 Token明细，默认关闭。
 
-每次生成保存一个轻量 `InspectionRecord`，并累计抽取、整理、向量和裁剪指标。调试模式额外在聊天元数据中保留最近 50 条有界轨迹。可复制报告明确排除 API Key和自定义 Base URL，但包含定位问题所需的剧情查询、整理动作和召回文本。
+每次生成保存一个轻量 `InspectionRecord`，并累计抽取、整理、向量和裁剪指标。调试模式额外在聊天元数据中保留最近 50 条有界轨迹，包括合资格记忆 ID、各向量通道的哈希与排名以及最终选中 ID。设置面板和可复制报告展示实际结构化注入文本，而不是仅展示原始 `injectionText`。报告明确排除 API Key和自定义 Base URL，但包含定位问题所需的剧情查询、整理动作和召回文本。
 
 ## 14. 兼容策略
 

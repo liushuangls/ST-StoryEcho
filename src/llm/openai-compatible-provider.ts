@@ -97,7 +97,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         { role: 'user', content: request.prompt },
       ],
       model,
-      max_tokens: 8_192,
+      max_tokens: Math.min(8_192, Math.max(16, Math.floor(request.maxTokens ?? 8_192))),
       temperature: 0,
       top_p: 1,
       stream: false,
@@ -172,6 +172,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const response = await this.complete({
       system: 'You are a connection test. Follow the user instruction exactly.',
       prompt: 'Reply with exactly: OK',
+      maxTokens: 16,
     });
     if (!response.trim()) {
       throw new Error('自定义LLM返回了空响应。');

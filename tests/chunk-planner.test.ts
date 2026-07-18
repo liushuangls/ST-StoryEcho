@@ -26,4 +26,17 @@ describe('planNextChunk', () => {
       endMessageId: 6,
     });
   });
+
+  it('caps unusually large chunks by character count', () => {
+    const longMessages: TavernChatMessage[] = [
+      { is_user: true, mes: '甲'.repeat(800) },
+      { is_user: false, mes: '乙'.repeat(400) },
+      { is_user: true, mes: '丙'.repeat(100) },
+    ];
+
+    expect(planNextChunk(longMessages, 0, 2, 5, 1_000)).toEqual({
+      startMessageId: 0,
+      endMessageId: 0,
+    });
+  });
 });

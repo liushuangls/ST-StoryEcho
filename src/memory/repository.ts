@@ -2,17 +2,14 @@ import { CHAT_STATE_VERSION, MODULE_ID, VECTOR_COLLECTION_PREFIX } from '../core
 import type { StoryEchoChatState, StoryMemory } from '../core/types';
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
-
-function newUuid(): string {
-  return crypto.randomUUID();
-}
+import { createUuid } from '../core/uuid';
 
 function createCollectionId(chatUuid: string): string {
   return `${VECTOR_COLLECTION_PREFIX}_${chatUuid}_v${CHAT_STATE_VERSION}`;
 }
 
 function createState(ownerChatId: string): StoryEchoChatState {
-  const chatUuid = newUuid();
+  const chatUuid = createUuid();
   return {
     schemaVersion: CHAT_STATE_VERSION,
     chatUuid,
@@ -163,7 +160,7 @@ export class MemoryRepository {
     }
 
     if (state.ownerChatId !== currentChatId) {
-      const branchUuid = newUuid();
+      const branchUuid = createUuid();
       const branchState: StoryEchoChatState = {
         ...structuredClone(state),
         chatUuid: branchUuid,

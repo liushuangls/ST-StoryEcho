@@ -1,5 +1,6 @@
 import { EXTENSION_VERSION } from '../core/constants';
 import type { StoryEchoChatState, StoryEchoSettings } from '../core/types';
+import { renderMemoryEntry } from '../prompt/render';
 
 export function buildDebugReport(
   state: StoryEchoChatState,
@@ -47,6 +48,7 @@ export function buildDebugReport(
         lastOperation: memory.lastOperation,
         source: memory.source,
         injectionText: memory.injectionText,
+        renderedInjection: renderMemoryEntry(memory),
       })),
     recentMemories: [...state.memories]
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
@@ -67,8 +69,10 @@ export function buildDebugReport(
   const redactions = [
     settings.llm.custom.baseUrl.trim(),
     settings.vector.custom.baseUrl.trim(),
+    settings.vector.volcengine.baseUrl.trim(),
     settings.llm.custom.apiKey.trim(),
     settings.vector.custom.apiKey.trim(),
+    settings.vector.volcengine.apiKey.trim(),
   ].filter(Boolean);
   return redactions.reduce(
     (sanitized, value) => sanitized.split(value).join('[REDACTED]'),

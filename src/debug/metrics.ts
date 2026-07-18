@@ -5,6 +5,7 @@ import type {
   StoryEchoChatState,
   StoryEchoMetrics,
 } from '../core/types';
+import { createUuid } from '../core/uuid';
 
 const ACTIONS: ConsolidationOperation[] = [
   'CREATE',
@@ -106,7 +107,7 @@ export function recordDebugTrace(
       ]))
     : undefined;
   state.debugTraces.push({
-    id: crypto.randomUUID(),
+    id: createUuid(),
     createdAt: new Date().toISOString(),
     stage,
     message,

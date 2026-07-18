@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeEmbeddingsUrl, resolveEmbeddingRequestUrl } from '../src/vector/url';
+import {
+  normalizeEmbeddingsUrl,
+  normalizeVolcengineMultimodalEmbeddingsUrl,
+  resolveEmbeddingRequestUrl,
+} from '../src/vector/url';
 
 describe('normalizeEmbeddingsUrl', () => {
   it.each([
@@ -28,6 +32,31 @@ describe('normalizeEmbeddingsUrl', () => {
     expect(() => normalizeEmbeddingsUrl('https://example.com/v1?key=secret', {
       allowInsecureHttp: false,
     })).toThrow('不能包含查询参数');
+  });
+});
+
+describe('normalizeVolcengineMultimodalEmbeddingsUrl', () => {
+  it.each([
+    [
+      'https://ark.cn-beijing.volces.com',
+      'https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal',
+    ],
+    [
+      'https://ark.cn-beijing.volces.com/api/v3',
+      'https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal',
+    ],
+    [
+      'https://ark.cn-beijing.volces.com/api/v3/embeddings',
+      'https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal',
+    ],
+    [
+      'https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal',
+      'https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal',
+    ],
+  ])('normalizes %s', (input, expected) => {
+    expect(normalizeVolcengineMultimodalEmbeddingsUrl(input, {
+      allowInsecureHttp: false,
+    })).toBe(expected);
   });
 });
 

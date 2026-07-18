@@ -10,7 +10,7 @@ StoryEcho 是一个面向 SillyTavern 长剧情聊天的上下文管理扩展。
 - 将历史对话抽取为结构化剧情记忆，而不是复制原文；
 - 使用 SillyTavern Vector Storage 在服务端保存向量和执行语义检索；
 - 默认复用 SillyTavern 主连接和当前向量来源；
-- 可分别配置自定义 OpenAI 兼容 LLM 与 Embedding，包括火山方舟；
+- 可分别配置自定义 OpenAI 兼容 LLM、OpenAI 兼容 Embedding 与火山方舟多模态 Embedding；
 - 与 MVU、世界书和其他状态系统解耦；
 - 让裁剪、抽取、整理和召回可统计、可调试、可关闭。
 
@@ -35,7 +35,9 @@ StoryEcho 采用无需额外服务端插件的组合方案：
 
 ## 项目状态
 
-项目处于 Alpha 测试阶段。目前已有两种 LLM Provider、自定义 OpenAI 兼容 Embedding、剧情事件抽取、六类事件整理动作、LLM 查询改写与规则降级、聊天元数据存储、Vector Storage 增量同步、滑动窗口、生成拦截、运行统计和调试报告。
+项目处于 Alpha 测试阶段。目前已有两种 LLM Provider、OpenAI 兼容与火山方舟多模态两种外部 Embedding、剧情事件抽取、候选质量门槛、六类事件整理动作、LLM 查询改写与规则降级、聊天元数据存储、Vector Storage 增量同步、滑动窗口、生成拦截、运行统计和调试报告。合并记忆会按完整 `sourceHistory` 判断是否越过窗口边界，避免“最新确认仍在窗口内”时漏召回更早的关键状态。
+
+主连接用于后台抽取、整理和查询改写时会临时采用轻量推理设置，不改变正常角色聊天的推理预设，避免推理模型把整个后台输出预算消耗在隐藏思考中。召回注入使用结构化事件、当前结果、状态变化、实体和知情范围重新渲染，不直接依赖模型生成的第一人称摘要。
 
 消息编辑/删除失效处理、记忆编辑器和完整可视化检查器仍在开发中。
 
@@ -65,15 +67,17 @@ LLM 与 Embedding 的 Base URL、模型和 API Key 都保存在当前 SillyTaver
 
 ### 火山方舟 Embedding
 
-在 StoryEcho 设置中选择“自定义 OpenAI 兼容接口（支持火山方舟）”，填写：
+在 StoryEcho 设置中选择“火山方舟多模态Embedding”，填写：
 
 ```text
 Base URL: https://ark.cn-beijing.volces.com/api/v3
-模型: doubao-embedding-text-… 或方舟推理接入点 ep-…
+模型: doubao-embedding-vision-251215 或多模态推理接入点 ep-m-…
 API Key: 方舟API Key
 ```
 
-方舟 Coding Plan 可使用专属 Base URL `https://ark.cn-beijing.volces.com/api/coding/v3` 和对应模型名。点击“测试 Embedding 连接”验证酒馆代理与方舟配置；测试成功后，生成的向量仍写入当前聊天的 Vector Storage 集合。
+StoryEcho 会调用 `/api/v3/embeddings/multimodal`，把每段剧情文本作为独立的 `{ type: "text" }` 输入，最多并发 4 个请求，并从 `data.embedding` 读取向量。点击“测试火山Embedding连接”验证酒馆代理与方舟配置；测试成功后，生成的向量仍写入当前聊天的 Vector Storage 集合。
+
+方舟 Coding Plan 的 `https://ark.cn-beijing.volces.com/api/coding/v3` 属于 OpenAI 兼容协议，应继续选择“自定义OpenAI兼容接口”，并使用套餐提供的模型名。
 
 ## 开发与安装产物
 

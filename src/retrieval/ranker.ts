@@ -19,7 +19,21 @@ function exactEntityMatches(query: string, memory: StoryMemory): number {
 }
 
 function reciprocalRankScore(rank: number | undefined): number {
-  return rank === undefined ? 0 : 10 / (rank + 1);
+  return rank === undefined ? 0 : 5 / (rank + 1);
+}
+
+const CURRENT_STATE_QUERY = /(现在|当前|目前|如今|最新|仍然|还在|在哪|哪里|何处|位置|状态|持有者|归属)/u;
+const CURRENT_STATE_FACT = /(现在|当前|目前|仍然|已(?:经)?|转移|移到|改为|不再|为空|位置|持有者)/u;
+
+function currentStateBonus(queryPlan: RetrievalQueryPlan, memory: StoryMemory): number {
+  if (!CURRENT_STATE_QUERY.test(queryPlan.intentQuery)) {
+    return 0;
+  }
+  const representsCurrentState =
+    memory.type === 'state_change' ||
+    memory.stateChanges.length > 0 ||
+    CURRENT_STATE_FACT.test(`${memory.event}\n${memory.consequence ?? ''}\n${memory.retrievalText}`);
+  return representsCurrentState ? 3 : 0;
 }
 
 export function rankMemories(
@@ -46,6 +60,7 @@ export function rankMemories(
         (memory.pinned ? 100 : 0) +
         vectorRankScore +
         exactMatchScore +
+        currentStateBonus(queryPlan, memory) +
         memory.importance * 2 +
         (memory.status === 'resolved' ? -2 : 0);
       return {

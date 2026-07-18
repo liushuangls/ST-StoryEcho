@@ -12,13 +12,19 @@ import {
   buildRetrievalQueryPlan,
   withRewrittenRetrievalQuery,
 } from '../retrieval/query-builder';
+import { hasSourceOutsideWindow } from '../retrieval/eligibility';
 import { queryRewriteService } from '../retrieval/query-rewriter';
 import { rankMemories, type RetrievalVectorResults } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig } from '../vector/config';
 import type { VectorQueryResult } from '../vector/adapter';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
-import { estimateTokens, renderMemoryBlock, selectWithinBudget } from './render';
+import {
+  estimateMemoryTokens,
+  estimateTokens,
+  renderMemoryBlock,
+  selectWithinBudget,
+} from './render';
 import { selectRecentWindow } from './window';
 
 const settingsRepository = new SettingsRepository();
@@ -55,10 +61,7 @@ function createInspection(
     query,
     candidateMemoryIds: candidates.map((memory) => memory.id),
     selectedMemoryIds: selected.map((memory) => memory.id),
-    estimatedRecallTokens: selected.reduce(
-      (total, memory) => total + estimateTokens(memory.injectionText),
-      0,
-    ),
+    estimatedRecallTokens: selected.reduce((total, memory) => total + estimateMemoryTokens(memory), 0),
     estimatedRemovedTokens,
     estimatedInjectedTokens,
     estimatedNetSavedTokens: Math.max(0, estimatedRemovedTokens - estimatedInjectedTokens),
@@ -172,7 +175,7 @@ export async function storyEchoGenerateInterceptor(
         !memory.excluded &&
         memory.status !== 'invalid' &&
         memory.status !== 'superseded' &&
-        memory.source.endMessageId < sourceWindow.retainedStartIndex,
+        hasSourceOutsideWindow(memory, sourceWindow.retainedStartIndex),
     );
     let queryPlan = buildRetrievalQueryPlan(chat, window.currentInputIndex);
     if (
@@ -329,6 +332,14 @@ export async function storyEchoGenerateInterceptor(
       sceneWeight: queryPlan.sceneWeight,
       rankedMemories: ranked.length,
       injectedMemories: selected.length,
+      eligibleMemoryIds: eligibleMemories.map((memory) => memory.id).join(','),
+      intentVectorMatches: vectorResults.intent
+        .map((result) => `${result.hash}@${result.rank}`)
+        .join(','),
+      sceneVectorMatches: vectorResults.scene
+        .map((result) => `${result.hash}@${result.rank}`)
+        .join(','),
+      selectedMemoryIds: selected.map((memory) => memory.id).join(','),
       estimatedRemovedTokens,
       estimatedInjectedTokens,
       durationMs: Math.round(performance.now() - startedAt),

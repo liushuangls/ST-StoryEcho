@@ -11,12 +11,14 @@ export interface VectorQueryResult {
   rank: number;
 }
 
+export type PrecomputedEmbeddingProvider = 'openai-compatible' | 'volcengine-multimodal';
+
 export interface VectorRequestConfig {
   source: string;
   model?: string;
   sourceSettings?: Record<string, unknown>;
   precomputed?: {
-    provider: 'openai-compatible';
+    provider: PrecomputedEmbeddingProvider;
     endpoint: string;
     model: string;
     apiKey: string;

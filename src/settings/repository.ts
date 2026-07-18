@@ -32,11 +32,52 @@ function mergeKnown<T>(defaults: T, stored: unknown): T {
   return result as T;
 }
 
+function migrateLegacyVolcengineEmbedding(settings: StoryEchoSettings, stored: unknown): void {
+  const storedRoot = isRecord(stored) ? stored : {};
+  const storedVector = isRecord(storedRoot['vector']) ? storedRoot['vector'] : {};
+  if (isRecord(storedVector['volcengine'])) {
+    return;
+  }
+  const custom = isRecord(storedVector['custom']) ? storedVector['custom'] : {};
+  const baseUrl = typeof custom['baseUrl'] === 'string' ? custom['baseUrl'].trim() : '';
+  try {
+    if (!baseUrl || new URL(baseUrl).hostname !== 'ark.cn-beijing.volces.com') {
+      return;
+    }
+  } catch {
+    return;
+  }
+
+  settings.vector.volcengine.baseUrl = baseUrl;
+  if (typeof custom['apiKey'] === 'string') {
+    settings.vector.volcengine.apiKey = custom['apiKey'];
+  }
+  if (typeof custom['timeoutMs'] === 'number' && Number.isFinite(custom['timeoutMs'])) {
+    settings.vector.volcengine.timeoutMs = custom['timeoutMs'];
+  }
+  settings.vector.volcengine.allowInsecureHttp = custom['allowInsecureHttp'] === true;
+  const model = typeof custom['model'] === 'string' ? custom['model'].trim() : '';
+  if (model.includes('embedding-vision') || model.startsWith('ep-m-')) {
+    settings.vector.volcengine.model = model;
+  }
+}
+
+function migratePerformanceDefaults(settings: StoryEchoSettings, stored: unknown): void {
+  const storedRoot = isRecord(stored) ? stored : {};
+  const storedVersion = Number(storedRoot['version']);
+  if (!Number.isFinite(storedVersion) || storedVersion < 2) {
+    settings.extraction.targetTurnsPerChunk = DEFAULT_SETTINGS.extraction.targetTurnsPerChunk;
+  }
+  settings.version = DEFAULT_SETTINGS.version;
+}
+
 export class SettingsRepository {
   get(): StoryEchoSettings {
     const context = getContext();
     const stored = context.extensionSettings[MODULE_ID];
     const settings = mergeKnown(cloneDefaults(), stored);
+    migrateLegacyVolcengineEmbedding(settings, stored);
+    migratePerformanceDefaults(settings, stored);
     context.extensionSettings[MODULE_ID] = settings;
     return settings;
   }

@@ -17,10 +17,11 @@ import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { selectRecentWindow } from '../prompt/window';
 import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig } from '../vector/config';
-import { openAiCompatibleEmbeddingClient } from '../vector/openai-compatible-embedding';
+import { resolveEmbeddingClient } from '../vector/embedding-providers';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
-import { normalizeEmbeddingsUrl } from '../vector/url';
+import { normalizeEmbeddingsUrl, normalizeVolcengineMultimodalEmbeddingsUrl } from '../vector/url';
 import { notify } from './notifications';
+import { renderMemoryEntry } from '../prompt/render';
 
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
@@ -89,6 +90,10 @@ function panelTemplate(): HTMLElement {
             <input id="story-echo-auto-extract" type="checkbox">
             <span>窗口边界需要时自动抽取尚未处理的历史</span>
           </label>
+          <label class="story-echo-field">
+            <span>每批抽取轮数</span>
+            <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
+          </label>
           <label class="checkbox_label story-echo-inline story-echo-field-wide">
             <input id="story-echo-debug" type="checkbox">
             <span>调试模式（保留最近50条运行轨迹）</span>
@@ -133,11 +138,43 @@ function panelTemplate(): HTMLElement {
             <span>Embedding来源</span>
             <select id="story-echo-vector-source" class="text_pole">
               <option value="inherit">酒馆Vector Storage当前向量源（默认）</option>
-              <option value="openai-compatible">自定义OpenAI兼容接口（支持火山方舟）</option>
+              <option value="openai-compatible">自定义OpenAI兼容接口</option>
+              <option value="volcengine-multimodal">火山方舟多模态Embedding</option>
             </select>
           </label>
           <p class="story-echo-hint story-echo-field-wide">
             自定义模式只替换向量生成器；向量仍由酒馆Vector Storage保存并在服务端检索。
+          </p>
+        </div>
+
+        <div id="story-echo-volcengine-embedding" class="story-echo-grid story-echo-subsection">
+          <div class="story-echo-section-title story-echo-field-wide">
+            <i class="fa-solid fa-fire" aria-hidden="true"></i>
+            <span>火山方舟多模态 Embedding</span>
+          </div>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>方舟 Base URL</span>
+            <input id="story-echo-volcengine-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
+          </label>
+          <label class="story-echo-field">
+            <span>模型或Endpoint ID</span>
+            <input id="story-echo-volcengine-model" class="text_pole" type="text" maxlength="200" placeholder="doubao-embedding-vision-251215 或 ep-m-…">
+          </label>
+          <label class="story-echo-field">
+            <span>方舟 API Key（随酒馆设置同步）</span>
+            <input id="story-echo-volcengine-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="checkbox_label story-echo-inline story-echo-field-wide">
+            <input id="story-echo-volcengine-allow-http" type="checkbox">
+            <span>允许不安全HTTP（仅建议局域网兼容服务）</span>
+          </label>
+          <div class="story-echo-field-wide story-echo-subsection-actions">
+            <button id="story-echo-test-volcengine-embedding" class="menu_button" type="button">
+              <i class="fa-solid fa-vial" aria-hidden="true"></i><span>测试火山Embedding连接</span>
+            </button>
+          </div>
+          <p class="story-echo-hint story-echo-field-wide">
+            自动调用 /embeddings/multimodal；每段剧情文本独立生成一个向量，最多4个请求并发。请求仍经酒馆服务端代理，向量仍由Vector Storage保存和检索。
           </p>
         </div>
 
@@ -227,6 +264,9 @@ function syncVisibility(panel: HTMLElement, settings: StoryEchoSettings): void {
 
   const customEmbedding = element<HTMLElement>(panel, '#story-echo-custom-embedding');
   customEmbedding.hidden = settings.vector.source !== 'openai-compatible';
+
+  const volcengineEmbedding = element<HTMLElement>(panel, '#story-echo-volcengine-embedding');
+  volcengineEmbedding.hidden = settings.vector.source !== 'volcengine-multimodal';
 }
 
 function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
@@ -239,6 +279,8 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLSelectElement>(panel, '#story-echo-query-mode').value = settings.recall.queryMode;
   element<HTMLSelectElement>(panel, '#story-echo-provider').value = settings.llm.provider;
   element<HTMLInputElement>(panel, '#story-echo-auto-extract').checked = settings.extraction.automatic;
+  element<HTMLInputElement>(panel, '#story-echo-extraction-turns').value =
+    String(settings.extraction.targetTurnsPerChunk);
   element<HTMLInputElement>(panel, '#story-echo-debug').checked = settings.debug;
   element<HTMLInputElement>(panel, '#story-echo-base-url').value = settings.llm.custom.baseUrl;
   element<HTMLInputElement>(panel, '#story-echo-model').value = settings.llm.custom.model;
@@ -251,6 +293,14 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-embedding-allow-http').checked =
     settings.vector.custom.allowInsecureHttp;
   element<HTMLInputElement>(panel, '#story-echo-embedding-api-key').value = settings.vector.custom.apiKey;
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-base-url').value =
+    settings.vector.volcengine.baseUrl;
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-model').value =
+    settings.vector.volcengine.model;
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-allow-http').checked =
+    settings.vector.volcengine.allowInsecureHttp;
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-api-key').value =
+    settings.vector.volcengine.apiKey;
   syncVisibility(panel, settings);
 }
 
@@ -308,6 +358,13 @@ function bindSettings(panel: HTMLElement): void {
   element<HTMLInputElement>(panel, '#story-echo-auto-extract').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.extraction.automatic = (event.currentTarget as HTMLInputElement).checked;
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-extraction-turns').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 5));
+      settings.extraction.targetTurnsPerChunk = Math.min(20, Math.max(1, value));
     });
   });
 
@@ -416,25 +473,72 @@ function bindSettings(panel: HTMLElement): void {
     });
   });
 
-  element<HTMLButtonElement>(panel, '#story-echo-test-embedding').addEventListener('click', async (event) => {
-    const button = event.currentTarget as HTMLButtonElement;
-    button.disabled = true;
-    try {
-      const config = resolveVectorConfig(settingsRepository.get());
-      if (!config.precomputed) {
-        throw new Error('请先选择自定义OpenAI兼容Embedding。');
-      }
-      const vectors = await openAiCompatibleEmbeddingClient.embed({
-        ...config.precomputed,
-        texts: ['StoryEcho剧情记忆向量连接测试'],
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-base-url').addEventListener('change', (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const current = settingsRepository.get();
+    const value = input.value.trim();
+    if (!value) {
+      settingsRepository.update((settings) => {
+        settings.vector.volcengine.baseUrl = '';
       });
-      notify.success(`Embedding连接测试成功（${vectors[0]?.length ?? 0}维）。`);
+      return;
+    }
+    try {
+      const normalized = normalizeVolcengineMultimodalEmbeddingsUrl(value, {
+        allowInsecureHttp: current.vector.volcengine.allowInsecureHttp,
+      });
+      const baseUrl = normalized.replace(/\/embeddings\/multimodal\/?$/, '');
+      settingsRepository.update((settings) => {
+        settings.vector.volcengine.baseUrl = baseUrl;
+      });
+      input.value = baseUrl;
     } catch (error) {
-      notify.error(error instanceof Error ? error.message : 'Embedding连接测试失败。');
-    } finally {
-      button.disabled = false;
+      input.value = current.vector.volcengine.baseUrl;
+      notify.error(error instanceof Error ? error.message : '火山方舟 Base URL无效。');
     }
   });
+
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-model').addEventListener('input', (event) => {
+    settingsRepository.update((settings) => {
+      settings.vector.volcengine.model = (event.currentTarget as HTMLInputElement).value.trim();
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-api-key').addEventListener('input', (event) => {
+    settingsRepository.update((settings) => {
+      settings.vector.volcengine.apiKey = (event.currentTarget as HTMLInputElement).value;
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-volcengine-allow-http').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.vector.volcengine.allowInsecureHttp = (event.currentTarget as HTMLInputElement).checked;
+    });
+  });
+
+  const bindEmbeddingTest = (selector: string): void => {
+    element<HTMLButtonElement>(panel, selector).addEventListener('click', async (event) => {
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try {
+        const config = resolveVectorConfig(settingsRepository.get());
+        if (!config.precomputed) {
+          throw new Error('请先选择一个外部Embedding来源。');
+        }
+        const vectors = await resolveEmbeddingClient(config.precomputed.provider).embed({
+          ...config.precomputed,
+          texts: ['StoryEcho剧情记忆向量连接测试'],
+        });
+        notify.success(`Embedding连接测试成功（${vectors[0]?.length ?? 0}维）。`);
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : 'Embedding连接测试失败。');
+      } finally {
+        button.disabled = false;
+      }
+    });
+  };
+  bindEmbeddingTest('#story-echo-test-embedding');
+  bindEmbeddingTest('#story-echo-test-volcengine-embedding');
 
   element<HTMLButtonElement>(panel, '#story-echo-test-llm').addEventListener('click', async (event) => {
     const button = event.currentTarget as HTMLButtonElement;
@@ -582,7 +686,7 @@ function inspectionText(state: NonNullable<ReturnType<MemoryRepository['getExist
   const selected = new Set(inspection.selectedMemoryIds);
   const selectedLines = state.memories
     .filter((memory) => selected.has(memory.id))
-    .map((memory) => `- [${memory.lastOperation}/${memory.status}] ${memory.injectionText}`);
+    .map((memory) => `[${memory.lastOperation}/${memory.status}]\n${renderMemoryEntry(memory)}`);
   return [
     `时间：${inspection.createdAt}`,
     `耗时：${inspection.durationMs}ms`,

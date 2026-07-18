@@ -1,29 +1,20 @@
 import { logger } from '../core/logger';
 import { getRequestHeaders } from '../platform/sillytavern';
+import {
+  embeddingErrorMessage,
+  isRecord,
+  parseEmbeddingVector,
+  safeEmbeddingFailureDetail,
+  validateEmbeddingRequest,
+} from './embedding-client';
+import type { EmbeddingClient, EmbeddingRequest, RequestHeadersProvider } from './embedding-client';
 import { resolveEmbeddingRequestUrl } from './url';
+
+export type { EmbeddingClient, EmbeddingRequest } from './embedding-client';
 
 interface EmbeddingResponseItem {
   index?: unknown;
   embedding?: unknown;
-}
-
-export interface EmbeddingRequest {
-  endpoint: string;
-  model: string;
-  apiKey: string;
-  texts: string[];
-  timeoutMs: number;
-  signal?: AbortSignal;
-}
-
-export interface EmbeddingClient {
-  embed(request: EmbeddingRequest): Promise<number[][]>;
-}
-
-type RequestHeadersProvider = () => Promise<Record<string, string>>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseVectors(payload: unknown, expectedCount: number): number[][] {
@@ -56,41 +47,13 @@ function parseVectors(payload: unknown, expectedCount: number): number[][] {
         throw new Error('Embedding接口返回了重复或缺失的向量索引。');
       }
       const rawVector = Array.isArray(item) ? item : item.embedding;
-      if (!Array.isArray(rawVector) || rawVector.length === 0) {
-        throw new Error('Embedding接口返回了空向量。');
-      }
-      const vector = rawVector.map((value) => typeof value === 'number' ? value : Number.NaN);
-      if (vector.some((number) => !Number.isFinite(number))) {
-        throw new Error('Embedding接口返回了无效向量数值。');
-      }
+      const vector = parseEmbeddingVector(rawVector);
       dimension ??= vector.length;
       if (vector.length !== dimension) {
         throw new Error('Embedding接口返回的向量维度不一致。');
       }
       return vector;
     });
-}
-
-function errorMessage(payload: unknown, fallback: string, apiKey: string): string {
-  let message = fallback;
-  if (isRecord(payload)) {
-    const error = payload['error'];
-    if (typeof error === 'string') {
-      message = error;
-    } else if (isRecord(error) && typeof error['message'] === 'string') {
-      message = error['message'];
-    } else if (typeof payload['message'] === 'string') {
-      message = payload['message'];
-    }
-  }
-  const limited = message.replace(/\s+/g, ' ').slice(0, 500);
-  return apiKey ? limited.split(apiKey).join('[REDACTED]') : limited;
-}
-
-function safeFailureDetail(error: unknown, apiKey: string): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  const redacted = apiKey ? raw.split(apiKey).join('[REDACTED]') : raw;
-  return redacted.replace(/\s+/g, ' ').slice(0, 300) || '未知错误';
 }
 
 export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
@@ -103,17 +66,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
     if (request.texts.length === 0) {
       return [];
     }
-    if (!request.model.trim()) {
-      throw new Error('Embedding模型不能为空。');
-    }
-    const apiKey = request.apiKey.trim();
-    if (apiKey.length > 16_384) {
-      throw new Error('Embedding API Key过长。');
-    }
-    if (/[\r\n]/.test(apiKey)) {
-      throw new Error('Embedding API Key不能包含换行符。');
-    }
-    const timeoutMs = Math.min(300_000, Math.max(1_000, Math.floor(request.timeoutMs)));
+    const { model, apiKey, timeoutMs } = validateEmbeddingRequest(request);
     const controller = new AbortController();
     const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
     const abort = () => controller.abort();
@@ -123,7 +76,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
       try {
         requestUrl = resolveEmbeddingRequestUrl(request.endpoint);
       } catch (error) {
-        throw new Error(`构造Embedding代理地址失败：${safeFailureDetail(error, apiKey)}`);
+        throw new Error(`构造Embedding代理地址失败：${safeEmbeddingFailureDetail(error, apiKey)}`);
       }
 
       let headers: Record<string, string>;
@@ -134,7 +87,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
           ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         };
       } catch (error) {
-        throw new Error(`读取SillyTavern请求头失败：${safeFailureDetail(error, apiKey)}`);
+        throw new Error(`读取SillyTavern请求头失败：${safeEmbeddingFailureDetail(error, apiKey)}`);
       }
 
       let response: Response;
@@ -143,7 +96,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
           method: 'POST',
           headers,
           body: JSON.stringify({
-            model: request.model.trim(),
+            model,
             input: request.texts,
           }),
           signal: controller.signal,
@@ -159,7 +112,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
         if (error instanceof TypeError) {
           logger.error('Embedding代理请求失败。', error);
           throw new Error(
-            `无法连接SillyTavern代理：${safeFailureDetail(error, apiKey)}；请检查酒馆地址、网络和enableCorsProxy设置。`,
+            `无法连接SillyTavern代理：${safeEmbeddingFailureDetail(error, apiKey)}；请检查酒馆地址、网络和enableCorsProxy设置。`,
           );
         }
         throw error;
@@ -172,7 +125,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
       try {
         text = await response.text();
       } catch (error) {
-        throw new Error(`读取Embedding代理响应失败：${safeFailureDetail(error, apiKey)}`);
+        throw new Error(`读取Embedding代理响应失败：${safeEmbeddingFailureDetail(error, apiKey)}`);
       }
       if (new TextEncoder().encode(text).byteLength > 32 * 1024 * 1024) {
         throw new Error('Embedding接口响应过大。');
@@ -192,7 +145,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
           );
         }
         const fallback = `Embedding请求失败（HTTP ${response.status}）。`;
-        const detail = errorMessage(payload, '', apiKey);
+        const detail = embeddingErrorMessage(payload, '', apiKey);
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
       }
       return parseVectors(payload, request.texts.length);

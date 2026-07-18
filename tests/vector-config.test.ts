@@ -83,4 +83,22 @@ describe('vectorConfigFingerprint', () => {
       },
     });
   });
+
+  it('maps Volcengine multimodal embeddings to precomputed Vector Storage input', () => {
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.vector.source = 'volcengine-multimodal';
+    settings.vector.volcengine.apiKey = 'ark-secret';
+
+    expect(resolveVectorConfig(settings)).toEqual({
+      source: 'webllm',
+      model: 'storyecho-volcengine-multimodal--doubao-embedding-vision-251215',
+      precomputed: {
+        provider: 'volcengine-multimodal',
+        endpoint: 'https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal',
+        model: 'doubao-embedding-vision-251215',
+        apiKey: 'ark-secret',
+        timeoutMs: 60_000,
+      },
+    });
+  });
 });

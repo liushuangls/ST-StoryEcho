@@ -25,7 +25,7 @@ describe('OpenAiCompatibleProvider', () => {
       async () => ({ 'X-CSRF-Token': 'csrf' }),
     );
 
-    await expect(provider.complete({ system: 'system', prompt: 'prompt' })).resolves.toBe('OK');
+    await expect(provider.complete({ system: 'system', prompt: 'prompt', maxTokens: 123 })).resolves.toBe('OK');
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(url).toBe('/api/backends/chat-completions/generate');
     expect(init?.headers).toMatchObject({ 'X-CSRF-Token': 'csrf', 'Content-Type': 'application/json' });
@@ -37,6 +37,7 @@ describe('OpenAiCompatibleProvider', () => {
       reverse_proxy: 'https://example.com/v1',
       custom_include_headers: 'Authorization: Bearer llm-secret',
       stream: false,
+      max_tokens: 123,
       messages: [
         { role: 'system', content: 'system' },
         { role: 'user', content: 'prompt' },

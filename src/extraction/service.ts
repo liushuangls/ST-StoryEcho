@@ -14,6 +14,7 @@ import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { planNextChunk } from './chunk-planner';
 import { parseExtractionResponse } from './parser';
 import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from './prompts';
+import { assessMemoryCandidates } from './quality';
 import { EXTRACTION_SCHEMA } from './schema';
 
 export interface ExtractionProgress {
@@ -186,8 +187,37 @@ export class ExtractionService {
           system: EXTRACTION_SYSTEM_PROMPT,
           prompt: buildExtractionPrompt(snapshot, 0, snapshot.length - 1, chunk.startMessageId),
           jsonSchema: EXTRACTION_SCHEMA,
+          maxTokens: 3_072,
         });
-        const candidates = parseExtractionResponse(raw);
+        let parsedCandidates;
+        try {
+          parsedCandidates = parseExtractionResponse(raw);
+        } catch (error) {
+          recordDebugTrace(state, settings.debug, 'extraction', '剧情候选解析失败。', {
+            range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+            error: error instanceof Error ? error.message : String(error),
+            rawResponse: raw.slice(0, 4_000),
+          });
+          throw error;
+        }
+        const assessment = assessMemoryCandidates(
+          parsedCandidates,
+          snapshot.map((message) => message.mes).join('\n'),
+        );
+        const candidates = assessment.accepted;
+        recordDebugTrace(state, settings.debug, 'extraction', '剧情候选抽取完成。', {
+          range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+          candidates: candidates.length,
+          parsedCandidates: parsedCandidates.length,
+          rejectedCandidates: assessment.rejected.length,
+          ...(assessment.rejected.length > 0
+            ? { rejectedReasons: assessment.rejected.map((item) => item.reason).join(' | ') }
+            : {}),
+          ...(assessment.removedUnsupportedThreads.length > 0
+            ? { removedUnsupportedThreads: assessment.removedUnsupportedThreads.join(' | ') }
+            : {}),
+          ...(parsedCandidates.length === 0 ? { emptyResponse: raw.slice(0, 4_000) } : {}),
+        });
         const currentSourceHash = await sha256(sourcePayload(
           context.chat.slice(chunk.startMessageId, chunk.endMessageId + 1),
           chunk.startMessageId,

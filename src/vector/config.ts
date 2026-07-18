@@ -2,7 +2,7 @@ import type { StoryEchoSettings } from '../core/types';
 import { sha256 } from '../core/hash';
 import { getContext } from '../platform/sillytavern';
 import type { VectorRequestConfig } from './adapter';
-import { normalizeEmbeddingsUrl } from './url';
+import { normalizeEmbeddingsUrl, normalizeVolcengineMultimodalEmbeddingsUrl } from './url';
 
 const MODEL_SETTING_KEYS: Record<string, string> = {
   openai: 'openai_model',
@@ -73,6 +73,30 @@ export function resolveVectorConfig(settings: StoryEchoSettings): VectorRequestC
         model,
         apiKey: settings.vector.custom.apiKey,
         timeoutMs: settings.vector.custom.timeoutMs,
+      },
+    };
+  }
+
+  if (settings.vector.source === 'volcengine-multimodal') {
+    const endpoint = normalizeVolcengineMultimodalEmbeddingsUrl(settings.vector.volcengine.baseUrl, {
+      allowInsecureHttp: settings.vector.volcengine.allowInsecureHttp,
+    });
+    const model = settings.vector.volcengine.model.trim();
+    if (!model) {
+      throw new Error('火山方舟Embedding模型不能为空。');
+    }
+    if (model.length > 200) {
+      throw new Error('火山方舟Embedding模型名过长。');
+    }
+    return {
+      source: 'webllm',
+      model: `storyecho-volcengine-multimodal--${model}`,
+      precomputed: {
+        provider: 'volcengine-multimodal',
+        endpoint,
+        model,
+        apiKey: settings.vector.volcengine.apiKey,
+        timeoutMs: settings.vector.volcengine.timeoutMs,
       },
     };
   }

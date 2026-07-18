@@ -5,8 +5,8 @@ import type {
   VectorRequestConfig,
   VectorStoreAdapter,
 } from './adapter';
-import type { EmbeddingClient } from './openai-compatible-embedding';
-import { openAiCompatibleEmbeddingClient } from './openai-compatible-embedding';
+import type { EmbeddingClientResolver } from './embedding-providers';
+import { resolveEmbeddingClient } from './embedding-providers';
 
 const EMBEDDING_BATCH_SIZE = 64;
 
@@ -38,15 +38,16 @@ function embeddingMap(texts: string[], vectors: number[][]): Record<string, numb
 }
 
 export class SillyTavernVectorStore implements VectorStoreAdapter {
-  constructor(private readonly embeddingClient: EmbeddingClient = openAiCompatibleEmbeddingClient) {}
+  constructor(private readonly embeddingClientResolver: EmbeddingClientResolver = resolveEmbeddingClient) {}
 
   private async embedTexts(
     texts: string[],
     config: NonNullable<VectorRequestConfig['precomputed']>,
   ): Promise<number[][]> {
+    const embeddingClient = this.embeddingClientResolver(config.provider);
     const vectors: number[][] = [];
     for (let start = 0; start < texts.length; start += EMBEDDING_BATCH_SIZE) {
-      vectors.push(...await this.embeddingClient.embed({
+      vectors.push(...await embeddingClient.embed({
         ...config,
         texts: texts.slice(start, start + EMBEDDING_BATCH_SIZE),
       }));
@@ -145,6 +146,18 @@ export class SillyTavernVectorStore implements VectorStoreAdapter {
     }
 
     const text = await response.text();
-    return text ? (JSON.parse(text) as Record<string, unknown> | unknown[]) : {};
+    if (!text) {
+      return {};
+    }
+    try {
+      return JSON.parse(text) as Record<string, unknown> | unknown[];
+    } catch (error) {
+      const contentType = response.headers.get('content-type') ?? '';
+      if (contentType.includes('json')) {
+        throw new Error(`Vector Storage返回了无效JSON：${path}`, { cause: error });
+      }
+      // SillyTavern mutation routes may acknowledge success with plain "OK".
+      return {};
+    }
   }
 }

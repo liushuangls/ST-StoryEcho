@@ -4,6 +4,7 @@ import {
   buildQueryRewriteInput,
   parseQueryRewriteResponse,
   QueryRewriteService,
+  type QueryRewriteCompletion,
 } from '../src/retrieval/query-rewriter';
 
 describe('query rewrite input', () => {
@@ -42,7 +43,9 @@ describe('parseQueryRewriteResponse', () => {
 
 describe('QueryRewriteService', () => {
   it('caches the rewritten query for the same chat context', async () => {
-    const completion = vi.fn(async () => '{"query":"林雨进入钟楼后的去向、银色钥匙和守卫线索"}');
+    const completion = vi.fn<QueryRewriteCompletion>(
+      async () => '{"query":"林雨进入钟楼后的去向、银色钥匙和守卫线索"}',
+    );
     const service = new QueryRewriteService(completion);
     const settings = structuredClone(DEFAULT_SETTINGS);
     const messages = [
@@ -56,5 +59,6 @@ describe('QueryRewriteService', () => {
     expect(first).toMatchObject({ cacheHit: false, query: '林雨进入钟楼后的去向、银色钥匙和守卫线索' });
     expect(second).toMatchObject({ cacheHit: true, query: first.query, durationMs: 0 });
     expect(completion).toHaveBeenCalledOnce();
+    expect(completion.mock.calls[0]?.[1]).toMatchObject({ maxTokens: 768 });
   });
 });

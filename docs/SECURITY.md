@@ -28,10 +28,10 @@
 
 ### 自定义 Embedding
 
-- 浏览器向同源的 SillyTavern `/proxy/` 发送 `{ model, input }` 和可选 Bearer Key；
+- 浏览器向同源的 SillyTavern `/proxy/` 发送模型输入和可选 Bearer Key；OpenAI兼容来源使用字符串数组，火山多模态来源为每段文本发送独立的 `{ type: "text" }` 输入；
 - SillyTavern 内置代理再请求外部 Embedding Endpoint，因此外部接口不需要允许浏览器 CORS；
 - 使用自定义 Embedding 必须在 `config.yaml` 启用 `enableCorsProxy` 并重启酒馆；
-- 返回向量在浏览器校验数量、有限数值和统一维度；
+- 返回向量在浏览器校验数量、有限数值和统一维度；火山多模态来源最多并发4个请求并保持原输入顺序；
 - 向量随后交给 SillyTavern Vector Storage，保存和相似度检索仍在酒馆服务端完成；
 - StoryEcho 不在浏览器持久化独立向量索引。
 

@@ -1,7 +1,7 @@
-export function normalizeEmbeddingsUrl(
+function parseEmbeddingUrl(
   rawUrl: string,
   options: { allowInsecureHttp: boolean },
-): string {
+): URL {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
     throw new Error('Embedding Base URL不能为空。');
@@ -30,6 +30,15 @@ export function normalizeEmbeddingsUrl(
     throw new Error('当前禁止不安全的Embedding HTTP端点。仅局域网服务应启用该选项。');
   }
 
+  url.hash = '';
+  return url;
+}
+
+export function normalizeEmbeddingsUrl(
+  rawUrl: string,
+  options: { allowInsecureHttp: boolean },
+): string {
+  const url = parseEmbeddingUrl(rawUrl, options);
   const path = url.pathname.replace(/\/+$/, '');
   if (path.endsWith('/embeddings')) {
     url.pathname = path;
@@ -39,7 +48,24 @@ export function normalizeEmbeddingsUrl(
     url.pathname = `${path}/embeddings`;
   }
 
-  url.hash = '';
+  return url.toString();
+}
+
+export function normalizeVolcengineMultimodalEmbeddingsUrl(
+  rawUrl: string,
+  options: { allowInsecureHttp: boolean },
+): string {
+  const url = parseEmbeddingUrl(rawUrl, options);
+  const path = url.pathname.replace(/\/+$/, '');
+  if (path.endsWith('/embeddings/multimodal')) {
+    url.pathname = path;
+  } else if (path.endsWith('/embeddings')) {
+    url.pathname = `${path}/multimodal`;
+  } else if (path === '') {
+    url.pathname = '/api/v3/embeddings/multimodal';
+  } else {
+    url.pathname = `${path}/embeddings/multimodal`;
+  }
   return url.toString();
 }
 

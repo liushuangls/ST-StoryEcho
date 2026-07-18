@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   },
   extraction: {
     automatic: true,
-    targetTurnsPerChunk: 3,
+    targetTurnsPerChunk: 5,
   },
   llm: {
     provider: 'main',
@@ -37,6 +37,13 @@ export const DEFAULT_SETTINGS = Object.freeze({
     custom: {
       baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
       model: '',
+      apiKey: '',
+      timeoutMs: 60_000,
+      allowInsecureHttp: false,
+    },
+    volcengine: {
+      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      model: 'doubao-embedding-vision-251215',
       apiKey: '',
       timeoutMs: 60_000,
       allowInsecureHttp: false,

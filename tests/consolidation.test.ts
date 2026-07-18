@@ -40,7 +40,6 @@ describe('event consolidation', () => {
         operation: 'MERGE',
         targetMemoryId: 'mem-1',
         reason: '同一把钥匙的互补事实。',
-        result: next,
       }],
     });
 
@@ -48,6 +47,118 @@ describe('event consolidation', () => {
       operation: 'MERGE',
       targetMemoryId: 'mem-1',
       reason: '同一把钥匙的互补事实。',
+    });
+  });
+
+  it('ignores a model-supplied rewritten result and derives merged facts locally', () => {
+    const next = candidate({ consequence: '林雨答应暂时保管银色钥匙。' });
+    const raw = JSON.stringify({
+      actions: [{
+        candidateIndex: 0,
+        operation: 'MERGE',
+        targetMemoryId: 'mem-1',
+        reason: '同一把钥匙的互补事实。',
+        result: candidate({
+          event: '不存在的人把钥匙扔进了海里',
+          consequence: '银色钥匙已经沉入海底。',
+          retrievalText: '银色钥匙在海底。',
+          injectionText: '银色钥匙已经沉入海底。',
+        }),
+      }],
+    });
+
+    const decision = parseConsolidationResponse(raw, [next], [memory()])[0];
+    expect(decision?.result.event).toBe('林雨获得银色钥匙');
+    expect(decision?.result.consequence).toBe('林雨答应暂时保管银色钥匙。');
+    expect(decision?.result.retrievalText).not.toContain('海底');
+  });
+
+  it('supersedes a moved secret location even when the model omitted stateChanges', () => {
+    const old = memory({
+      type: 'event',
+      event: '刘爽和顾青把银钥匙藏在暮钟旅店肖像后的暗格。',
+      entities: ['刘爽', '顾青', '银钥匙', '暮钟旅店'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '银钥匙藏在暮钟旅店肖像后的暗格，顾青知情。',
+      injectionText: '银钥匙原本藏在暮钟旅店肖像后的暗格。',
+    });
+    const moved = candidate({
+      type: 'event',
+      event: '刘爽和顾青把银钥匙从暮钟旅店取出，转移到钟表铺地下室的红色铁盒。',
+      entities: ['刘爽', '顾青', '银钥匙', '暮钟旅店', '红色铁盒'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '银钥匙已从暮钟旅店暗格转移到红色铁盒，旧暗格已为空。',
+      injectionText: '银钥匙现在位于红色铁盒，暮钟旅店旧暗格已为空。',
+    });
+
+    expect(fallbackConsolidationDecisions([moved], [old])[0]).toMatchObject({
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
+  it('merges a complementary confirmation into an existing moved-location fact', () => {
+    const moved = memory({
+      type: 'event',
+      event: '银钥匙从暮钟旅店转移到红色铁盒。',
+      entities: ['顾青', '银钥匙', '暮钟旅店', '红色铁盒'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '银钥匙已转移到红色铁盒，暮钟旅店旧暗格已为空。',
+      injectionText: '银钥匙现在位于红色铁盒，旧暗格已为空。',
+      consequence: '银钥匙当前位于青石镇钟表铺地下室的红色铁盒。',
+    });
+    const confirmation = candidate({
+      type: 'state_change',
+      event: '顾青锁好红色铁盒，并确认暮钟旅店旧暗格已经没有钥匙。',
+      entities: ['顾青', '银钥匙', '暮钟旅店', '红色铁盒'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '顾青锁好红色铁盒，暮钟旅店旧暗格已经没有银钥匙。',
+      injectionText: '顾青锁好红色铁盒，旧暗格已经没有银钥匙。',
+      consequence: '红色铁盒已锁好，暮钟旅店旧暗格已经没有银钥匙。',
+    });
+
+    const decision = fallbackConsolidationDecisions([confirmation], [moved])[0];
+    expect(decision).toMatchObject({
+      operation: 'MERGE',
+      targetMemoryId: 'mem-1',
+    });
+    expect(decision?.result.consequence).toContain('青石镇钟表铺地下室');
+    expect(decision?.result.consequence).toContain('旧暗格已经没有银钥匙');
+  });
+
+  it('accepts common schema aliases but overrides a duplicate CREATE with deterministic MERGE', () => {
+    const old = memory({
+      stateChanges: [],
+      entities: ['顾青', '银钥匙', '暮钟旅店'],
+      aliases: [],
+      event: '顾青把银钥匙藏在暮钟旅店暗格。',
+      retrievalText: '顾青把银钥匙藏在暮钟旅店暗格。',
+      injectionText: '银钥匙藏在暮钟旅店暗格。',
+    });
+    const repeated = candidate({
+      stateChanges: [],
+      entities: ['顾青', '银钥匙', '暮钟旅店'],
+      aliases: [],
+      event: '顾青确认银钥匙仍藏在暮钟旅店暗格。',
+      retrievalText: '顾青确认银钥匙仍藏在暮钟旅店暗格。',
+      injectionText: '顾青确认银钥匙仍在暮钟旅店暗格。',
+    });
+    const raw = JSON.stringify({
+      decisions: [{
+        candidate_index: 0,
+        action: 'create',
+        target_memory_id: '',
+        rationale: '模型误判为新事件。',
+      }],
+    });
+
+    expect(parseConsolidationResponse(raw, [repeated], [old])[0]).toMatchObject({
+      operation: 'MERGE',
+      targetMemoryId: 'mem-1',
     });
   });
 

@@ -1,5 +1,6 @@
 import { allocateVectorHash, sha256 } from '../core/hash';
 import type { ConsolidationOperation, StoryMemory, StoryMemorySource } from '../core/types';
+import { createUuid } from '../core/uuid';
 import type { ExtractedMemoryCandidate } from './types';
 
 export interface MemoryFactoryOptions {
@@ -17,7 +18,7 @@ export async function createStoryMemory(
   options: MemoryFactoryOptions = {},
 ): Promise<StoryMemory> {
   const now = new Date().toISOString();
-  const id = options.id ?? `mem_${crypto.randomUUID()}`;
+  const id = options.id ?? `mem_${createUuid()}`;
   const retrievalHash = await sha256(candidate.retrievalText);
   const vectorHash = allocateVectorHash(`${id}:${retrievalHash}`, occupiedVectorHashes);
   const location = candidate.scene.location.trim();

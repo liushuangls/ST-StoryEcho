@@ -1,5 +1,3 @@
-import { MEMORY_CANDIDATE_SCHEMA } from '../extraction/schema';
-
 export const CONSOLIDATION_SCHEMA: Record<string, unknown> = {
   type: 'object',
   additionalProperties: false,
@@ -11,7 +9,7 @@ export const CONSOLIDATION_SCHEMA: Record<string, unknown> = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['candidateIndex', 'operation', 'targetMemoryId', 'reason', 'result'],
+        required: ['candidateIndex', 'operation', 'targetMemoryId', 'reason'],
         properties: {
           candidateIndex: { type: 'integer', minimum: 0, maximum: 19 },
           operation: {
@@ -20,7 +18,6 @@ export const CONSOLIDATION_SCHEMA: Record<string, unknown> = {
           },
           targetMemoryId: { type: 'string' },
           reason: { type: 'string' },
-          result: MEMORY_CANDIDATE_SCHEMA,
         },
       },
     },

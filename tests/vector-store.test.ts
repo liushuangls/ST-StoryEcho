@@ -34,7 +34,7 @@ describe('SillyTavernVectorStore precomputed embeddings', () => {
     const embeddingClient: EmbeddingClient = {
       embed: vi.fn().mockResolvedValue([[0.1, 0.2], [0.3, 0.4]]),
     };
-    const store = new SillyTavernVectorStore(embeddingClient);
+    const store = new SillyTavernVectorStore(() => embeddingClient);
 
     await store.insert('collection', [
       { hash: 11, text: '记忆一', index: 1 },
@@ -68,7 +68,7 @@ describe('SillyTavernVectorStore precomputed embeddings', () => {
     const embeddingClient: EmbeddingClient = {
       embed: vi.fn().mockResolvedValue([[0.5, 0.6]]),
     };
-    const store = new SillyTavernVectorStore(embeddingClient);
+    const store = new SillyTavernVectorStore(() => embeddingClient);
 
     const results = await store.query('collection', '当前查询', 5, 0.25, precomputed);
 
@@ -87,7 +87,7 @@ describe('SillyTavernVectorStore precomputed embeddings', () => {
     vi.stubGlobal('fetch', fetchMock);
     const embed = vi.fn<EmbeddingClient['embed']>().mockImplementation(async ({ texts }) =>
       texts.map((_, index) => [index, index + 1]));
-    const store = new SillyTavernVectorStore({ embed });
+    const store = new SillyTavernVectorStore(() => ({ embed }));
     const items = Array.from({ length: 65 }, (_, index) => ({
       hash: index + 1,
       text: `记忆-${index}`,
@@ -100,5 +100,17 @@ describe('SillyTavernVectorStore precomputed embeddings', () => {
     expect(embed.mock.calls[0]?.[0].texts).toHaveLength(64);
     expect(embed.mock.calls[1]?.[0].texts).toEqual(['记忆-64']);
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('accepts SillyTavern plain-text success acknowledgements', async () => {
+    installSillyTavernContext();
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('OK', {
+      status: 200,
+      headers: { 'Content-Type': 'text/plain' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const store = new SillyTavernVectorStore();
+
+    await expect(store.purge('collection')).resolves.toBeUndefined();
   });
 });

@@ -11,6 +11,20 @@ const MEMORY_TYPES = new Set<MemoryType>([
   'conflict',
 ]);
 const TRUTH_STATUSES = new Set<TruthStatus>(['confirmed', 'claimed', 'inferred', 'uncertain']);
+const MEMORY_TYPE_ALIASES: Readonly<Record<string, MemoryType>> = {
+  event: 'event',
+  fact: 'event',
+  state: 'state_change',
+  state_change: 'state_change',
+  relationship: 'relationship_change',
+  relationship_change: 'relationship_change',
+  promise: 'commitment',
+  commitment: 'commitment',
+  secret: 'revelation',
+  revelation: 'revelation',
+  clue: 'clue',
+  conflict: 'conflict',
+};
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -30,8 +44,13 @@ function textArray(value: unknown, maxItems = 50): string[] {
 
 function jsonPayload(raw: string): string {
   const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  const start = trimmed.indexOf('{');
-  const end = trimmed.lastIndexOf('}');
+  const objectStart = trimmed.indexOf('{');
+  const arrayStart = trimmed.indexOf('[');
+  const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+  const start = starts.length > 0 ? Math.min(...starts) : -1;
+  const end = start >= 0 && trimmed[start] === '['
+    ? trimmed.lastIndexOf(']')
+    : trimmed.lastIndexOf('}');
   if (start < 0 || end <= start) {
     throw new Error('抽取模型没有返回JSON对象。');
   }
@@ -40,12 +59,41 @@ function jsonPayload(raw: string): string {
 
 export function parseMemoryCandidate(value: unknown): ExtractedMemoryCandidate | null {
     const item = record(value);
-    const type = text(item['type']) as MemoryType;
-    const truthStatus = text(item['truthStatus']) as TruthStatus;
+    const declaredType = text(item['type']);
+    const normalizedDeclaredType = MEMORY_TYPE_ALIASES[declaredType.toLowerCase()] ?? '';
+    const declaredTruthStatus = text(
+      item['truthStatus'] ?? item['confirmationLevel'] ?? item['confidence'],
+    );
+    const truthStatus = (
+      TRUTH_STATUSES.has(declaredTruthStatus as TruthStatus)
+        ? declaredTruthStatus
+        : item['confirmed'] === true
+          ? 'confirmed'
+          : item['confirmed'] === false
+            ? 'uncertain'
+            : ''
+    ) as TruthStatus;
     const scene = record(item['scene']);
-    const event = text(item['event']);
     const retrievalText = text(item['retrievalText'], 4000);
     const injectionText = text(item['injectionText'], 2000);
+    const event = text(
+      item['event'] ?? item['content'] ?? item['details'] ?? item['summary'] ?? item['fact'],
+    ) || [
+      text(item['entity'], 300),
+      text(item['action'], 500),
+    ].filter(Boolean).join('：') || (
+      normalizedDeclaredType && truthStatus ? retrievalText : ''
+    );
+    const knownBy = textArray(item['knownBy']);
+    const canInferEventType = (
+      !declaredType &&
+      truthStatus === 'confirmed' &&
+      knownBy.length >= 2 &&
+      Boolean(text(item['details']) || text(item['action']))
+    );
+    const type = (
+      normalizedDeclaredType || (canInferEventType ? 'event' : '')
+    ) as MemoryType;
 
     if (
       !MEMORY_TYPES.has(type) ||
@@ -86,11 +134,15 @@ export function parseMemoryCandidate(value: unknown): ExtractedMemoryCandidate |
       event,
       cause: text(item['cause']),
       consequence: text(item['consequence']),
-      entities: textArray(item['entities']),
+      entities: textArray(item['entities']).length > 0
+        ? textArray(item['entities'])
+        : textArray([item['entity'], ...(
+            Array.isArray(item['objects']) ? item['objects'] : []
+          )]),
       aliases: textArray(item['aliases']),
       stateChanges,
       unresolvedThreads: textArray(item['unresolvedThreads']),
-      knownBy: textArray(item['knownBy']),
+      knownBy,
       truthStatus,
       importance: Number.isFinite(importanceValue)
         ? Math.min(1, Math.max(0, importanceValue))
@@ -108,8 +160,25 @@ export function parseExtractionResponse(raw: string): ExtractedMemoryCandidate[]
     throw new Error('抽取模型返回的JSON无法解析。', { cause: error });
   }
 
-  const memories = record(parsed)['memories'];
-  if (!Array.isArray(memories)) {
+  const root = record(parsed);
+  const namedMemories =
+    root['memories'] ??
+    root['events'] ??
+    root['items'] ??
+    root['results'] ??
+    root['facts'];
+  const firstArray = Object.values(root).find(Array.isArray);
+  const singleCandidate = parseMemoryCandidate(root);
+  const memories = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(namedMemories)
+      ? namedMemories
+      : singleCandidate
+        ? [root]
+        : Array.isArray(firstArray)
+          ? firstArray
+          : null;
+  if (!memories) {
     throw new Error('抽取结果缺少memories数组。');
   }
 

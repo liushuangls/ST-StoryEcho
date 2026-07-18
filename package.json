@@ -1,6 +1,6 @@
 {
   "name": "st-storyecho",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Sliding-window context and story-memory recall for SillyTavern.",

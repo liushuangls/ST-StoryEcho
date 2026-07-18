@@ -22,6 +22,7 @@ export async function decideConsolidation(
       system: CONSOLIDATION_SYSTEM_PROMPT,
       prompt: buildConsolidationPrompt(candidates, memories),
       jsonSchema: CONSOLIDATION_SCHEMA,
+      maxTokens: 2_048,
     });
     return {
       decisions: parseConsolidationResponse(raw, candidates, memories),

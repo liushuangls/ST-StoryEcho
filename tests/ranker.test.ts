@@ -76,4 +76,39 @@ describe('rankMemories', () => {
 
     expect(result.map((item) => item.id)).toEqual(['scene', 'intent']);
   });
+
+  it('prioritizes an effective state over a related commitment for a current-location question', () => {
+    const commitment = memory({
+      id: 'commitment',
+      type: 'commitment',
+      vectorHash: 1,
+      event: '顾青承诺保守银钥匙的秘密',
+      entities: ['顾青', '银钥匙'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '顾青承诺对银钥匙保密。',
+    });
+    const currentLocation = memory({
+      id: 'current-location',
+      type: 'state_change',
+      vectorHash: 2,
+      event: '银钥匙已转移到青石镇钟表铺地下室',
+      entities: ['顾青', '银钥匙', '青石镇钟表铺'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '银钥匙现在位于青石镇钟表铺地下室的红色铁盒。',
+    });
+    const plan = buildRetrievalQueryPlan([
+      { is_user: true, mes: '银钥匙现在具体藏在哪里？' },
+    ], 0);
+    const result = rankMemories(plan, [commitment, currentLocation], {
+      intent: [
+        { hash: 1, text: '', index: 0, rank: 0 },
+        { hash: 2, text: '', index: 1, rank: 1 },
+      ],
+      scene: [],
+    });
+
+    expect(result.map((item) => item.id)).toEqual(['current-location', 'commitment']);
+  });
 });

@@ -10,6 +10,7 @@ export interface SillyTavernContext {
   eventSource?: {
     on(event: string, handler: (...args: unknown[]) => void | Promise<void>): void;
     off?(event: string, handler: (...args: unknown[]) => void | Promise<void>): void;
+    removeListener?(event: string, handler: (...args: unknown[]) => void | Promise<void>): void;
   };
   event_types?: Record<string, string>;
   saveSettingsDebounced(): void;
@@ -18,6 +19,7 @@ export interface SillyTavernContext {
     systemPrompt: string;
     prompt: string;
     jsonSchema?: Record<string, unknown>;
+    responseLength?: number;
   }): Promise<string>;
   getRequestHeaders?(): Record<string, string>;
   getCurrentChatId?(): string | null;
