@@ -37,7 +37,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 1;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.6.2";
+var EXTENSION_VERSION = "0.6.3";
 
 // src/debug/events.ts
 var DIAGNOSTICS_UPDATED_EVENT = "storyecho:diagnostics-updated";
@@ -3089,7 +3089,7 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "Embedding Base URL\u65E0\u6548\u3002");
     }
   });
-  element(panel, "#story-echo-embedding-model").addEventListener("change", (event) => {
+  element(panel, "#story-echo-embedding-model").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.model = event.currentTarget.value.trim();
     });

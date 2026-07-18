@@ -398,7 +398,7 @@ function bindSettings(panel: HTMLElement): void {
     }
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-embedding-model').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-embedding-model').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       settings.vector.custom.model = (event.currentTarget as HTMLInputElement).value.trim();
     });
