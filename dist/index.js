@@ -1601,6 +1601,11 @@ function errorMessage(payload, fallback, apiKey) {
   const limited = message.replace(/\s+/g, " ").slice(0, 500);
   return apiKey ? limited.split(apiKey).join("[REDACTED]") : limited;
 }
+function safeFailureDetail(error, apiKey) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const redacted = apiKey ? raw.split(apiKey).join("[REDACTED]") : raw;
+  return redacted.replace(/\s+/g, " ").slice(0, 300) || "\u672A\u77E5\u9519\u8BEF";
+}
 var OpenAiCompatibleEmbeddingClient = class {
   constructor(fetchImpl = fetch, requestHeaders = getRequestHeaders) {
     this.fetchImpl = fetchImpl;
@@ -1626,26 +1631,59 @@ var OpenAiCompatibleEmbeddingClient = class {
     const abort = () => controller.abort();
     request.signal?.addEventListener("abort", abort, { once: true });
     try {
-      const requestUrl = resolveEmbeddingRequestUrl(request.endpoint);
-      const response = await this.fetchImpl(requestUrl, {
-        method: "POST",
-        headers: {
+      let requestUrl;
+      try {
+        requestUrl = resolveEmbeddingRequestUrl(request.endpoint);
+      } catch (error) {
+        throw new Error(`\u6784\u9020Embedding\u4EE3\u7406\u5730\u5740\u5931\u8D25\uFF1A${safeFailureDetail(error, apiKey)}`);
+      }
+      let headers;
+      try {
+        headers = {
           ...await this.requestHeaders(),
           "Content-Type": "application/json",
           ...apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
-        },
-        body: JSON.stringify({
-          model: request.model.trim(),
-          input: request.texts
-        }),
-        signal: controller.signal,
-        redirect: "error"
-      });
+        };
+      } catch (error) {
+        throw new Error(`\u8BFB\u53D6SillyTavern\u8BF7\u6C42\u5934\u5931\u8D25\uFF1A${safeFailureDetail(error, apiKey)}`);
+      }
+      let response;
+      try {
+        response = await this.fetchImpl(requestUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            model: request.model.trim(),
+            input: request.texts
+          }),
+          signal: controller.signal,
+          redirect: "error"
+        });
+      } catch (error) {
+        if (request.signal?.aborted) {
+          throw error;
+        }
+        if (controller.signal.aborted) {
+          throw new Error(`Embedding\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+        }
+        if (error instanceof TypeError) {
+          logger.error("Embedding\u4EE3\u7406\u8BF7\u6C42\u5931\u8D25\u3002", error);
+          throw new Error(
+            `\u65E0\u6CD5\u8FDE\u63A5SillyTavern\u4EE3\u7406\uFF1A${safeFailureDetail(error, apiKey)}\uFF1B\u8BF7\u68C0\u67E5\u9152\u9986\u5730\u5740\u3001\u7F51\u7EDC\u548CenableCorsProxy\u8BBE\u7F6E\u3002`
+          );
+        }
+        throw error;
+      }
       const declaredLength = Number(response.headers.get("content-length"));
       if (Number.isFinite(declaredLength) && declaredLength > 32 * 1024 * 1024) {
         throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
       }
-      const text2 = await response.text();
+      let text2;
+      try {
+        text2 = await response.text();
+      } catch (error) {
+        throw new Error(`\u8BFB\u53D6Embedding\u4EE3\u7406\u54CD\u5E94\u5931\u8D25\uFF1A${safeFailureDetail(error, apiKey)}`);
+      }
       if (new TextEncoder().encode(text2).byteLength > 32 * 1024 * 1024) {
         throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
       }
@@ -1668,17 +1706,6 @@ var OpenAiCompatibleEmbeddingClient = class {
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
       }
       return parseVectors(payload, request.texts.length);
-    } catch (error) {
-      if (request.signal?.aborted) {
-        throw error;
-      }
-      if (controller.signal.aborted) {
-        throw new Error(`Embedding\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
-      }
-      if (error instanceof TypeError) {
-        throw new Error("\u65E0\u6CD5\u8FDE\u63A5SillyTavern\u4EE3\u7406\uFF1B\u8BF7\u68C0\u67E5\u9152\u9986\u5730\u5740\u3001\u7F51\u7EDC\u548CenableCorsProxy\u8BBE\u7F6E\u3002");
-      }
-      throw error;
     } finally {
       globalThis.clearTimeout(timeout);
       request.signal?.removeEventListener("abort", abort);

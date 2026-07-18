@@ -1,3 +1,4 @@
+import { logger } from '../core/logger';
 import { getRequestHeaders } from '../platform/sillytavern';
 import { resolveEmbeddingRequestUrl } from './url';
 
@@ -86,6 +87,12 @@ function errorMessage(payload: unknown, fallback: string, apiKey: string): strin
   return apiKey ? limited.split(apiKey).join('[REDACTED]') : limited;
 }
 
+function safeFailureDetail(error: unknown, apiKey: string): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const redacted = apiKey ? raw.split(apiKey).join('[REDACTED]') : raw;
+  return redacted.replace(/\s+/g, ' ').slice(0, 300) || '未知错误';
+}
+
 export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
@@ -112,26 +119,61 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
     const abort = () => controller.abort();
     request.signal?.addEventListener('abort', abort, { once: true });
     try {
-      const requestUrl = resolveEmbeddingRequestUrl(request.endpoint);
-      const response = await this.fetchImpl(requestUrl, {
-        method: 'POST',
-        headers: {
+      let requestUrl: string;
+      try {
+        requestUrl = resolveEmbeddingRequestUrl(request.endpoint);
+      } catch (error) {
+        throw new Error(`构造Embedding代理地址失败：${safeFailureDetail(error, apiKey)}`);
+      }
+
+      let headers: Record<string, string>;
+      try {
+        headers = {
           ...await this.requestHeaders(),
           'Content-Type': 'application/json',
           ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-        },
-        body: JSON.stringify({
-          model: request.model.trim(),
-          input: request.texts,
-        }),
-        signal: controller.signal,
-        redirect: 'error',
-      });
+        };
+      } catch (error) {
+        throw new Error(`读取SillyTavern请求头失败：${safeFailureDetail(error, apiKey)}`);
+      }
+
+      let response: Response;
+      try {
+        response = await this.fetchImpl(requestUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model: request.model.trim(),
+            input: request.texts,
+          }),
+          signal: controller.signal,
+          redirect: 'error',
+        });
+      } catch (error) {
+        if (request.signal?.aborted) {
+          throw error;
+        }
+        if (controller.signal.aborted) {
+          throw new Error(`Embedding请求超时（${timeoutMs}ms）。`);
+        }
+        if (error instanceof TypeError) {
+          logger.error('Embedding代理请求失败。', error);
+          throw new Error(
+            `无法连接SillyTavern代理：${safeFailureDetail(error, apiKey)}；请检查酒馆地址、网络和enableCorsProxy设置。`,
+          );
+        }
+        throw error;
+      }
       const declaredLength = Number(response.headers.get('content-length'));
       if (Number.isFinite(declaredLength) && declaredLength > 32 * 1024 * 1024) {
         throw new Error('Embedding接口响应过大。');
       }
-      const text = await response.text();
+      let text: string;
+      try {
+        text = await response.text();
+      } catch (error) {
+        throw new Error(`读取Embedding代理响应失败：${safeFailureDetail(error, apiKey)}`);
+      }
       if (new TextEncoder().encode(text).byteLength > 32 * 1024 * 1024) {
         throw new Error('Embedding接口响应过大。');
       }
@@ -154,17 +196,6 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
       }
       return parseVectors(payload, request.texts.length);
-    } catch (error) {
-      if (request.signal?.aborted) {
-        throw error;
-      }
-      if (controller.signal.aborted) {
-        throw new Error(`Embedding请求超时（${timeoutMs}ms）。`);
-      }
-      if (error instanceof TypeError) {
-        throw new Error('无法连接SillyTavern代理；请检查酒馆地址、网络和enableCorsProxy设置。');
-      }
-      throw error;
     } finally {
       globalThis.clearTimeout(timeout);
       request.signal?.removeEventListener('abort', abort);

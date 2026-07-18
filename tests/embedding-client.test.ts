@@ -55,7 +55,26 @@ describe('OpenAiCompatibleEmbeddingClient', () => {
     const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('Failed to fetch'));
     const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => ({}));
 
-    await expect(client.embed(request())).rejects.toThrow('SillyTavern代理');
+    await expect(client.embed(request())).rejects.toThrow('SillyTavern代理：Failed to fetch');
+  });
+
+  it('distinguishes request-header failures from proxy networking failures', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => {
+      throw new TypeError('headers unavailable');
+    });
+
+    await expect(client.embed(request())).rejects.toThrow('读取SillyTavern请求头失败');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes response-stream failures from proxy networking failures', async () => {
+    const response = new Response('{}', { status: 200 });
+    vi.spyOn(response, 'text').mockRejectedValue(new TypeError('stream terminated'));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response);
+    const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => ({}));
+
+    await expect(client.embed(request())).rejects.toThrow('读取Embedding代理响应失败');
   });
 
   it('explains how to enable a disabled SillyTavern proxy', async () => {
