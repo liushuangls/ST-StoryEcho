@@ -37,7 +37,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 1;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.5.0";
+var EXTENSION_VERSION = "0.6.0";
 
 // src/debug/events.ts
 var DIAGNOSTICS_UPDATED_EVENT = "storyecho:diagnostics-updated";
@@ -420,182 +420,14 @@ var MainLlmProvider = class {
   }
 };
 
-// src/server/client.ts
-var SERVER_BASE_PATH = "/api/plugins/story-echo";
-var MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
-async function readLimitedText(response) {
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-    throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u8FC7\u5927\u3002");
-  }
-  if (!response.body) {
-    const text3 = await response.text();
-    if (text3.length > MAX_RESPONSE_BYTES) {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u8FC7\u5927\u3002");
-    }
-    return text3;
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let byteLength = 0;
-  let text2 = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    byteLength += value.byteLength;
-    if (byteLength > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u8FC7\u5927\u3002");
-    }
-    text2 += decoder.decode(value, { stream: true });
-  }
-  return text2 + decoder.decode();
-}
-function unavailableMessage(status) {
-  return status === 404 ? "StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u672A\u5B89\u88C5\u6216\u672A\u542F\u7528\u3002\u8BF7\u5B89\u88C5\u670D\u52A1\u7AEF\u63D2\u4EF6\u5E76\u91CD\u542FSillyTavern\u3002" : `StoryEcho\u670D\u52A1\u7AEF\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${status}\uFF09\u3002`;
-}
-function parseServerError(text2, status) {
-  try {
-    const parsed = JSON.parse(text2);
-    if (typeof parsed.error?.message === "string" && parsed.error.message) {
-      return new Error(parsed.error.message);
-    }
-  } catch {
-  }
-  return new Error(unavailableMessage(status));
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function serverEndpointFingerprint(endpoint) {
-  return sha256(endpoint.trim());
-}
-var StoryEchoServerClient = class {
-  constructor(fetchImpl = fetch, requestHeaders = getRequestHeaders) {
-    this.fetchImpl = fetchImpl;
-    this.requestHeaders = requestHeaders;
-  }
-  async getStatus() {
-    const data = await this.request("/status", { method: "GET" });
-    if (!isRecord(data) || data["available"] !== true || typeof data["version"] !== "string" || !isRecord(data["profiles"])) {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u72B6\u6001\u54CD\u5E94\u65E0\u6548\u3002");
-    }
-    const profiles = data["profiles"];
-    return {
-      available: true,
-      version: data["version"],
-      profiles: {
-        llm: this.parseProfileStatus(profiles["llm"]),
-        embedding: this.parseProfileStatus(profiles["embedding"])
-      }
-    };
-  }
-  async saveProfile(kind, endpoint, apiKey, allowInsecureHttp) {
-    const data = await this.request(`/profiles/${kind}`, {
-      method: "PUT",
-      body: { endpoint, apiKey, allowInsecureHttp }
-    });
-    return this.parseProfileStatus(data);
-  }
-  async deleteProfile(kind) {
-    await this.request(`/profiles/${kind}`, { method: "DELETE" });
-  }
-  async complete(request) {
-    const data = await this.request("/llm/chat-completions", {
-      method: "POST",
-      body: {
-        endpointFingerprint: await serverEndpointFingerprint(request.endpoint),
-        model: request.model,
-        timeoutMs: request.timeoutMs,
-        strictJsonSchema: request.strictJsonSchema,
-        system: request.system,
-        prompt: request.prompt,
-        ...request.jsonSchema ? { jsonSchema: request.jsonSchema } : {}
-      },
-      ...request.signal ? { signal: request.signal } : {}
-    });
-    if (!isRecord(data) || typeof data["content"] !== "string") {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u6CA1\u6709\u8FD4\u56DE\u6709\u6548\u7684LLM\u5185\u5BB9\u3002");
-    }
-    return data["content"];
-  }
-  async embed(request) {
-    const data = await this.request("/embedding/embeddings", {
-      method: "POST",
-      body: {
-        endpointFingerprint: await serverEndpointFingerprint(request.endpoint),
-        model: request.model,
-        texts: request.texts,
-        timeoutMs: request.timeoutMs
-      },
-      ...request.signal ? { signal: request.signal } : {}
-    });
-    if (!isRecord(data)) {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u6CA1\u6709\u8FD4\u56DE\u6709\u6548\u7684Embedding\u54CD\u5E94\u3002");
-    }
-    return data.vectors;
-  }
-  parseProfileStatus(value) {
-    if (!isRecord(value) || typeof value["configured"] !== "boolean") {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u914D\u7F6E\u72B6\u6001\u65E0\u6548\u3002");
-    }
-    const result = { configured: value["configured"] };
-    if (typeof value["endpointFingerprint"] === "string") {
-      result.endpointFingerprint = value["endpointFingerprint"];
-    }
-    if (typeof value["updatedAt"] === "string") {
-      result.updatedAt = value["updatedAt"];
-    }
-    if (typeof value["hasApiKey"] === "boolean") {
-      result.hasApiKey = value["hasApiKey"];
-    }
-    return result;
-  }
-  async request(path, options) {
-    const headers = {
-      ...await this.requestHeaders(),
-      "Content-Type": "application/json"
-    };
-    let response;
-    try {
-      response = await this.fetchImpl(`${SERVER_BASE_PATH}${path}`, {
-        method: options.method,
-        headers,
-        ...options.body ? { body: JSON.stringify(options.body) } : {},
-        ...options.signal ? { signal: options.signal } : {}
-      });
-    } catch (error) {
-      if (options.signal?.aborted) {
-        throw error;
-      }
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u672A\u5B89\u88C5\u3001\u672A\u542F\u7528\u6216\u6682\u65F6\u65E0\u6CD5\u8FDE\u63A5\u3002");
-    }
-    if (response.status === 204) {
-      return {};
-    }
-    const text2 = await readLimitedText(response);
-    if (!response.ok) {
-      throw parseServerError(text2, response.status);
-    }
-    if (!text2) {
-      return {};
-    }
-    try {
-      return JSON.parse(text2);
-    } catch {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86\u975EJSON\u54CD\u5E94\u3002");
-    }
-  }
-};
-var storyEchoServerClient = new StoryEchoServerClient();
-
 // src/llm/url.ts
 function normalizeChatCompletionsUrl(rawUrl, options) {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
     throw new Error("Base URL\u4E0D\u80FD\u4E3A\u7A7A\u3002");
+  }
+  if (trimmed.length > 2048) {
+    throw new Error("Base URL\u8FC7\u957F\u3002");
   }
   let url;
   try {
@@ -628,12 +460,68 @@ function normalizeChatCompletionsUrl(rawUrl, options) {
   url.hash = "";
   return url.toString();
 }
+function normalizeChatCompletionsBaseUrl(rawUrl, options) {
+  const endpoint = new URL(normalizeChatCompletionsUrl(rawUrl, options));
+  endpoint.pathname = endpoint.pathname.replace(/\/chat\/completions\/?$/, "");
+  return endpoint.toString().replace(/\/+$/, "");
+}
 
 // src/llm/openai-compatible-provider.ts
+var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
+var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+async function readLimitedText(response) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    throw new Error("\u81EA\u5B9A\u4E49LLM\u54CD\u5E94\u8FC7\u5927\u3002");
+  }
+  const text2 = await response.text();
+  if (new TextEncoder().encode(text2).byteLength > MAX_RESPONSE_BYTES) {
+    throw new Error("\u81EA\u5B9A\u4E49LLM\u54CD\u5E94\u8FC7\u5927\u3002");
+  }
+  return text2;
+}
+function responseContent(payload) {
+  if (!isRecord(payload)) {
+    return typeof payload === "string" ? payload : null;
+  }
+  const choices = payload["choices"];
+  const first = Array.isArray(choices) && isRecord(choices[0]) ? choices[0] : null;
+  const message = first && isRecord(first["message"]) ? first["message"] : null;
+  const content = message?.["content"];
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content.map((part) => isRecord(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
+  }
+  if (first && typeof first["text"] === "string") {
+    return first["text"];
+  }
+  return typeof payload["content"] === "string" ? payload["content"] : null;
+}
+function responseError(payload, fallback, apiKey) {
+  let message = fallback;
+  if (isRecord(payload)) {
+    const error = payload["error"];
+    if (typeof error === "string") {
+      message = error;
+    } else if (isRecord(error) && typeof error["message"] === "string") {
+      message = error["message"];
+    } else if (typeof payload["message"] === "string") {
+      message = payload["message"];
+    }
+  }
+  const limited = message.replace(/\s+/g, " ").slice(0, 500);
+  return apiKey ? limited.split(apiKey).join("[REDACTED]") : limited;
+}
 var OpenAiCompatibleProvider = class {
-  constructor(config, serverClient = storyEchoServerClient) {
+  constructor(config, fetchImpl = fetch, requestHeaders = getRequestHeaders) {
     this.config = config;
-    this.serverClient = serverClient;
+    this.fetchImpl = fetchImpl;
+    this.requestHeaders = requestHeaders;
   }
   id = "openai-compatible";
   async complete(request) {
@@ -641,19 +529,93 @@ var OpenAiCompatibleProvider = class {
     if (!model) {
       throw new Error("\u81EA\u5B9A\u4E49LLM\u6A21\u578B\u540D\u4E0D\u80FD\u4E3A\u7A7A\u3002");
     }
-    const endpoint = normalizeChatCompletionsUrl(this.config.baseUrl, {
+    const baseUrl = normalizeChatCompletionsBaseUrl(this.config.baseUrl, {
       allowInsecureHttp: this.config.allowInsecureHttp
     });
-    return this.serverClient.complete({
-      endpoint,
+    const apiKey = this.config.apiKey.trim();
+    if (apiKey.length > 16384) {
+      throw new Error("\u81EA\u5B9A\u4E49LLM API Key\u8FC7\u957F\u3002");
+    }
+    if (/[\r\n]/.test(apiKey)) {
+      throw new Error("\u81EA\u5B9A\u4E49LLM API Key\u4E0D\u80FD\u5305\u542B\u6362\u884C\u7B26\u3002");
+    }
+    const controller = new AbortController();
+    const timeoutMs = Math.min(3e5, Math.max(1e3, Math.floor(this.config.timeoutMs)));
+    const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    const abort = () => controller.abort();
+    request.signal?.addEventListener("abort", abort, { once: true });
+    const body = {
+      messages: [
+        { role: "system", content: request.system },
+        { role: "user", content: request.prompt }
+      ],
       model,
-      timeoutMs: this.config.timeoutMs,
-      strictJsonSchema: this.config.strictJsonSchema,
-      system: request.system,
-      prompt: request.prompt,
-      ...request.jsonSchema ? { jsonSchema: request.jsonSchema } : {},
-      ...request.signal ? { signal: request.signal } : {}
-    });
+      max_tokens: 8192,
+      temperature: 0,
+      top_p: 1,
+      stream: false,
+      chat_completion_source: "custom",
+      group_names: [],
+      include_reasoning: false,
+      reasoning_effort: "medium",
+      enable_web_search: false,
+      request_images: false,
+      custom_prompt_post_processing: "strict",
+      reverse_proxy: baseUrl,
+      proxy_password: "",
+      custom_url: baseUrl,
+      custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : "",
+      custom_include_body: "",
+      custom_exclude_body: "",
+      ...this.config.strictJsonSchema && request.jsonSchema ? {
+        json_schema: {
+          name: "story_echo_response",
+          strict: true,
+          value: request.jsonSchema
+        }
+      } : {}
+    };
+    try {
+      const response = await this.fetchImpl(GENERATE_ENDPOINT, {
+        method: "POST",
+        headers: {
+          ...await this.requestHeaders(),
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      const text2 = await readLimitedText(response);
+      let payload = null;
+      try {
+        payload = text2 ? JSON.parse(text2) : null;
+      } catch {
+        if (response.ok) {
+          throw new Error("SillyTavern\u540E\u7AEF\u8FD4\u56DE\u4E86\u975EJSON\u7684LLM\u54CD\u5E94\u3002");
+        }
+      }
+      if (!response.ok) {
+        const fallback = `\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u3002`;
+        const detail = responseError(payload, "", apiKey);
+        throw new Error(detail ? `${fallback} ${detail}` : fallback);
+      }
+      const content = responseContent(payload);
+      if (!content?.trim()) {
+        throw new Error("\u81EA\u5B9A\u4E49LLM\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u5185\u5BB9\u3002");
+      }
+      return content;
+    } catch (error) {
+      if (request.signal?.aborted) {
+        throw error;
+      }
+      if (controller.signal.aborted) {
+        throw new Error(`\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+      }
+      throw error;
+    } finally {
+      globalThis.clearTimeout(timeout);
+      request.signal?.removeEventListener("abort", abort);
+    }
   }
   async testConnection() {
     const response = await this.complete({
@@ -1372,6 +1334,7 @@ var DEFAULT_SETTINGS = Object.freeze({
     custom: {
       baseUrl: "",
       model: "",
+      apiKey: "",
       timeoutMs: 6e4,
       allowInsecureHttp: false,
       fallbackToMain: true,
@@ -1384,6 +1347,7 @@ var DEFAULT_SETTINGS = Object.freeze({
     custom: {
       baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
       model: "",
+      apiKey: "",
       timeoutMs: 6e4,
       allowInsecureHttp: false
     }
@@ -1536,6 +1500,7 @@ function resolveVectorConfig(settings) {
         provider: "openai-compatible",
         endpoint,
         model: model2,
+        apiKey: settings.vector.custom.apiKey,
         timeoutMs: settings.vector.custom.timeoutMs
       }
     };
@@ -1571,33 +1536,63 @@ function resolveVectorConfig(settings) {
 }
 
 // src/vector/openai-compatible-embedding.ts
-function parseVectors(value, expectedCount) {
-  if (!Array.isArray(value)) {
-    throw new Error("StoryEcho\u670D\u52A1\u7AEF\u54CD\u5E94\u7F3A\u5C11\u5411\u91CF\u6570\u7EC4\u3002");
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function parseVectors(payload, expectedCount) {
+  const record3 = isRecord3(payload) ? payload : {};
+  const value = Array.isArray(record3["data"]) ? record3["data"] : Array.isArray(record3["embeddings"]) ? record3["embeddings"] : null;
+  if (!value) {
+    throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u7F3A\u5C11data\u6216embeddings\u6570\u7EC4\u3002");
   }
   if (value.length !== expectedCount) {
-    throw new Error(`StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE${value.length}\u6761\u5411\u91CF\uFF0C\u9884\u671F${expectedCount}\u6761\u3002`);
+    throw new Error(`Embedding\u63A5\u53E3\u8FD4\u56DE${value.length}\u6761\u5411\u91CF\uFF0C\u9884\u671F${expectedCount}\u6761\u3002`);
   }
   let dimension;
-  return value.map((item) => {
+  return value.map((item, fallbackIndex) => {
+    const rawIndex = Array.isArray(item) ? void 0 : item.index;
+    const index = rawIndex === void 0 ? fallbackIndex : Number(rawIndex);
+    if (!Number.isInteger(index) || index < 0 || index >= expectedCount) {
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u65E0\u6548\u5411\u91CF\u7D22\u5F15\u3002");
+    }
+    return { item, index };
+  }).sort((left, right) => left.index - right.index).map(({ item, index }, position) => {
+    if (index !== position) {
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u91CD\u590D\u6216\u7F3A\u5931\u7684\u5411\u91CF\u7D22\u5F15\u3002");
+    }
     const rawVector = Array.isArray(item) ? item : item.embedding;
     if (!Array.isArray(rawVector) || rawVector.length === 0) {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86\u7A7A\u5411\u91CF\u3002");
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u7A7A\u5411\u91CF\u3002");
     }
-    const vector = rawVector.map(Number);
+    const vector = rawVector.map((value2) => typeof value2 === "number" ? value2 : Number.NaN);
     if (vector.some((number) => !Number.isFinite(number))) {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u4E86\u65E0\u6548\u5411\u91CF\u6570\u503C\u3002");
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u65E0\u6548\u5411\u91CF\u6570\u503C\u3002");
     }
     dimension ??= vector.length;
     if (vector.length !== dimension) {
-      throw new Error("StoryEcho\u670D\u52A1\u7AEF\u8FD4\u56DE\u7684\u5411\u91CF\u7EF4\u5EA6\u4E0D\u4E00\u81F4\u3002");
+      throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u7684\u5411\u91CF\u7EF4\u5EA6\u4E0D\u4E00\u81F4\u3002");
     }
     return vector;
   });
 }
+function errorMessage(payload, fallback, apiKey) {
+  let message = fallback;
+  if (isRecord3(payload)) {
+    const error = payload["error"];
+    if (typeof error === "string") {
+      message = error;
+    } else if (isRecord3(error) && typeof error["message"] === "string") {
+      message = error["message"];
+    } else if (typeof payload["message"] === "string") {
+      message = payload["message"];
+    }
+  }
+  const limited = message.replace(/\s+/g, " ").slice(0, 500);
+  return apiKey ? limited.split(apiKey).join("[REDACTED]") : limited;
+}
 var OpenAiCompatibleEmbeddingClient = class {
-  constructor(serverClient = storyEchoServerClient) {
-    this.serverClient = serverClient;
+  constructor(fetchImpl = fetch) {
+    this.fetchImpl = fetchImpl;
   }
   async embed(request) {
     if (request.texts.length === 0) {
@@ -1606,8 +1601,69 @@ var OpenAiCompatibleEmbeddingClient = class {
     if (!request.model.trim()) {
       throw new Error("Embedding\u6A21\u578B\u4E0D\u80FD\u4E3A\u7A7A\u3002");
     }
-    const vectors = await this.serverClient.embed(request);
-    return parseVectors(vectors, request.texts.length);
+    const apiKey = request.apiKey.trim();
+    if (apiKey.length > 16384) {
+      throw new Error("Embedding API Key\u8FC7\u957F\u3002");
+    }
+    if (/[\r\n]/.test(apiKey)) {
+      throw new Error("Embedding API Key\u4E0D\u80FD\u5305\u542B\u6362\u884C\u7B26\u3002");
+    }
+    const timeoutMs = Math.min(3e5, Math.max(1e3, Math.floor(request.timeoutMs)));
+    const controller = new AbortController();
+    const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    const abort = () => controller.abort();
+    request.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const response = await this.fetchImpl(request.endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
+        },
+        body: JSON.stringify({
+          model: request.model.trim(),
+          input: request.texts
+        }),
+        signal: controller.signal,
+        redirect: "error"
+      });
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > 32 * 1024 * 1024) {
+        throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
+      }
+      const text2 = await response.text();
+      if (new TextEncoder().encode(text2).byteLength > 32 * 1024 * 1024) {
+        throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
+      }
+      let payload = null;
+      try {
+        payload = text2 ? JSON.parse(text2) : null;
+      } catch {
+        if (response.ok) {
+          throw new Error("Embedding\u63A5\u53E3\u8FD4\u56DE\u4E86\u975EJSON\u54CD\u5E94\u3002");
+        }
+      }
+      if (!response.ok) {
+        const fallback = `Embedding\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u3002`;
+        const detail = errorMessage(payload, "", apiKey);
+        throw new Error(detail ? `${fallback} ${detail}` : fallback);
+      }
+      return parseVectors(payload, request.texts.length);
+    } catch (error) {
+      if (request.signal?.aborted) {
+        throw error;
+      }
+      if (controller.signal.aborted) {
+        throw new Error(`Embedding\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+      }
+      if (error instanceof TypeError) {
+        throw new Error("\u6D4F\u89C8\u5668\u65E0\u6CD5\u8FDE\u63A5Embedding\u63A5\u53E3\uFF1B\u8BF7\u68C0\u67E5\u5730\u5740\u3001\u7F51\u7EDC\u4E0E\u670D\u52A1\u7AEFCORS\u8BBE\u7F6E\u3002");
+      }
+      throw error;
+    } finally {
+      globalThis.clearTimeout(timeout);
+      request.signal?.removeEventListener("abort", abort);
+    }
   }
 };
 var openAiCompatibleEmbeddingClient = new OpenAiCompatibleEmbeddingClient();
@@ -2602,8 +2658,16 @@ function buildDebugReport(state, settings, vectorCount = "unknown") {
     })),
     recentDebugTraces: state.debugTraces
   }, null, 2);
-  const customBaseUrl = settings.llm.custom.baseUrl.trim();
-  return customBaseUrl ? report.split(customBaseUrl).join("[REDACTED_BASE_URL]") : report;
+  const redactions = [
+    settings.llm.custom.baseUrl.trim(),
+    settings.vector.custom.baseUrl.trim(),
+    settings.llm.custom.apiKey.trim(),
+    settings.vector.custom.apiKey.trim()
+  ].filter(Boolean);
+  return redactions.reduce(
+    (sanitized, value) => sanitized.split(value).join("[REDACTED]"),
+    report
+  );
 }
 
 // src/ui/notifications.ts
@@ -2632,10 +2696,6 @@ var PANEL_ID = "story-echo-settings";
 var settingsRepository2 = new SettingsRepository();
 var memoryRepository2 = new MemoryRepository();
 var vectorStore2 = new SillyTavernVectorStore();
-var profileDisplayStates = {
-  llm: { state: "checking" },
-  embedding: { state: "checking" }
-};
 function panelTemplate() {
   const panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -2710,14 +2770,14 @@ function panelTemplate() {
         <div id="story-echo-custom-provider" class="story-echo-grid story-echo-subsection">
           <label class="story-echo-field story-echo-field-wide">
             <span>Base URL</span>
-            <input id="story-echo-base-url" class="text_pole" type="url" placeholder="https://example.com/v1">
+            <input id="story-echo-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://example.com/v1">
           </label>
           <label class="story-echo-field">
             <span>\u6A21\u578B</span>
-            <input id="story-echo-model" class="text_pole" type="text" placeholder="model-name">
+            <input id="story-echo-model" class="text_pole" type="text" maxlength="200" placeholder="model-name">
           </label>
           <label class="story-echo-field">
-            <span>API Key\uFF08\u7531\u670D\u52A1\u7AEF\u4FDD\u7BA1\uFF09</span>
+            <span>API Key\uFF08\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF09</span>
             <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0Key\u63A5\u53E3\u53EF\u7559\u7A7A">
           </label>
           <label class="checkbox_label story-echo-inline">
@@ -2728,18 +2788,9 @@ function panelTemplate() {
             <input id="story-echo-fallback-main" type="checkbox">
             <span>\u81EA\u5B9A\u4E49\u63A5\u53E3\u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5</span>
           </label>
-          <div class="story-echo-field-wide story-echo-key-row">
-            <span id="story-echo-key-status" class="story-echo-secret-empty">\u6B63\u5728\u68C0\u67E5\u670D\u52A1\u7AEF\u914D\u7F6E\u2026\u2026</span>
-            <div class="story-echo-key-actions">
-              <button id="story-echo-save-key" class="menu_button" type="button">
-                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u5230\u670D\u52A1\u7AEF</span>
-              </button>
-              <button id="story-echo-clear-key" class="menu_button" type="button">
-                <i class="fa-solid fa-trash" aria-hidden="true"></i><span>\u5220\u9664\u670D\u52A1\u7AEFKey</span>
-              </button>
-            </div>
-          </div>
-          <p class="story-echo-hint story-echo-field-wide">Key\u4E0E\u5F53\u524DBase URL\u7ED1\u5B9A\uFF1B\u66F4\u6362Base URL\u540E\u9700\u8981\u91CD\u65B0\u4FDD\u5B58\uFF0C\u4FEE\u6539\u6A21\u578B\u4E0D\u9700\u8981\u3002</p>
+          <p class="story-echo-hint story-echo-field-wide">
+            LLM Key\u4EE5\u660E\u6587\u4FDD\u5B58\u5728\u5F53\u524D\u7528\u6237\u7684\u6269\u5C55\u8BBE\u7F6E\u4E2D\u5E76\u968F\u9152\u9986\u540C\u6B65\uFF1B\u8BF7\u6C42\u7531SillyTavern\u540E\u7AEF\u8F6C\u53D1\uFF0C\u6D4F\u89C8\u5668\u4E0D\u4F1A\u76F4\u63A5\u8FDE\u63A5LLM\u63A5\u53E3\u3002
+          </p>
         </div>
 
         <div class="story-echo-grid story-echo-section">
@@ -2764,44 +2815,37 @@ function panelTemplate() {
             <span>Embedding Base URL</span>
             <input id="story-echo-embedding-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
           </label>
-          <label class="story-echo-field story-echo-field-wide">
+          <label class="story-echo-field">
             <span>Embedding\u6A21\u578B\u6216Endpoint ID</span>
             <input id="story-echo-embedding-model" class="text_pole" type="text" maxlength="200" placeholder="doubao-embedding-text-\u2026 \u6216 ep-\u2026">
           </label>
-          <label class="story-echo-field story-echo-field-wide">
-            <span>Embedding API Key\uFF08\u7531\u670D\u52A1\u7AEF\u4FDD\u7BA1\uFF09</span>
+          <label class="story-echo-field">
+            <span>Embedding API Key\uFF08\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF09</span>
             <input id="story-echo-embedding-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0Key\u63A5\u53E3\u53EF\u7559\u7A7A">
           </label>
           <label class="checkbox_label story-echo-inline story-echo-field-wide">
             <input id="story-echo-embedding-allow-http" type="checkbox">
             <span>\u5141\u8BB8\u4E0D\u5B89\u5168HTTP\uFF08\u4EC5\u5EFA\u8BAE\u5C40\u57DF\u7F51\uFF09</span>
           </label>
-          <div class="story-echo-field-wide story-echo-key-row">
-            <span id="story-echo-embedding-key-status" class="story-echo-secret-empty">Embedding Key\u672A\u52A0\u8F7D</span>
-            <div class="story-echo-key-actions">
-              <button id="story-echo-save-embedding-key" class="menu_button" type="button">
-                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u5230\u670D\u52A1\u7AEF</span>
-              </button>
-              <button id="story-echo-test-embedding" class="menu_button" type="button">
-                <i class="fa-solid fa-vial" aria-hidden="true"></i><span>\u6D4B\u8BD5Embedding</span>
-              </button>
-              <button id="story-echo-clear-embedding-key" class="menu_button" type="button">
-                <i class="fa-solid fa-trash" aria-hidden="true"></i><span>\u5220\u9664\u670D\u52A1\u7AEFKey</span>
-              </button>
-            </div>
+          <div class="story-echo-field-wide story-echo-subsection-actions">
+            <button id="story-echo-test-embedding" class="menu_button" type="button">
+              <i class="fa-solid fa-vial" aria-hidden="true"></i><span>\u6D4B\u8BD5Embedding\u8FDE\u63A5</span>
+            </button>
           </div>
           <p class="story-echo-hint story-echo-field-wide">
-            Key\u4E0E\u5F53\u524DBase URL\u7ED1\u5B9A\u3002Embedding\u8BF7\u6C42\u7531SillyTavern\u670D\u52A1\u7AEF\u53D1\u51FA\uFF0C\u4E0D\u9700\u8981\u6D4F\u89C8\u5668\u8DE8\u57DF\u6216CORS\u4EE3\u7406\u3002
+            Embedding Key\u540C\u6837\u4EE5\u660E\u6587\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF1B\u8BF7\u6C42\u7531\u6D4F\u89C8\u5668\u76F4\u8FDE\u63A5\u53E3\uFF0C\u9700\u8981\u670D\u52A1\u7AEF\u5141\u8BB8CORS\u3002\u751F\u6210\u540E\u7684\u5411\u91CF\u4ECD\u4EA4\u7ED9\u9152\u9986Vector Storage\u4FDD\u5B58\u548C\u68C0\u7D22\u3002
           </p>
         </div>
 
-        <div class="story-echo-actions" role="group" aria-label="StoryEcho\u64CD\u4F5C">
+        <div class="story-echo-actions story-echo-actions-primary" role="group" aria-label="\u4E3B\u8981\u64CD\u4F5C">
           <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-plug" aria-hidden="true"></i><span>\u6D4B\u8BD5LLM\u8FDE\u63A5</span>
           </button>
           <button id="story-echo-process-history" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i><span>\u5904\u7406\u7A97\u53E3\u5916\u5386\u53F2</span>
           </button>
+        </div>
+        <div class="story-echo-actions story-echo-actions-secondary" role="group" aria-label="\u8BCA\u65AD\u64CD\u4F5C">
           <button id="story-echo-refresh-status" class="menu_button" type="button">
             <i class="fa-solid fa-rotate" aria-hidden="true"></i><span>\u5237\u65B0\u72B6\u6001</span>
           </button>
@@ -2813,9 +2857,6 @@ function panelTemplate() {
           </button>
         </div>
 
-        <p id="story-echo-server-status" class="story-echo-hint">
-          \u6B63\u5728\u68C0\u67E5StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u2026\u2026
-        </p>
         <div id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u2026\u2026</div>
         <details class="story-echo-diagnostics" open>
           <summary>\u6D4B\u8BD5\u7EDF\u8BA1</summary>
@@ -2846,95 +2887,11 @@ function numberValue(input, fallback) {
   const value = Number(input.value);
   return Number.isFinite(value) ? value : fallback;
 }
-function profileStatusText(kind, display) {
-  const label = kind === "llm" ? "LLM" : "Embedding";
-  switch (display.state) {
-    case "checking":
-      return `\u6B63\u5728\u68C0\u67E5${label}\u670D\u52A1\u7AEF\u914D\u7F6E\u2026\u2026`;
-    case "missing":
-      return `${label}\u5C1A\u672A\u4FDD\u5B58\u5230\u670D\u52A1\u7AEF`;
-    case "unavailable":
-      return "StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u4E0D\u53EF\u7528";
-    case "mismatch":
-      return `${label}\u5DF2\u4FDD\u5B58\uFF0C\u4F46Base URL\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u4FDD\u5B58`;
-    case "ready":
-      return display.hasApiKey ? `${label} API Key\u5DF2\u7531\u670D\u52A1\u7AEF\u4FDD\u7BA1` : `${label}\u670D\u52A1\u7AEF\u914D\u7F6E\u5DF2\u4FDD\u5B58\uFF08\u65E0API Key\uFF09`;
-  }
-}
-function syncProfileStatus(panel) {
-  const rows = [
-    ["llm", "#story-echo-key-status"],
-    ["embedding", "#story-echo-embedding-key-status"]
-  ];
-  for (const [kind, selector] of rows) {
-    const target = element(panel, selector);
-    const display = profileDisplayStates[kind];
-    const loaded = display.state === "ready";
-    target.textContent = profileStatusText(kind, display);
-    target.classList.toggle("story-echo-secret-loaded", loaded);
-    target.classList.toggle("story-echo-secret-empty", !loaded);
-  }
-}
-async function configuredEndpoint(kind, settings) {
-  try {
-    if (kind === "llm") {
-      if (!settings.llm.custom.baseUrl.trim()) {
-        return null;
-      }
-      return normalizeChatCompletionsUrl(settings.llm.custom.baseUrl, {
-        allowInsecureHttp: settings.llm.custom.allowInsecureHttp
-      });
-    }
-    return normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
-      allowInsecureHttp: settings.vector.custom.allowInsecureHttp
-    });
-  } catch {
-    return null;
-  }
-}
-async function displayStateFor(kind, profile, settings) {
-  if (!profile.configured || !profile.endpointFingerprint) {
-    return { state: "missing" };
-  }
-  const endpoint = await configuredEndpoint(kind, settings);
-  const hasApiKey = profile.hasApiKey === true;
-  if (!endpoint || await serverEndpointFingerprint(endpoint) !== profile.endpointFingerprint) {
-    return { state: "mismatch", hasApiKey };
-  }
-  return { state: "ready", hasApiKey };
-}
-async function refreshServerProfileStatus(panel) {
-  profileDisplayStates = {
-    llm: { state: "checking" },
-    embedding: { state: "checking" }
-  };
-  syncProfileStatus(panel);
-  const serverTarget = element(panel, "#story-echo-server-status");
-  serverTarget.textContent = "\u6B63\u5728\u68C0\u67E5StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u2026\u2026";
-  try {
-    const status = await storyEchoServerClient.getStatus();
-    const settings = settingsRepository2.get();
-    const [llm, embedding] = await Promise.all([
-      displayStateFor("llm", status.profiles.llm, settings),
-      displayStateFor("embedding", status.profiles.embedding, settings)
-    ]);
-    profileDisplayStates = { llm, embedding };
-    serverTarget.textContent = `StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6 ${status.version} \u5DF2\u8FDE\u63A5\uFF1B\u81EA\u5B9A\u4E49\u8BF7\u6C42\u548CAPI Key\u5747\u7531\u670D\u52A1\u7AEF\u5904\u7406\u3002`;
-  } catch (error) {
-    profileDisplayStates = {
-      llm: { state: "unavailable" },
-      embedding: { state: "unavailable" }
-    };
-    serverTarget.textContent = error instanceof Error ? error.message : "StoryEcho\u670D\u52A1\u7AEF\u63D2\u4EF6\u4E0D\u53EF\u7528\u3002";
-  }
-  syncProfileStatus(panel);
-}
 function syncVisibility(panel, settings) {
   const custom = element(panel, "#story-echo-custom-provider");
   custom.hidden = settings.llm.provider !== "openai-compatible";
   const customEmbedding = element(panel, "#story-echo-custom-embedding");
   customEmbedding.hidden = settings.vector.source !== "openai-compatible";
-  syncProfileStatus(panel);
 }
 function syncForm(panel, settings) {
   element(panel, "#story-echo-enabled").checked = settings.enabled;
@@ -2951,12 +2908,12 @@ function syncForm(panel, settings) {
   element(panel, "#story-echo-model").value = settings.llm.custom.model;
   element(panel, "#story-echo-allow-http").checked = settings.llm.custom.allowInsecureHttp;
   element(panel, "#story-echo-fallback-main").checked = settings.llm.custom.fallbackToMain;
-  element(panel, "#story-echo-api-key").value = "";
+  element(panel, "#story-echo-api-key").value = settings.llm.custom.apiKey;
   element(panel, "#story-echo-vector-source").value = settings.vector.source;
   element(panel, "#story-echo-embedding-base-url").value = settings.vector.custom.baseUrl;
   element(panel, "#story-echo-embedding-model").value = settings.vector.custom.model;
   element(panel, "#story-echo-embedding-allow-http").checked = settings.vector.custom.allowInsecureHttp;
-  element(panel, "#story-echo-embedding-api-key").value = "";
+  element(panel, "#story-echo-embedding-api-key").value = settings.vector.custom.apiKey;
   syncVisibility(panel, settings);
 }
 function bindSettings(panel) {
@@ -3001,7 +2958,6 @@ function bindSettings(panel) {
       current.llm.provider = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
-    void refreshServerProfileStatus(panel);
   });
   element(panel, "#story-echo-auto-extract").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
@@ -3021,18 +2977,16 @@ function bindSettings(panel) {
       settingsRepository2.update((settings) => {
         settings.llm.custom.baseUrl = "";
       });
-      void refreshServerProfileStatus(panel);
       return;
     }
     try {
-      const normalized2 = normalizeChatCompletionsUrl(value, {
+      const normalized2 = normalizeChatCompletionsBaseUrl(value, {
         allowInsecureHttp: current.llm.custom.allowInsecureHttp
       });
       settingsRepository2.update((settings) => {
         settings.llm.custom.baseUrl = normalized2;
       });
       input.value = normalized2;
-      void refreshServerProfileStatus(panel);
     } catch (error) {
       input.value = current.llm.custom.baseUrl;
       notify.error(error instanceof Error ? error.message : "Base URL\u65E0\u6548\u3002");
@@ -3043,67 +2997,26 @@ function bindSettings(panel) {
       settings.llm.custom.model = event.currentTarget.value.trim();
     });
   });
+  element(panel, "#story-echo-api-key").addEventListener("input", (event) => {
+    settingsRepository2.update((settings) => {
+      settings.llm.custom.apiKey = event.currentTarget.value;
+    });
+  });
   element(panel, "#story-echo-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.allowInsecureHttp = event.currentTarget.checked;
     });
-    void refreshServerProfileStatus(panel);
   });
   element(panel, "#story-echo-fallback-main").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.fallbackToMain = event.currentTarget.checked;
     });
   });
-  element(panel, "#story-echo-save-key").addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    const input = element(panel, "#story-echo-api-key");
-    if (!input.value.trim() && !globalThis.confirm("API Key\u4E3A\u7A7A\uFF0C\u5C06\u4FDD\u5B58\u4E3A\u65E0\u9700\u9274\u6743\u7684LLM\u7AEF\u70B9\u3002\u7EE7\u7EED\uFF1F")) {
-      return;
-    }
-    button.disabled = true;
-    try {
-      const settings = settingsRepository2.get();
-      const endpoint = normalizeChatCompletionsUrl(settings.llm.custom.baseUrl, {
-        allowInsecureHttp: settings.llm.custom.allowInsecureHttp
-      });
-      await storyEchoServerClient.saveProfile(
-        "llm",
-        endpoint,
-        input.value,
-        settings.llm.custom.allowInsecureHttp
-      );
-      input.value = "";
-      await refreshServerProfileStatus(panel);
-      notify.success("LLM\u914D\u7F6E\u4E0EAPI Key\u5DF2\u4FDD\u5B58\u5230SillyTavern\u670D\u52A1\u7AEF\u3002");
-    } catch (error) {
-      notify.error(error instanceof Error ? error.message : "\u4FDD\u5B58LLM\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
-    } finally {
-      input.value = "";
-      button.disabled = false;
-    }
-  });
-  element(panel, "#story-echo-clear-key").addEventListener("click", async (event) => {
-    if (!globalThis.confirm("\u4ECESillyTavern\u670D\u52A1\u7AEF\u6C38\u4E45\u5220\u9664StoryEcho\u7684LLM API Key\uFF1F")) {
-      return;
-    }
-    const button = event.currentTarget;
-    button.disabled = true;
-    try {
-      await storyEchoServerClient.deleteProfile("llm");
-      await refreshServerProfileStatus(panel);
-      notify.success("LLM\u670D\u52A1\u7AEF\u914D\u7F6E\u5DF2\u5220\u9664\u3002");
-    } catch (error) {
-      notify.error(error instanceof Error ? error.message : "\u5220\u9664LLM\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
-    } finally {
-      button.disabled = false;
-    }
-  });
   element(panel, "#story-echo-vector-source").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.vector.source = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
-    void refreshServerProfileStatus(panel);
     void refreshStatus(panel);
   });
   element(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
@@ -3114,7 +3027,6 @@ function bindSettings(panel) {
       settingsRepository2.update((settings) => {
         settings.vector.custom.baseUrl = "";
       });
-      void refreshServerProfileStatus(panel);
       return;
     }
     try {
@@ -3126,7 +3038,6 @@ function bindSettings(panel) {
         settings.vector.custom.baseUrl = baseUrl;
       });
       input.value = baseUrl;
-      void refreshServerProfileStatus(panel);
     } catch (error) {
       input.value = current.vector.custom.baseUrl;
       notify.error(error instanceof Error ? error.message : "Embedding Base URL\u65E0\u6548\u3002");
@@ -3137,55 +3048,15 @@ function bindSettings(panel) {
       settings.vector.custom.model = event.currentTarget.value.trim();
     });
   });
+  element(panel, "#story-echo-embedding-api-key").addEventListener("input", (event) => {
+    settingsRepository2.update((settings) => {
+      settings.vector.custom.apiKey = event.currentTarget.value;
+    });
+  });
   element(panel, "#story-echo-embedding-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.allowInsecureHttp = event.currentTarget.checked;
     });
-    void refreshServerProfileStatus(panel);
-  });
-  element(panel, "#story-echo-save-embedding-key").addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    const input = element(panel, "#story-echo-embedding-api-key");
-    if (!input.value.trim() && !globalThis.confirm("API Key\u4E3A\u7A7A\uFF0C\u5C06\u4FDD\u5B58\u4E3A\u65E0\u9700\u9274\u6743\u7684Embedding\u7AEF\u70B9\u3002\u7EE7\u7EED\uFF1F")) {
-      return;
-    }
-    button.disabled = true;
-    try {
-      const settings = settingsRepository2.get();
-      const endpoint = normalizeEmbeddingsUrl(settings.vector.custom.baseUrl, {
-        allowInsecureHttp: settings.vector.custom.allowInsecureHttp
-      });
-      await storyEchoServerClient.saveProfile(
-        "embedding",
-        endpoint,
-        input.value,
-        settings.vector.custom.allowInsecureHttp
-      );
-      input.value = "";
-      await refreshServerProfileStatus(panel);
-      notify.success("Embedding\u914D\u7F6E\u4E0EAPI Key\u5DF2\u4FDD\u5B58\u5230SillyTavern\u670D\u52A1\u7AEF\u3002");
-    } catch (error) {
-      notify.error(error instanceof Error ? error.message : "\u4FDD\u5B58Embedding\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
-    } finally {
-      input.value = "";
-      button.disabled = false;
-    }
-  });
-  element(panel, "#story-echo-clear-embedding-key").addEventListener("click", async (event) => {
-    if (!globalThis.confirm("\u4ECESillyTavern\u670D\u52A1\u7AEF\u6C38\u4E45\u5220\u9664StoryEcho\u7684Embedding API Key\uFF1F")) {
-      return;
-    }
-    const button = event.currentTarget;
-    button.disabled = true;
-    try {
-      await storyEchoServerClient.deleteProfile("embedding");
-      await refreshServerProfileStatus(panel);
-      notify.success("Embedding\u670D\u52A1\u7AEF\u914D\u7F6E\u5DF2\u5220\u9664\u3002");
-    } catch (error) {
-      notify.error(error instanceof Error ? error.message : "\u5220\u9664Embedding\u670D\u52A1\u7AEF\u914D\u7F6E\u5931\u8D25\u3002");
-    } finally {
-      button.disabled = false;
-    }
   });
   element(panel, "#story-echo-test-embedding").addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -3244,10 +3115,7 @@ function bindSettings(panel) {
     }
   });
   element(panel, "#story-echo-refresh-status").addEventListener("click", async () => {
-    await Promise.all([
-      refreshStatus(panel),
-      refreshServerProfileStatus(panel)
-    ]);
+    await refreshStatus(panel);
   });
   element(panel, "#story-echo-copy-debug").addEventListener("click", async () => {
     const state = memoryRepository2.getExisting();
@@ -3432,15 +3300,7 @@ async function registerSettingsPanel() {
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);
   });
-  await Promise.all([
-    refreshStatus(panel),
-    refreshServerProfileStatus(panel)
-  ]);
-  globalThis.setTimeout(() => {
-    if (panel.isConnected) {
-      void refreshServerProfileStatus(panel);
-    }
-  }, 4e3);
+  await refreshStatus(panel);
 }
 
 // src/index.ts

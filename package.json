@@ -1,17 +1,15 @@
 {
   "name": "st-storyecho",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
-  "main": "server/index.cjs",
   "description": "Sliding-window context and story-memory recall for SillyTavern.",
   "scripts": {
     "build": "esbuild src/index.ts --bundle --format=esm --target=es2022 --outfile=dist/index.js --sourcemap",
     "dev": "npm run build -- --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check:server": "node --check server/index.cjs",
-    "check": "npm run typecheck && npm run check:server && npm run build && npm run test"
+    "check": "npm run typecheck && npm run build && npm run test"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

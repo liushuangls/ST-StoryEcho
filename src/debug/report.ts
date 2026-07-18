@@ -64,6 +64,14 @@ export function buildDebugReport(
       })),
     recentDebugTraces: state.debugTraces,
   }, null, 2);
-  const customBaseUrl = settings.llm.custom.baseUrl.trim();
-  return customBaseUrl ? report.split(customBaseUrl).join('[REDACTED_BASE_URL]') : report;
+  const redactions = [
+    settings.llm.custom.baseUrl.trim(),
+    settings.vector.custom.baseUrl.trim(),
+    settings.llm.custom.apiKey.trim(),
+    settings.vector.custom.apiKey.trim(),
+  ].filter(Boolean);
+  return redactions.reduce(
+    (sanitized, value) => sanitized.split(value).join('[REDACTED]'),
+    report,
+  );
 }

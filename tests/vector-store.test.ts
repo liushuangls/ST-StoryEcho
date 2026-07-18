@@ -21,6 +21,7 @@ const precomputed = {
     provider: 'openai-compatible' as const,
     endpoint: 'https://example.com/v1/embeddings',
     model: 'embedding-model',
+    apiKey: 'embedding-secret',
     timeoutMs: 1_000,
   },
 };

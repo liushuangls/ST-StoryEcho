@@ -35,6 +35,7 @@ describe('vectorConfigFingerprint', () => {
         provider: 'openai-compatible',
         endpoint: 'https://example.com/v1/embeddings',
         model: 'model-a',
+        apiKey: 'first-secret',
         timeoutMs: 10_000,
       },
     });
@@ -45,6 +46,7 @@ describe('vectorConfigFingerprint', () => {
         provider: 'openai-compatible',
         endpoint: 'https://example.com/v1/embeddings',
         model: 'model-a',
+        apiKey: 'changed-secret',
         timeoutMs: 60_000,
       },
     });
@@ -55,6 +57,7 @@ describe('vectorConfigFingerprint', () => {
         provider: 'openai-compatible',
         endpoint: 'https://other.example.com/v1/embeddings',
         model: 'model-a',
+        apiKey: 'first-secret',
         timeoutMs: 10_000,
       },
     });
@@ -75,6 +78,7 @@ describe('vectorConfigFingerprint', () => {
         provider: 'openai-compatible',
         endpoint: 'https://ark.cn-beijing.volces.com/api/v3/embeddings',
         model: 'doubao-embedding-text-test',
+        apiKey: '',
         timeoutMs: 60_000,
       },
     });

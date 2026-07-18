@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     custom: {
       baseUrl: '',
       model: '',
+      apiKey: '',
       timeoutMs: 60_000,
       allowInsecureHttp: false,
       fallbackToMain: true,
@@ -36,6 +37,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     custom: {
       baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
       model: '',
+      apiKey: '',
       timeoutMs: 60_000,
       allowInsecureHttp: false,
     },

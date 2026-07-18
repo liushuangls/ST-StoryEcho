@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeChatCompletionsUrl } from '../src/llm/url';
+import { normalizeChatCompletionsBaseUrl, normalizeChatCompletionsUrl } from '../src/llm/url';
 
 describe('normalizeChatCompletionsUrl', () => {
   it.each([
@@ -33,5 +33,16 @@ describe('normalizeChatCompletionsUrl', () => {
     expect(() => normalizeChatCompletionsUrl('https://example.com/v1?api_key=secret', {
       allowInsecureHttp: false,
     })).toThrow('不能包含查询参数');
+  });
+});
+
+describe('normalizeChatCompletionsBaseUrl', () => {
+  it.each([
+    ['https://example.com', 'https://example.com/v1'],
+    ['https://example.com/v1', 'https://example.com/v1'],
+    ['https://example.com/v1/chat/completions', 'https://example.com/v1'],
+    ['https://example.com/api', 'https://example.com/api/v1'],
+  ])('normalizes %s for the SillyTavern custom backend', (input, expected) => {
+    expect(normalizeChatCompletionsBaseUrl(input, { allowInsecureHttp: false })).toBe(expected);
   });
 });

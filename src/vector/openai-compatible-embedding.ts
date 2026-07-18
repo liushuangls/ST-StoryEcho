@@ -1,5 +1,3 @@
-import { storyEchoServerClient, type StoryEchoServerClient } from '../server/client';
-
 interface EmbeddingResponseItem {
   index?: unknown;
   embedding?: unknown;
@@ -8,42 +6,83 @@ interface EmbeddingResponseItem {
 export interface EmbeddingRequest {
   endpoint: string;
   model: string;
+  apiKey: string;
   texts: string[];
   timeoutMs: number;
+  signal?: AbortSignal;
 }
 
 export interface EmbeddingClient {
   embed(request: EmbeddingRequest): Promise<number[][]>;
 }
 
-function parseVectors(value: unknown, expectedCount: number): number[][] {
-  if (!Array.isArray(value)) {
-    throw new Error('StoryEcho服务端响应缺少向量数组。');
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseVectors(payload: unknown, expectedCount: number): number[][] {
+  const record = isRecord(payload) ? payload : {};
+  const value = Array.isArray(record['data'])
+    ? record['data']
+    : Array.isArray(record['embeddings'])
+      ? record['embeddings']
+      : null;
+  if (!value) {
+    throw new Error('Embedding接口响应缺少data或embeddings数组。');
   }
   if (value.length !== expectedCount) {
-    throw new Error(`StoryEcho服务端返回${value.length}条向量，预期${expectedCount}条。`);
+    throw new Error(`Embedding接口返回${value.length}条向量，预期${expectedCount}条。`);
   }
 
   let dimension: number | undefined;
-  return (value as EmbeddingResponseItem[]).map((item) => {
-    const rawVector = Array.isArray(item) ? item : item.embedding;
-    if (!Array.isArray(rawVector) || rawVector.length === 0) {
-      throw new Error('StoryEcho服务端返回了空向量。');
+  return (value as EmbeddingResponseItem[])
+    .map((item, fallbackIndex) => {
+      const rawIndex = Array.isArray(item) ? undefined : item.index;
+      const index = rawIndex === undefined ? fallbackIndex : Number(rawIndex);
+      if (!Number.isInteger(index) || index < 0 || index >= expectedCount) {
+        throw new Error('Embedding接口返回了无效向量索引。');
+      }
+      return { item, index };
+    })
+    .sort((left, right) => left.index - right.index)
+    .map(({ item, index }, position) => {
+      if (index !== position) {
+        throw new Error('Embedding接口返回了重复或缺失的向量索引。');
+      }
+      const rawVector = Array.isArray(item) ? item : item.embedding;
+      if (!Array.isArray(rawVector) || rawVector.length === 0) {
+        throw new Error('Embedding接口返回了空向量。');
+      }
+      const vector = rawVector.map((value) => typeof value === 'number' ? value : Number.NaN);
+      if (vector.some((number) => !Number.isFinite(number))) {
+        throw new Error('Embedding接口返回了无效向量数值。');
+      }
+      dimension ??= vector.length;
+      if (vector.length !== dimension) {
+        throw new Error('Embedding接口返回的向量维度不一致。');
+      }
+      return vector;
+    });
+}
+
+function errorMessage(payload: unknown, fallback: string, apiKey: string): string {
+  let message = fallback;
+  if (isRecord(payload)) {
+    const error = payload['error'];
+    if (typeof error === 'string') {
+      message = error;
+    } else if (isRecord(error) && typeof error['message'] === 'string') {
+      message = error['message'];
+    } else if (typeof payload['message'] === 'string') {
+      message = payload['message'];
     }
-    const vector = rawVector.map(Number);
-    if (vector.some((number) => !Number.isFinite(number))) {
-      throw new Error('StoryEcho服务端返回了无效向量数值。');
-    }
-    dimension ??= vector.length;
-    if (vector.length !== dimension) {
-      throw new Error('StoryEcho服务端返回的向量维度不一致。');
-    }
-    return vector;
-  });
+  }
+  const limited = message.replace(/\s+/g, ' ').slice(0, 500);
+  return apiKey ? limited.split(apiKey).join('[REDACTED]') : limited;
 }
 
 export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
-  constructor(private readonly serverClient: StoryEchoServerClient = storyEchoServerClient) {}
+  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
 
   async embed(request: EmbeddingRequest): Promise<number[][]> {
     if (request.texts.length === 0) {
@@ -52,8 +91,69 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
     if (!request.model.trim()) {
       throw new Error('Embedding模型不能为空。');
     }
-    const vectors = await this.serverClient.embed(request);
-    return parseVectors(vectors, request.texts.length);
+    const apiKey = request.apiKey.trim();
+    if (apiKey.length > 16_384) {
+      throw new Error('Embedding API Key过长。');
+    }
+    if (/[\r\n]/.test(apiKey)) {
+      throw new Error('Embedding API Key不能包含换行符。');
+    }
+    const timeoutMs = Math.min(300_000, Math.max(1_000, Math.floor(request.timeoutMs)));
+    const controller = new AbortController();
+    const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+    const abort = () => controller.abort();
+    request.signal?.addEventListener('abort', abort, { once: true });
+    try {
+      const response = await this.fetchImpl(request.endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: request.model.trim(),
+          input: request.texts,
+        }),
+        signal: controller.signal,
+        redirect: 'error',
+      });
+      const declaredLength = Number(response.headers.get('content-length'));
+      if (Number.isFinite(declaredLength) && declaredLength > 32 * 1024 * 1024) {
+        throw new Error('Embedding接口响应过大。');
+      }
+      const text = await response.text();
+      if (new TextEncoder().encode(text).byteLength > 32 * 1024 * 1024) {
+        throw new Error('Embedding接口响应过大。');
+      }
+      let payload: unknown = null;
+      try {
+        payload = text ? JSON.parse(text) as unknown : null;
+      } catch {
+        if (response.ok) {
+          throw new Error('Embedding接口返回了非JSON响应。');
+        }
+      }
+      if (!response.ok) {
+        const fallback = `Embedding请求失败（HTTP ${response.status}）。`;
+        const detail = errorMessage(payload, '', apiKey);
+        throw new Error(detail ? `${fallback} ${detail}` : fallback);
+      }
+      return parseVectors(payload, request.texts.length);
+    } catch (error) {
+      if (request.signal?.aborted) {
+        throw error;
+      }
+      if (controller.signal.aborted) {
+        throw new Error(`Embedding请求超时（${timeoutMs}ms）。`);
+      }
+      if (error instanceof TypeError) {
+        throw new Error('浏览器无法连接Embedding接口；请检查地址、网络与服务端CORS设置。');
+      }
+      throw error;
+    } finally {
+      globalThis.clearTimeout(timeout);
+      request.signal?.removeEventListener('abort', abort);
+    }
   }
 }
 

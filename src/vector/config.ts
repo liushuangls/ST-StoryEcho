@@ -71,6 +71,7 @@ export function resolveVectorConfig(settings: StoryEchoSettings): VectorRequestC
         provider: 'openai-compatible',
         endpoint,
         model,
+        apiKey: settings.vector.custom.apiKey,
         timeoutMs: settings.vector.custom.timeoutMs,
       },
     };

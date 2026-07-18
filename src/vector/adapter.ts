@@ -19,6 +19,7 @@ export interface VectorRequestConfig {
     provider: 'openai-compatible';
     endpoint: string;
     model: string;
+    apiKey: string;
     timeoutMs: number;
   };
 }

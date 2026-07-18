@@ -44,6 +44,7 @@ export interface StoryEchoSettings {
     custom: {
       baseUrl: string;
       model: string;
+      apiKey: string;
       timeoutMs: number;
       allowInsecureHttp: boolean;
       fallbackToMain: boolean;
@@ -56,6 +57,7 @@ export interface StoryEchoSettings {
     custom: {
       baseUrl: string;
       model: string;
+      apiKey: string;
       timeoutMs: number;
       allowInsecureHttp: boolean;
     };

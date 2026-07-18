@@ -6,6 +6,9 @@ export function normalizeChatCompletionsUrl(
   if (!trimmed) {
     throw new Error('Base URL不能为空。');
   }
+  if (trimmed.length > 2_048) {
+    throw new Error('Base URL过长。');
+  }
 
   let url: URL;
   try {
@@ -40,4 +43,13 @@ export function normalizeChatCompletionsUrl(
 
   url.hash = '';
   return url.toString();
+}
+
+export function normalizeChatCompletionsBaseUrl(
+  rawUrl: string,
+  options: { allowInsecureHttp: boolean },
+): string {
+  const endpoint = new URL(normalizeChatCompletionsUrl(rawUrl, options));
+  endpoint.pathname = endpoint.pathname.replace(/\/chat\/completions\/?$/, '');
+  return endpoint.toString().replace(/\/+$/, '');
 }
