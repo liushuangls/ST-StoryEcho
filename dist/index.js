@@ -37,7 +37,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 1;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.6.0";
+var EXTENSION_VERSION = "0.6.1";
 
 // src/debug/events.ts
 var DIAGNOSTICS_UPDATED_EVENT = "storyecho:diagnostics-updated";
@@ -1439,6 +1439,17 @@ function normalizeEmbeddingsUrl(rawUrl, options) {
   url.hash = "";
   return url.toString();
 }
+function resolveEmbeddingRequestUrl(endpoint, currentOrigin = globalThis.location?.origin) {
+  const trimmed = endpoint.trim();
+  if (trimmed.startsWith("/proxy/")) {
+    return trimmed;
+  }
+  const target = new URL(trimmed);
+  if (currentOrigin && target.origin === new URL(currentOrigin).origin) {
+    return target.toString();
+  }
+  return `/proxy/${target.toString()}`;
+}
 
 // src/vector/config.ts
 var MODEL_SETTING_KEYS = {
@@ -1591,8 +1602,9 @@ function errorMessage(payload, fallback, apiKey) {
   return apiKey ? limited.split(apiKey).join("[REDACTED]") : limited;
 }
 var OpenAiCompatibleEmbeddingClient = class {
-  constructor(fetchImpl = fetch) {
+  constructor(fetchImpl = fetch, requestHeaders = getRequestHeaders) {
     this.fetchImpl = fetchImpl;
+    this.requestHeaders = requestHeaders;
   }
   async embed(request) {
     if (request.texts.length === 0) {
@@ -1614,9 +1626,11 @@ var OpenAiCompatibleEmbeddingClient = class {
     const abort = () => controller.abort();
     request.signal?.addEventListener("abort", abort, { once: true });
     try {
-      const response = await this.fetchImpl(request.endpoint, {
+      const requestUrl = resolveEmbeddingRequestUrl(request.endpoint);
+      const response = await this.fetchImpl(requestUrl, {
         method: "POST",
         headers: {
+          ...await this.requestHeaders(),
           "Content-Type": "application/json",
           ...apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
         },
@@ -1644,6 +1658,11 @@ var OpenAiCompatibleEmbeddingClient = class {
         }
       }
       if (!response.ok) {
+        if (text2.includes("CORS proxy is disabled")) {
+          throw new Error(
+            "SillyTavern CORS\u4EE3\u7406\u672A\u542F\u7528\uFF1B\u8BF7\u5728config.yaml\u8BBE\u7F6EenableCorsProxy: true\u5E76\u91CD\u542F\u9152\u9986\u3002"
+          );
+        }
         const fallback = `Embedding\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u3002`;
         const detail = errorMessage(payload, "", apiKey);
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
@@ -1657,7 +1676,7 @@ var OpenAiCompatibleEmbeddingClient = class {
         throw new Error(`Embedding\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
       }
       if (error instanceof TypeError) {
-        throw new Error("\u6D4F\u89C8\u5668\u65E0\u6CD5\u8FDE\u63A5Embedding\u63A5\u53E3\uFF1B\u8BF7\u68C0\u67E5\u5730\u5740\u3001\u7F51\u7EDC\u4E0E\u670D\u52A1\u7AEFCORS\u8BBE\u7F6E\u3002");
+        throw new Error("\u65E0\u6CD5\u8FDE\u63A5SillyTavern\u4EE3\u7406\uFF1B\u8BF7\u68C0\u67E5\u9152\u9986\u5730\u5740\u3001\u7F51\u7EDC\u548CenableCorsProxy\u8BBE\u7F6E\u3002");
       }
       throw error;
     } finally {
@@ -2833,7 +2852,7 @@ function panelTemplate() {
             </button>
           </div>
           <p class="story-echo-hint story-echo-field-wide">
-            Embedding Key\u540C\u6837\u4EE5\u660E\u6587\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF1B\u8BF7\u6C42\u7531\u6D4F\u89C8\u5668\u76F4\u8FDE\u63A5\u53E3\uFF0C\u9700\u8981\u670D\u52A1\u7AEF\u5141\u8BB8CORS\u3002\u751F\u6210\u540E\u7684\u5411\u91CF\u4ECD\u4EA4\u7ED9\u9152\u9986Vector Storage\u4FDD\u5B58\u548C\u68C0\u7D22\u3002
+            \u5916\u90E8Embedding\u8BF7\u6C42\u4F1A\u81EA\u52A8\u7ECF\u9152\u9986\u670D\u52A1\u7AEF\u4EE3\u7406\uFF1B\u9700\u5728config.yaml\u542F\u7528enableCorsProxy\u5E76\u91CD\u542F\u3002Key\u4ECD\u4EE5\u660E\u6587\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF0C\u5411\u91CF\u7EE7\u7EED\u7531Vector Storage\u4FDD\u5B58\u548C\u68C0\u7D22\u3002
           </p>
         </div>
 

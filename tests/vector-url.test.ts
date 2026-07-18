@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeEmbeddingsUrl } from '../src/vector/url';
+import { normalizeEmbeddingsUrl, resolveEmbeddingRequestUrl } from '../src/vector/url';
 
 describe('normalizeEmbeddingsUrl', () => {
   it.each([
@@ -28,5 +28,28 @@ describe('normalizeEmbeddingsUrl', () => {
     expect(() => normalizeEmbeddingsUrl('https://example.com/v1?key=secret', {
       allowInsecureHttp: false,
     })).toThrow('不能包含查询参数');
+  });
+});
+
+describe('resolveEmbeddingRequestUrl', () => {
+  it('automatically adds the SillyTavern proxy for external endpoints', () => {
+    expect(resolveEmbeddingRequestUrl(
+      'https://ark.cn-beijing.volces.com/api/v3/embeddings',
+      'http://192.168.31.10:8888',
+    )).toBe('/proxy/https://ark.cn-beijing.volces.com/api/v3/embeddings');
+  });
+
+  it('keeps same-origin endpoints direct to avoid a circular proxy request', () => {
+    expect(resolveEmbeddingRequestUrl(
+      'http://192.168.31.10:8888/api/embeddings',
+      'http://192.168.31.10:8888',
+    )).toBe('http://192.168.31.10:8888/api/embeddings');
+  });
+
+  it('does not add the proxy twice', () => {
+    expect(resolveEmbeddingRequestUrl(
+      '/proxy/https://example.com/v1/embeddings',
+      'http://192.168.31.10:8888',
+    )).toBe('/proxy/https://example.com/v1/embeddings');
   });
 });

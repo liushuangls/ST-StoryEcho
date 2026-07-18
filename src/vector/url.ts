@@ -42,3 +42,24 @@ export function normalizeEmbeddingsUrl(
   url.hash = '';
   return url.toString();
 }
+
+/**
+ * Route external Embedding requests through SillyTavern's built-in CORS proxy.
+ * Same-origin endpoints stay direct because the proxy rejects circular requests.
+ */
+export function resolveEmbeddingRequestUrl(
+  endpoint: string,
+  currentOrigin = globalThis.location?.origin,
+): string {
+  const trimmed = endpoint.trim();
+  if (trimmed.startsWith('/proxy/')) {
+    return trimmed;
+  }
+
+  const target = new URL(trimmed);
+  if (currentOrigin && target.origin === new URL(currentOrigin).origin) {
+    return target.toString();
+  }
+
+  return `/proxy/${target.toString()}`;
+}

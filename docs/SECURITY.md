@@ -28,8 +28,9 @@
 
 ### 自定义 Embedding
 
-- 浏览器直接向 Embedding Endpoint 发送 `{ model, input }` 和可选 Bearer Key；
-- 外部接口必须允许酒馆网页来源的 CORS；
+- 浏览器向同源的 SillyTavern `/proxy/` 发送 `{ model, input }` 和可选 Bearer Key；
+- SillyTavern 内置代理再请求外部 Embedding Endpoint，因此外部接口不需要允许浏览器 CORS；
+- 使用自定义 Embedding 必须在 `config.yaml` 启用 `enableCorsProxy` 并重启酒馆；
 - 返回向量在浏览器校验数量、有限数值和统一维度；
 - 向量随后交给 SillyTavern Vector Storage，保存和相似度检索仍在酒馆服务端完成；
 - StoryEcho 不在浏览器持久化独立向量索引。
@@ -41,7 +42,8 @@
 - 默认要求 HTTPS；HTTP 必须显式开启，仅建议可信局域网服务；
 - LLM 和 Embedding 请求都有超时；响应大小受限；
 - 错误消息会裁剪，并在可能时移除当前 Key；
-- Embedding 请求拒绝重定向，避免 Authorization 被带到意外目标；
+- Embedding Base URL 只在请求时自动加同源 `/proxy/` 前缀，持久化设置中不保存代理地址；
+- SillyTavern 内置代理会处理外部重定向；仅应连接可信的 Embedding Endpoint；
 - 修改 Embedding 端点或模型会触发向量集合重建，修改 Key 或超时不会。
 
 ## 模型输出

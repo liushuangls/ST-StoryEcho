@@ -164,7 +164,7 @@ function panelTemplate(): HTMLElement {
             </button>
           </div>
           <p class="story-echo-hint story-echo-field-wide">
-            Embedding Key同样以明文随酒馆设置同步；请求由浏览器直连接口，需要服务端允许CORS。生成后的向量仍交给酒馆Vector Storage保存和检索。
+            外部Embedding请求会自动经酒馆服务端代理；需在config.yaml启用enableCorsProxy并重启。Key仍以明文随酒馆设置同步，向量继续由Vector Storage保存和检索。
           </p>
         </div>
 

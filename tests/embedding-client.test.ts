@@ -13,20 +13,24 @@ function request(overrides: Partial<Parameters<OpenAiCompatibleEmbeddingClient['
 }
 
 describe('OpenAiCompatibleEmbeddingClient', () => {
-  it('calls the embedding endpoint from the browser and normalizes vectors by index', async () => {
+  it('calls external embedding endpoints through the SillyTavern proxy', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       data: [
         { index: 1, embedding: [0.3, 0.4] },
         { index: 0, embedding: [0.1, 0.2] },
       ],
     }), { status: 200 }));
-    const client = new OpenAiCompatibleEmbeddingClient(fetchMock);
+    const client = new OpenAiCompatibleEmbeddingClient(
+      fetchMock,
+      async () => ({ 'X-CSRF-Token': 'csrf' }),
+    );
 
     await expect(client.embed(request())).resolves.toEqual([[0.1, 0.2], [0.3, 0.4]]);
     const [url, init] = fetchMock.mock.calls[0] ?? [];
-    expect(url).toBe('https://ark.cn-beijing.volces.com/api/v3/embeddings');
+    expect(url).toBe('/proxy/https://ark.cn-beijing.volces.com/api/v3/embeddings');
     expect(init?.headers).toMatchObject({
       'Content-Type': 'application/json',
+      'X-CSRF-Token': 'csrf',
       Authorization: 'Bearer embedding-secret',
     });
     expect(JSON.parse(String(init?.body))).toEqual({
@@ -42,21 +46,31 @@ describe('OpenAiCompatibleEmbeddingClient', () => {
         { index: 1, embedding: [Number.NaN, 0.4] },
       ],
     }), { status: 200 }));
-    const client = new OpenAiCompatibleEmbeddingClient(fetchMock);
+    const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => ({}));
 
     await expect(client.embed(request())).rejects.toThrow('无效向量数值');
   });
 
-  it('reports browser networking and CORS failures clearly', async () => {
+  it('reports proxy networking failures clearly', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('Failed to fetch'));
-    const client = new OpenAiCompatibleEmbeddingClient(fetchMock);
+    const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => ({}));
 
-    await expect(client.embed(request())).rejects.toThrow('CORS');
+    await expect(client.embed(request())).rejects.toThrow('SillyTavern代理');
+  });
+
+  it('explains how to enable a disabled SillyTavern proxy', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(
+      'CORS proxy is disabled. Enable it in config.yaml or use the --corsProxy flag.',
+      { status: 404 },
+    ));
+    const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => ({}));
+
+    await expect(client.embed(request())).rejects.toThrow('enableCorsProxy: true');
   });
 
   it('does not call the endpoint for an empty batch', async () => {
     const fetchMock = vi.fn<typeof fetch>();
-    const client = new OpenAiCompatibleEmbeddingClient(fetchMock);
+    const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => ({}));
 
     await expect(client.embed(request({ texts: [] }))).resolves.toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();

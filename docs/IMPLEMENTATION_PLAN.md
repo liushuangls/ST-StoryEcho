@@ -33,11 +33,11 @@
 - Vector Storage insert/list/query/delete/purge；
 - 哈希碰撞处理、增量同步和完整重建；
 - Embedding 来源、端点和模型变化检测；
-- 自定义 OpenAI 兼容 Embedding 浏览器直连；
+- 自定义 OpenAI 兼容 Embedding 自动使用 SillyTavern 内置 `/proxy/`；
 - 响应校验、连接测试、Key 设置同步；
 - 预生成向量继续由 Vector Storage 保存与检索。
 
-状态：核心链路已完成，等待火山方舟等真实接口和 CORS 兼容测试。
+状态：核心链路已完成，等待火山方舟等真实接口兼容测试。
 
 ## 阶段4：剧情抽取
 

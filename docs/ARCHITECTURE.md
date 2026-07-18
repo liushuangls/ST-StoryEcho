@@ -210,7 +210,7 @@ interface VectorItem {
 
 - 默认复用 SillyTavern Vector Storage设置；
 - 可选择StoryEcho自定义OpenAI兼容Embedding，包括火山方舟；
-- 自定义模式由浏览器直接请求远程Embedding API并校验返回向量，接口必须支持CORS；
+- 自定义模式由浏览器通过SillyTavern内置`/proxy/`请求远程Embedding API并校验返回向量；
 - 远程API返回的预生成向量通过SillyTavern现有WebLLM输入通道交给Vector Storage，`insert/query/list/delete/purge`仍由酒馆服务端完成；
 - 自定义模式使用独立模型作用域，不与用户真正的WebLLM集合混用；
 - 服务端 `transformers`、Ollama或远程Embedding提供方均可；
@@ -220,13 +220,14 @@ interface VectorItem {
 
 ```text
 剧情检索文本
-  -> 浏览器直接调用自定义embedding endpoint
+  -> 浏览器调用同源/proxy/<自定义embedding endpoint>
+  -> SillyTavern服务端请求外部Embedding API
   -> OpenAI兼容API返回预生成向量
   -> POST /api/vector/insert 或 /api/vector/query
   -> SillyTavern Vector Storage保存/检索
 ```
 
-请求使用标准 `{ input: string[], model }`，Bearer Key可选，并校验返回数量、顺序、有限数值和统一维度。Base URL会规范化为 `/embeddings`：空路径默认补 `/v1/embeddings`，已有路径（例如方舟 `/api/v3`）直接补 `/embeddings`。
+请求使用标准 `{ input: string[], model }`，Bearer Key可选，并校验返回数量、顺序、有限数值和统一维度。Base URL会规范化为 `/embeddings`：空路径默认补 `/v1/embeddings`，已有路径（例如方舟 `/api/v3`）直接补 `/embeddings`。外部地址只在请求时自动添加酒馆 `/proxy/` 前缀；同源地址保持直连以避免循环代理。
 
 API Key保存在SillyTavern当前用户的 `extensionSettings.story_echo`，以明文换取持久化和多端同步。Key和超时不进入向量配置指纹；端点或模型变化会改变 `vectorFingerprint` 并触发当前聊天集合重建，单纯轮换Key或调整超时不会重建。
 

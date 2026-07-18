@@ -1,3 +1,6 @@
+import { getRequestHeaders } from '../platform/sillytavern';
+import { resolveEmbeddingRequestUrl } from './url';
+
 interface EmbeddingResponseItem {
   index?: unknown;
   embedding?: unknown;
@@ -15,6 +18,8 @@ export interface EmbeddingRequest {
 export interface EmbeddingClient {
   embed(request: EmbeddingRequest): Promise<number[][]>;
 }
+
+type RequestHeadersProvider = () => Promise<Record<string, string>>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -82,7 +87,10 @@ function errorMessage(payload: unknown, fallback: string, apiKey: string): strin
 }
 
 export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly requestHeaders: RequestHeadersProvider = getRequestHeaders,
+  ) {}
 
   async embed(request: EmbeddingRequest): Promise<number[][]> {
     if (request.texts.length === 0) {
@@ -104,9 +112,11 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
     const abort = () => controller.abort();
     request.signal?.addEventListener('abort', abort, { once: true });
     try {
-      const response = await this.fetchImpl(request.endpoint, {
+      const requestUrl = resolveEmbeddingRequestUrl(request.endpoint);
+      const response = await this.fetchImpl(requestUrl, {
         method: 'POST',
         headers: {
+          ...await this.requestHeaders(),
           'Content-Type': 'application/json',
           ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         },
@@ -134,6 +144,11 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
         }
       }
       if (!response.ok) {
+        if (text.includes('CORS proxy is disabled')) {
+          throw new Error(
+            'SillyTavern CORS代理未启用；请在config.yaml设置enableCorsProxy: true并重启酒馆。',
+          );
+        }
         const fallback = `Embedding请求失败（HTTP ${response.status}）。`;
         const detail = errorMessage(payload, '', apiKey);
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
@@ -147,7 +162,7 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
         throw new Error(`Embedding请求超时（${timeoutMs}ms）。`);
       }
       if (error instanceof TypeError) {
-        throw new Error('浏览器无法连接Embedding接口；请检查地址、网络与服务端CORS设置。');
+        throw new Error('无法连接SillyTavern代理；请检查酒馆地址、网络和enableCorsProxy设置。');
       }
       throw error;
     } finally {

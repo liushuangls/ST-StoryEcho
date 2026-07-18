@@ -11,7 +11,7 @@
 - 自定义 OpenAI 兼容 LLM，经 SillyTavern 自带后端转发；
 - 自定义 LLM 失败后可回退主连接；
 - 自定义 OpenAI 兼容 Embedding，包括火山方舟 Base URL；
-- 自定义 Embedding 浏览器直连、连接测试和响应校验；
+- 自定义 Embedding 自动经 SillyTavern 内置代理转发、连接测试和响应校验；
 - LLM 与 Embedding Key 通过 `extensionSettings` 持久化和同步；
 - 远程预生成向量写入 Vector Storage，继续由酒馆服务端保存和检索；
 - 剧情抽取 Prompt、JSON Schema 和响应校验；
@@ -44,7 +44,7 @@
 - LLM 默认使用主连接；
 - 自定义 Key 明文保存在当前用户扩展设置中，以换取持久化和多端同步；
 - Key 不进入聊天数据、Vector Storage 或调试报告；
-- 自定义 LLM 由 SillyTavern 后端转发；自定义 Embedding 由浏览器直连并要求 CORS；
+- 自定义 LLM 由 SillyTavern Chat Completions 后端转发；自定义 Embedding 由内置 `/proxy/` 转发；
 - 索引没有覆盖裁剪边界时保留完整聊天；
 - 单次正常生成最多同步执行一个抽取分块；
 - 检索、抽取或自定义 Provider 失败时优先放行正常生成或按设置回退。

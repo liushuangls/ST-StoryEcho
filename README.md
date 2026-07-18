@@ -23,13 +23,13 @@ StoryEcho 采用无需额外服务端插件的组合方案：
 浏览器扩展 -> SillyTavern自带Chat Completions后端 -> 外部LLM
 
 自定义 Embedding
-浏览器扩展 -> 外部Embedding接口
+浏览器扩展 -> SillyTavern内置/proxy -> 外部Embedding接口
              -> 预生成向量 -> SillyTavern Vector Storage
                                 （服务端保存和检索）
 ```
 
 - 自定义 LLM 使用酒馆自带的 `/api/backends/chat-completions/generate` 转发，外部请求由 SillyTavern 服务端发出；
-- 自定义 Embedding 沿用脚本化数据库插件的做法，由浏览器直接请求，因此接口必须允许当前酒馆网页跨域访问（CORS）；
+- 自定义 Embedding 自动把外部地址路由到 SillyTavern 内置 `/proxy/`，由酒馆服务端请求，因此不要求外部接口允许浏览器 CORS；
 - 浏览器只负责生成自定义向量，不在前端维护向量数据库或执行余弦检索；
 - 向量仍交给 SillyTavern Vector Storage，因而可随酒馆数据在多端共用。
 
@@ -49,6 +49,14 @@ https://github.com/liushuangls/ST-StoryEcho
 
 不需要安装或启用 SillyTavern Server Plugin。
 
+使用自定义 Embedding 前，需要在 SillyTavern 的 `config.yaml` 中启用内置代理并重启：
+
+```yaml
+enableCorsProxy: true
+```
+
+StoryEcho 会在请求时自动添加 `/proxy/`；设置中仍填写正常的外部 Base URL，不要手动添加代理前缀。默认继承 Vector Storage 来源时不需要开启此选项。
+
 ## 自定义接口与 Key
 
 LLM 与 Embedding 的 Base URL、模型和 API Key 都保存在当前 SillyTavern 用户的 `extensionSettings` 中，并由酒馆的设置同步机制持久化。刷新页面后会自动恢复；使用同一酒馆用户数据的其他客户端也能读取。
@@ -65,7 +73,7 @@ Base URL: https://ark.cn-beijing.volces.com/api/v3
 API Key: 方舟API Key
 ```
 
-方舟 Coding Plan 可使用专属 Base URL `https://ark.cn-beijing.volces.com/api/coding/v3` 和对应模型名。点击“测试 Embedding 连接”验证浏览器网络与 CORS；测试成功后，生成的向量仍写入当前聊天的 Vector Storage 集合。
+方舟 Coding Plan 可使用专属 Base URL `https://ark.cn-beijing.volces.com/api/coding/v3` 和对应模型名。点击“测试 Embedding 连接”验证酒馆代理与方舟配置；测试成功后，生成的向量仍写入当前聊天的 Vector Storage 集合。
 
 ## 开发与安装产物
 
