@@ -21,5 +21,8 @@ describe('buildExtractionPrompt', () => {
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('不要改名为secret、content、confidence');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('importance低于0.6的普通事件不要输出');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('一闪而过的猜测');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('该封闭名单优先');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('必须输出两条');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('多个独立entity或attribute必须拆成多条记忆');
   });
 });

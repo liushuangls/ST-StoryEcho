@@ -6,6 +6,29 @@ export function estimateTokens(text: string): number {
   return cjkCount + Math.ceil(remaining / 4);
 }
 
+/**
+ * Estimate a large removed prefix from a bounded, evenly-spaced sample.
+ * This value is diagnostic only; prompt selection never depends on it.
+ */
+export function estimateMessageTokens(
+  messages: Array<{ mes: string }>,
+  indices: readonly number[],
+  maxSamples = 200,
+): number {
+  if (indices.length === 0) {
+    return 0;
+  }
+  const sampleCount = Math.min(indices.length, Math.max(1, Math.floor(maxSamples)));
+  let sampledTokens = 0;
+  for (let sample = 0; sample < sampleCount; sample += 1) {
+    const position = sampleCount === 1
+      ? 0
+      : Math.round(sample * (indices.length - 1) / (sampleCount - 1));
+    sampledTokens += estimateTokens(messages[indices[position] ?? -1]?.mes ?? '');
+  }
+  return Math.round(sampledTokens * indices.length / sampleCount);
+}
+
 function clean(value: string | undefined): string {
   return value?.trim() ?? '';
 }

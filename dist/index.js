@@ -421,10 +421,97 @@ async function createStoryMemory(candidate, source, occupiedVectorHashes, option
   };
 }
 
+// src/consolidation/residual.ts
+var CLAUSE_SEPARATOR = /[；;。.!！?？\n]+/u;
+function normalized(value) {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+function unique(values) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+function mentions(value, term) {
+  const normalizedValue = normalized(value);
+  const normalizedTerm = normalized(term);
+  return normalizedTerm.length >= 2 && normalizedValue.includes(normalizedTerm);
+}
+function clauses(value) {
+  return unique(value.split(CLAUSE_SEPARATOR));
+}
+function safeClauses(value, residualTerms, changedTerms) {
+  return clauses(value).filter((clause) => residualTerms.some((term) => mentions(clause, term)) && !changedTerms.some((term) => mentions(clause, term)));
+}
+function candidateText(candidate) {
+  return [
+    candidate.event,
+    candidate.cause,
+    candidate.consequence,
+    candidate.retrievalText,
+    candidate.injectionText,
+    ...candidate.entities,
+    ...candidate.aliases,
+    ...candidate.stateChanges.flatMap((change) => [
+      change.entity,
+      change.attribute,
+      change.before,
+      change.after
+    ])
+  ].join("\n");
+}
+function deriveResidualCandidate(target, replacement) {
+  const replacementContent = candidateText(replacement);
+  const targetTerms = unique([...target.entities, ...target.aliases]);
+  const changedTerms = targetTerms.filter((term) => mentions(replacementContent, term));
+  const residualTerms = targetTerms.filter((term) => !changedTerms.includes(term));
+  if (changedTerms.length === 0 || residualTerms.length === 0) {
+    return null;
+  }
+  const retrievalClauses = safeClauses(target.retrievalText, residualTerms, changedTerms);
+  if (retrievalClauses.length === 0) {
+    return null;
+  }
+  const retrievalText = retrievalClauses.join("\uFF1B");
+  const residualEntities = target.entities.filter((entity) => mentions(retrievalText, entity));
+  if (residualEntities.length === 0) {
+    return null;
+  }
+  const residualAliases = target.aliases.filter((alias) => mentions(retrievalText, alias));
+  const retainedTerms = unique([...residualEntities, ...residualAliases]);
+  const event = safeClauses(target.event, retainedTerms, changedTerms).join("\uFF1B") || retrievalText;
+  const cause = safeClauses(target.cause ?? "", retainedTerms, changedTerms).join("\uFF1B");
+  const consequence = safeClauses(target.consequence ?? "", retainedTerms, changedTerms).join("\uFF1B");
+  const injection = safeClauses(target.injectionText, retainedTerms, changedTerms).join("\uFF1B") || retrievalText;
+  const unresolvedThreads = target.unresolvedThreads.filter((thread) => retainedTerms.some((term) => mentions(thread, term)) && !changedTerms.some((term) => mentions(thread, term)));
+  const stateChanges = target.stateChanges.filter((change) => retainedTerms.some((term) => mentions(change.entity, term) || mentions(term, change.entity))).map((change) => ({
+    entity: change.entity,
+    attribute: change.attribute,
+    before: change.before ?? "",
+    after: change.after
+  }));
+  const participants = target.scene.participants.filter((participant) => mentions(retrievalText, participant));
+  const location = target.scene.location && mentions(retrievalText, target.scene.location) ? target.scene.location : "";
+  const time = target.scene.time && mentions(retrievalText, target.scene.time) ? target.scene.time : "";
+  return {
+    type: target.type,
+    scene: { location, time, participants },
+    event,
+    cause,
+    consequence,
+    entities: residualEntities,
+    aliases: residualAliases,
+    stateChanges,
+    unresolvedThreads,
+    knownBy: [...target.knownBy],
+    truthStatus: target.truthStatus,
+    importance: target.importance,
+    retrievalText,
+    injectionText: /[。.!！?？]$/u.test(injection) ? injection : `${injection}\u3002`
+  };
+}
+
 // src/consolidation/apply.ts
 function uniqueSources(sources) {
   const seen = /* @__PURE__ */ new Set();
-  const unique2 = sources.filter((source) => {
+  const unique4 = sources.filter((source) => {
     const key = `${source.startMessageId}:${source.endMessageId}:${source.sourceHash}`;
     if (seen.has(key)) {
       return false;
@@ -432,7 +519,7 @@ function uniqueSources(sources) {
     seen.add(key);
     return true;
   });
-  return unique2.length <= 100 ? unique2 : [unique2[0], ...unique2.slice(-99)];
+  return unique4.length <= 100 ? unique4 : [unique4[0], ...unique4.slice(-99)];
 }
 function queueVectorReplacement(state, previousHash, memory) {
   if (previousHash === memory.vectorHash) {
@@ -479,6 +566,7 @@ async function applyConsolidationDecisions(state, decisions, source) {
       continue;
     }
     if (operation === "SUPERSEDE") {
+      const residualCandidate = deriveResidualCandidate(target, decision.result);
       const replacement2 = await createStoryMemory(decision.result, source, occupied, {
         sourceHistory: uniqueSources([...target.sourceHistory, source]),
         supersedesMemoryIds: [.../* @__PURE__ */ new Set([...target.supersedesMemoryIds, target.id])],
@@ -486,15 +574,34 @@ async function applyConsolidationDecisions(state, decisions, source) {
       });
       replacement2.pinned = target.pinned;
       replacement2.excluded = target.excluded;
+      occupied.add(replacement2.vectorHash);
+      const residual = residualCandidate ? await createStoryMemory(residualCandidate, target.source, occupied, {
+        sourceHistory: target.sourceHistory,
+        supersedesMemoryIds: [.../* @__PURE__ */ new Set([...target.supersedesMemoryIds, target.id])],
+        lastOperation: "SUPERSEDE"
+      }) : null;
+      if (residual) {
+        residual.pinned = target.pinned;
+        residual.excluded = target.excluded;
+        occupied.add(residual.vectorHash);
+      }
       target.status = "superseded";
       target.replacedByMemoryId = replacement2.id;
       target.lastOperation = "SUPERSEDE";
       target.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      occupied.add(replacement2.vectorHash);
       state.memories.push(replacement2);
+      if (residual) {
+        state.memories.push(residual);
+      }
       state.pendingVectorDeleteHashes.push(target.vectorHash);
       state.pendingVectorHashes.push(replacement2.vectorHash);
+      if (residual) {
+        state.pendingVectorHashes.push(residual.vectorHash);
+      }
       created.push(replacement2);
+      if (residual) {
+        created.push(residual);
+      }
       changed.push(target);
       incrementAction(state.metrics, "SUPERSEDE");
       applied.push(decision);
@@ -628,7 +735,10 @@ var MainLlmProvider = class {
     const response = await this.complete({
       system: "You are a connection test. Follow the user instruction exactly.",
       prompt: "Reply with exactly: OK",
-      maxTokens: 16
+      // Reasoning models can spend a small output budget entirely on hidden
+      // thoughts and return no visible text, which looks like a broken
+      // connection even though the request succeeded.
+      maxTokens: 128
     });
     if (!response.trim()) {
       throw new Error("\u4E3B\u8FDE\u63A5\u8FD4\u56DE\u4E86\u7A7A\u54CD\u5E94\u3002");
@@ -837,7 +947,9 @@ var OpenAiCompatibleProvider = class {
     const response = await this.complete({
       system: "You are a connection test. Follow the user instruction exactly.",
       prompt: "Reply with exactly: OK",
-      maxTokens: 16
+      // Leave enough room for providers that count reasoning tokens against
+      // max_tokens before emitting the visible answer.
+      maxTokens: 128
     });
     if (!response.trim()) {
       throw new Error("\u81EA\u5B9A\u4E49LLM\u8FD4\u56DE\u4E86\u7A7A\u54CD\u5E94\u3002");
@@ -871,7 +983,7 @@ async function completeWithConfiguredProvider(settings, request) {
 }
 
 // src/consolidation/shortlist.ts
-function normalized(value) {
+function normalized2(value) {
   return value.trim().toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 function candidateTerms(candidate) {
@@ -880,7 +992,7 @@ function candidateTerms(candidate) {
     ...candidate.aliases,
     ...candidate.scene.participants,
     ...candidate.stateChanges.flatMap((change) => [change.entity, change.attribute])
-  ].map(normalized).filter((term) => term.length >= 2));
+  ].map(normalized2).filter((term) => term.length >= 2));
 }
 function memoryTerms(memory) {
   return new Set([
@@ -888,16 +1000,16 @@ function memoryTerms(memory) {
     ...memory.aliases,
     ...memory.scene.participants,
     ...memory.stateChanges.flatMap((change) => [change.entity, change.attribute])
-  ].map(normalized).filter((term) => term.length >= 2));
+  ].map(normalized2).filter((term) => term.length >= 2));
 }
 function stateSlotsForCandidate(candidate) {
   return new Set(candidate.stateChanges.map(
-    (change) => `${normalized(change.entity)}\0${normalized(change.attribute)}`
+    (change) => `${normalized2(change.entity)}\0${normalized2(change.attribute)}`
   ));
 }
 function stateSlotsForMemory(memory) {
   return new Set(memory.stateChanges.map(
-    (change) => `${normalized(change.entity)}\0${normalized(change.attribute)}`
+    (change) => `${normalized2(change.entity)}\0${normalized2(change.attribute)}`
   ));
 }
 function shortlistMemories(candidates, memories, vectorHashes, limit = 16) {
@@ -927,10 +1039,10 @@ function shortlistMemories(candidates, memories, vectorHashes, limit = 16) {
   }).filter(({ score }) => score > 0).sort((left, right) => right.score - left.score || right.memory.updatedAt.localeCompare(left.memory.updatedAt)).slice(0, Math.max(1, limit)).map(({ memory }) => memory);
 }
 function normalizedStateSlot(entity, attribute) {
-  return `${normalized(entity)}\0${normalized(attribute)}`;
+  return `${normalized2(entity)}\0${normalized2(attribute)}`;
 }
 function normalizedFact(value) {
-  return normalized(value);
+  return normalized2(value);
 }
 
 // src/consolidation/parser.ts
@@ -961,7 +1073,7 @@ function parseJson(raw) {
     throw new Error("\u6574\u7406\u6A21\u578B\u8FD4\u56DE\u7684JSON\u65E0\u6CD5\u89E3\u6790\u3002", { cause: error });
   }
 }
-function unique(values) {
+function unique2(values) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))].slice(0, 50);
 }
 function combinedText(left, right, maxLength = 2e3) {
@@ -993,16 +1105,16 @@ function mergeWithMemory(memory, candidate) {
     scene: {
       location: candidate.scene.location || memory.scene.location || "",
       time: candidate.scene.time || memory.scene.time || "",
-      participants: unique([...memory.scene.participants, ...candidate.scene.participants])
+      participants: unique2([...memory.scene.participants, ...candidate.scene.participants])
     },
     event: combinedText(memory.event, candidate.event),
     cause: combinedText(memory.cause ?? "", candidate.cause),
     consequence: combinedText(memory.consequence ?? "", candidate.consequence),
-    entities: unique([...memory.entities, ...candidate.entities]),
-    aliases: unique([...memory.aliases, ...candidate.aliases]),
+    entities: unique2([...memory.entities, ...candidate.entities]),
+    aliases: unique2([...memory.aliases, ...candidate.aliases]),
     stateChanges: [...changes.values()].slice(0, 30),
-    unresolvedThreads: unique([...memory.unresolvedThreads, ...candidate.unresolvedThreads]),
-    knownBy: unique([...memory.knownBy, ...candidate.knownBy]),
+    unresolvedThreads: unique2([...memory.unresolvedThreads, ...candidate.unresolvedThreads]),
+    knownBy: unique2([...memory.knownBy, ...candidate.knownBy]),
     truthStatus: candidate.truthStatus,
     importance: Math.max(memory.importance, candidate.importance),
     retrievalText: combinedText(memory.retrievalText, candidate.retrievalText, 4e3),
@@ -1022,13 +1134,13 @@ function sharedEntityCount(candidate, memory) {
   return [...candidateEntities].filter((term) => memoryEntities.has(term)).length;
 }
 function bigrams(value) {
-  const normalized2 = normalizedFact(value);
-  if (normalized2.length < 2) {
-    return new Set(normalized2 ? [normalized2] : []);
+  const normalized4 = normalizedFact(value);
+  if (normalized4.length < 2) {
+    return new Set(normalized4 ? [normalized4] : []);
   }
   const result = /* @__PURE__ */ new Set();
-  for (let index = 0; index < normalized2.length - 1; index += 1) {
-    result.add(normalized2.slice(index, index + 2));
+  for (let index = 0; index < normalized4.length - 1; index += 1) {
+    result.add(normalized4.slice(index, index + 2));
   }
   return result;
 }
@@ -1042,7 +1154,7 @@ function textSimilarity(left, right) {
   return 2 * shared / (leftBigrams.size + rightBigrams.size);
 }
 var REPLACEMENT_CUE = /(转移|搬到|搬去|移到|移入|改藏|取出|交给|归还|替换|更换|不再|已经?空|已为空|没有(?:了)?|从.+到)/u;
-function candidateText(candidate) {
+function candidateText2(candidate) {
   return `${candidate.event}
 ${candidate.retrievalText}
 ${candidate.injectionText}`;
@@ -1056,7 +1168,7 @@ function hasReplacementCue(value) {
   return REPLACEMENT_CUE.test(value);
 }
 function relatedMemory(candidate, memories) {
-  const candidateContent = candidateText(candidate);
+  const candidateContent = candidateText2(candidate);
   const candidateReplaces = hasReplacementCue(candidateContent);
   const matches = memories.flatMap((memory) => {
     const memoryContent = memoryText(memory);
@@ -1190,6 +1302,9 @@ function parseConsolidationResponse(raw, candidates, memories) {
     const candidate = candidates[candidateIndex];
     const target = targetMemoryId ? memories.find((memory) => memory.id === targetMemoryId) : void 0;
     const result = target && ["MERGE", "UPDATE", "RESOLVE"].includes(operation) ? mergeWithMemory(target, candidate) : candidate;
+    if (operation === "RESOLVE") {
+      result.unresolvedThreads = [...candidate.unresolvedThreads];
+    }
     parsed.set(candidateIndex, {
       candidateIndex,
       operation,
@@ -1333,6 +1448,7 @@ function createState(ownerChatId) {
     vectorCollectionId: createCollectionId(chatUuid),
     indexedThroughMessageId: -1,
     indexedThroughHash: "",
+    indexedPrefixHash: "",
     memories: [],
     pendingRanges: [],
     pendingVectorHashes: [],
@@ -1362,6 +1478,7 @@ function normalizeState(stored) {
     ...stored,
     memories: stored.memories.map((memory) => ({
       ...memory,
+      unresolvedThreads: memory.status === "resolved" ? [] : Array.isArray(memory.unresolvedThreads) ? memory.unresolvedThreads : [],
       sourceHistory: Array.isArray(memory.sourceHistory) && memory.sourceHistory.length > 0 ? memory.sourceHistory : [memory.source],
       supersedesMemoryIds: Array.isArray(memory.supersedesMemoryIds) ? memory.supersedesMemoryIds : [],
       lastOperation: memory.lastOperation ?? "CREATE"
@@ -1369,6 +1486,7 @@ function normalizeState(stored) {
     pendingVectorHashes: Array.isArray(stored.pendingVectorHashes) ? stored.pendingVectorHashes : [],
     pendingVectorDeleteHashes: Array.isArray(stored.pendingVectorDeleteHashes) ? stored.pendingVectorDeleteHashes : [],
     vectorFingerprint: typeof stored.vectorFingerprint === "string" ? stored.vectorFingerprint : "",
+    indexedPrefixHash: typeof stored.indexedPrefixHash === "string" ? stored.indexedPrefixHash : "",
     metrics: normalizeMetrics(stored.metrics),
     debugTraces: Array.isArray(stored.debugTraces) ? stored.debugTraces.slice(-50) : [],
     ...lastInspection ? { lastInspection } : {}
@@ -1397,8 +1515,8 @@ var MemoryRepository = class {
       return state2;
     }
     const state = normalizeState(stored);
-    if (!Array.isArray(stored.pendingVectorHashes) || !Array.isArray(stored.pendingVectorDeleteHashes) || typeof stored.vectorFingerprint !== "string" || !stored.metrics || !Array.isArray(stored.debugTraces) || stored.lastInspection !== void 0 && (!Number.isFinite(stored.lastInspection.vectorResultCount) || !Number.isFinite(stored.lastInspection.durationMs) || !Number.isFinite(stored.lastInspection.estimatedRemovedTokens) || !Number.isFinite(stored.lastInspection.estimatedInjectedTokens) || !Number.isFinite(stored.lastInspection.estimatedNetSavedTokens)) || stored.memories.some(
-      (memory) => !Array.isArray(memory.sourceHistory) || memory.sourceHistory.length === 0 || !Array.isArray(memory.supersedesMemoryIds) || !memory.lastOperation
+    if (!Array.isArray(stored.pendingVectorHashes) || !Array.isArray(stored.pendingVectorDeleteHashes) || typeof stored.vectorFingerprint !== "string" || typeof stored.indexedPrefixHash !== "string" || !stored.metrics || !Array.isArray(stored.debugTraces) || stored.lastInspection !== void 0 && (!Number.isFinite(stored.lastInspection.vectorResultCount) || !Number.isFinite(stored.lastInspection.durationMs) || !Number.isFinite(stored.lastInspection.estimatedRemovedTokens) || !Number.isFinite(stored.lastInspection.estimatedInjectedTokens) || !Number.isFinite(stored.lastInspection.estimatedNetSavedTokens)) || stored.memories.some(
+      (memory) => !Array.isArray(memory.sourceHistory) || memory.sourceHistory.length === 0 || !Array.isArray(memory.supersedesMemoryIds) || !Array.isArray(memory.unresolvedThreads) || !memory.lastOperation || memory.status === "resolved" && memory.unresolvedThreads.length > 0
     )) {
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
@@ -2248,6 +2366,81 @@ var SillyTavernVectorStore = class {
   }
 };
 
+// src/extraction/atomicize.ts
+var CLAUSE_SEPARATOR2 = /[；;。.!！?？\n]+/u;
+function normalized3(value) {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+function unique3(values) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+function mentions2(value, term) {
+  const normalizedValue = normalized3(value);
+  const normalizedTerm = normalized3(term);
+  return normalizedTerm.length >= 2 && normalizedValue.includes(normalizedTerm);
+}
+function clauses2(value) {
+  return unique3(value.split(CLAUSE_SEPARATOR2));
+}
+function safeContext(value, groupTerms, otherTerms) {
+  return clauses2(value).filter((clause) => groupTerms.some((term) => mentions2(clause, term)) && !otherTerms.some((term) => mentions2(clause, term))).join("\uFF1B");
+}
+function atomicizeMemoryCandidate(candidate) {
+  const atomicClauses = clauses2(candidate.retrievalText).map((text2) => ({
+    text: text2,
+    entities: candidate.entities.filter((entity) => mentions2(text2, entity))
+  })).filter((item) => item.entities.length > 0);
+  if (atomicClauses.length < 2) {
+    return [candidate];
+  }
+  const minimalClauses = atomicClauses.filter((item, index) => !atomicClauses.some(
+    (other, otherIndex) => otherIndex !== index && other.entities.length < item.entities.length && other.entities.every((entity) => item.entities.includes(entity))
+  ));
+  if (minimalClauses.length < 2) {
+    return [candidate];
+  }
+  for (let left = 0; left < minimalClauses.length; left += 1) {
+    for (let right = left + 1; right < minimalClauses.length; right += 1) {
+      if (minimalClauses[left].entities.some(
+        (entity) => minimalClauses[right].entities.includes(entity)
+      )) {
+        return [candidate];
+      }
+    }
+  }
+  return minimalClauses.map((item) => {
+    const groupTerms = unique3(item.entities);
+    const otherTerms = unique3(minimalClauses.filter((other) => other !== item).flatMap((other) => other.entities));
+    const groupText = item.text.trim();
+    const injectionText = safeContext(candidate.injectionText, groupTerms, otherTerms) || groupText;
+    const event = safeContext(candidate.event, groupTerms, otherTerms) || groupText;
+    const cause = safeContext(candidate.cause, groupTerms, otherTerms);
+    const consequence = safeContext(candidate.consequence, groupTerms, otherTerms);
+    const aliases = candidate.aliases.filter((alias) => mentions2(groupText, alias));
+    const stateChanges = candidate.stateChanges.filter((change) => groupTerms.some((term) => mentions2(change.entity, term) || mentions2(term, change.entity)));
+    const unresolvedThreads = candidate.unresolvedThreads.filter((thread) => groupTerms.some((term) => mentions2(thread, term)) && !otherTerms.some((term) => mentions2(thread, term)));
+    const participants = candidate.scene.participants.filter((participant) => mentions2(groupText, participant));
+    const location = candidate.scene.location && mentions2(groupText, candidate.scene.location) ? candidate.scene.location : "";
+    const time = candidate.scene.time && mentions2(groupText, candidate.scene.time) ? candidate.scene.time : "";
+    return {
+      ...candidate,
+      scene: { location, time, participants },
+      event,
+      cause,
+      consequence,
+      entities: groupTerms,
+      aliases,
+      stateChanges,
+      unresolvedThreads,
+      retrievalText: groupText,
+      injectionText: /[。.!！?？]$/u.test(injectionText) ? injectionText : `${injectionText}\u3002`
+    };
+  });
+}
+function atomicizeMemoryCandidates(candidates) {
+  return candidates.flatMap(atomicizeMemoryCandidate).slice(0, 30);
+}
+
 // src/extraction/parser.ts
 var MEMORY_TYPES = /* @__PURE__ */ new Set([
   "event",
@@ -2386,7 +2579,7 @@ var EXTRACTION_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u4E2A\u4E25\u683C\u7684\u957F
 
 \u89C4\u5219\uFF1A
 1. \u4E0D\u5F97\u8865\u5145\u8F93\u5165\u4E2D\u4E0D\u5B58\u5728\u7684\u4E8B\u5B9E\u3002
-2. \u6BCF\u6761\u8BB0\u5FC6\u53EA\u8868\u8FBE\u4E00\u4E2A\u4E3B\u8981\u4E8B\u4EF6\u6216\u53D8\u5316\u3002
+2. \u6BCF\u6761\u8BB0\u5FC6\u53EA\u80FD\u8868\u8FBE\u4E00\u4E2A\u53EF\u72EC\u7ACB\u66F4\u65B0\u7684\u4E8B\u5B9E\u6216\u72B6\u6001\u69FD\u3002\u5373\u4F7F\u540C\u4E00\u53E5\u8BDD\u540C\u65F6\u63CF\u8FF0\u591A\u4E2A\u7269\u54C1\u3001\u4EBA\u7269\u6216\u5730\u70B9\uFF0C\u4E5F\u5FC5\u987B\u62C6\u6210\u591A\u6761\u8BB0\u5FC6\uFF1B\u4F8B\u5982\u201C\u767D\u5854\u836F\u94FA\u7684\u6212\u6307\u5728\u62BD\u5C49\uFF0C\u5317\u5883\u767D\u5854\u7684\u94F6\u94C3\u5728\u9876\u5C42\u201D\u5FC5\u987B\u8F93\u51FA\u4E24\u6761\uFF0C\u7981\u6B62\u5408\u5E76\u3002
 3. \u533A\u5206confirmed\u3001claimed\u3001inferred\u3001uncertain\u3002
 4. knownBy\u53EA\u586B\u5199\u5728\u7247\u6BB5\u4E2D\u6709\u4F9D\u636E\u7684\u77E5\u60C5\u8005\u3002
 5. retrievalText\u7528\u4E8E\u68C0\u7D22\uFF0C\u5E94\u5305\u542B\u5B9E\u4F53\u3001\u522B\u540D\u3001\u539F\u56E0\u3001\u7ED3\u679C\u3001\u7EA6\u675F\u548C\u672A\u89E3\u51B3\u95EE\u9898\u3002
@@ -2397,8 +2590,9 @@ var EXTRACTION_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u4E2A\u4E25\u683C\u7684\u957F
 10. \u89D2\u8272\u4E00\u95EA\u800C\u8FC7\u7684\u731C\u6D4B\u3001\u968F\u53E3\u7591\u95EE\u548C\u6CA1\u6709\u5F71\u54CD\u540E\u7EED\u51B3\u5B9A\u7684\u5185\u5FC3\u6D3B\u52A8\u4E0D\u8981\u63D0\u53D6\uFF1B\u53EA\u6709\u5F62\u6210\u6301\u7EED\u6000\u7591\u3001\u5173\u7CFB\u53D8\u5316\u3001\u884C\u52A8\u6216\u672A\u89E3\u51B3\u7EBF\u7D22\u65F6\u624D\u4FDD\u7559\u3002
 11. importance\u4F4E\u4E8E0.6\u7684\u666E\u901A\u4E8B\u4EF6\u4E0D\u8981\u8F93\u51FA\u30020.6\uFF5E0.79\u8868\u793A\u672A\u6765\u53EF\u80FD\u9700\u8981\uFF0C0.8\uFF5E1\u8868\u793A\u4E3B\u7EBF\u76EE\u6807\u3001\u4E0D\u53EF\u9006\u53D8\u5316\u3001\u91CD\u8981\u79D8\u5BC6\u3001\u5173\u952E\u7EBF\u7D22\u6216\u5F53\u524D\u6709\u6548\u72B6\u6001\u3002
 12. injectionText\u4F7F\u7528\u7B2C\u4E09\u4EBA\u79F0\u548C\u8F93\u5165\u4E2D\u7684\u786E\u5207\u4E13\u540D\uFF0C\u4E0D\u5F97\u7528\u201C\u6211\u3001\u6211\u4EEC\u3001\u4F60\u3001\u4ED6\u201D\u7B49\u8131\u79BB\u539F\u7247\u6BB5\u540E\u6307\u4EE3\u4E0D\u6E05\u7684\u4EE3\u8BCD\u3002
-13. \u660E\u786E\u53C2\u4E0E\u4E8B\u4EF6\u3001\u5171\u540C\u6267\u884C\u52A8\u4F5C\u6216\u76F4\u63A5\u786E\u8BA4\u4E8B\u5B9E\u7684\u4EBA\u4E5F\u5C5E\u4E8EknownBy\uFF1B\u4E0D\u8981\u56E0\u201C\u552F\u4E00\u77E5\u60C5\u8005\u201D\u63AA\u8F9E\u6F0F\u6389\u663E\u7136\u5171\u540C\u77E5\u60C5\u7684\u53C2\u4E0E\u8005\u3002
+13. \u660E\u786E\u53C2\u4E0E\u4E8B\u4EF6\u3001\u5171\u540C\u6267\u884C\u52A8\u4F5C\u6216\u76F4\u63A5\u786E\u8BA4\u4E8B\u5B9E\u7684\u4EBA\u4E5F\u5C5E\u4E8EknownBy\uFF1B\u4F46\u539F\u6587\u82E5\u660E\u786E\u7ED9\u51FA\u201C\u53EA\u6709/\u6070\u597D\u201D\u67D0\u4E9B\u77E5\u60C5\u8005\u6216\u201C\u6CA1\u6709\u7B2C\u4E09\u4EBA\u201D\uFF0C\u8BE5\u5C01\u95ED\u540D\u5355\u4F18\u5148\uFF0C\u4E0D\u5F97\u4EC5\u56E0\u6D88\u606F\u53D1\u9001\u8005\u8BB2\u8FF0\u4E86\u4E8B\u5B9E\u5C31\u628A\u53D1\u9001\u8005\u81EA\u52A8\u52A0\u5165knownBy\u3002
 14. unresolvedThreads\u53EA\u8BB0\u5F55\u539F\u7247\u6BB5\u660E\u786E\u63D0\u51FA\u7684\u7591\u95EE\u3001\u672A\u89E3\u72B6\u6001\u3001\u5F85\u529E\u76EE\u6807\u6216\u4F0F\u7B14\uFF1B\u4E0D\u5F97\u628A\u539F\u6587\u6CA1\u6709\u4EA4\u4EE3\u7684\u4FE1\u606F\u81EA\u884C\u6539\u5199\u6210\u201C\u53BB\u5411\u4E0D\u660E\u201D\u201C\u5185\u5BB9\u672A\u77E5\u201D\u7B49\u60AC\u5FF5\u3002
+15. \u7269\u54C1\u4F4D\u7F6E\u3001\u6301\u6709\u8005\u3001\u79D8\u5BC6\u77E5\u60C5\u8303\u56F4\u3001\u627F\u8BFA\u5B8C\u6210\u72B6\u6001\u4EE5\u53CA\u4F20\u8A00\u88AB\u786E\u8BA4\u6216\u5426\u5B9A\u7B49\u53EF\u53D8\u5316\u4E8B\u5B9E\uFF0C\u5FC5\u987B\u5728stateChanges\u4E2D\u7528\u660E\u786E\u4E13\u540D\u586B\u5199entity\u3001attribute\u3001before\u548Cafter\uFF1B\u591A\u4E2A\u72EC\u7ACBentity\u6216attribute\u5FC5\u987B\u62C6\u6210\u591A\u6761\u8BB0\u5FC6\u3002
 
 \u8F93\u51FA\u5B57\u6BB5\u5FC5\u987B\u56FA\u5B9A\uFF1A\u6BCF\u6761memories\u5143\u7D20\u53EA\u80FD\u4F7F\u7528type\u3001scene\u3001event\u3001cause\u3001consequence\u3001entities\u3001aliases\u3001stateChanges\u3001unresolvedThreads\u3001knownBy\u3001truthStatus\u3001importance\u3001retrievalText\u3001injectionText\u3002type\u53EA\u80FD\u662Fevent\u3001state_change\u3001relationship_change\u3001commitment\u3001revelation\u3001clue\u3001conflict\uFF1BtruthStatus\u53EA\u80FD\u662Fconfirmed\u3001claimed\u3001inferred\u3001uncertain\u3002\u4E0D\u8981\u6539\u540D\u4E3Asecret\u3001content\u3001confidence\u3001confirmed\u3001details\u7B49\u5176\u4ED6\u5B57\u6BB5\u3002
 
@@ -2440,13 +2634,13 @@ function normalizedCandidate(candidate, sourceText, removedUnsupportedThreads) {
   if (!keepUnresolved && candidate.unresolvedThreads.length > 0) {
     removedUnsupportedThreads.push(...candidate.unresolvedThreads);
   }
-  const normalized2 = {
+  const normalized4 = {
     ...candidate,
     unresolvedThreads: keepUnresolved ? candidate.unresolvedThreads : []
   };
   return {
-    ...normalized2,
-    importance: Math.max(candidate.importance, importanceFloor(normalized2))
+    ...normalized4,
+    importance: Math.max(candidate.importance, importanceFloor(normalized4))
   };
 }
 function rejectionReason(candidate) {
@@ -2460,13 +2654,13 @@ function assessMemoryCandidates(candidates, sourceText = "") {
   const rejected = [];
   const removedUnsupportedThreads = [];
   for (const candidate of candidates) {
-    const normalized2 = normalizedCandidate(candidate, sourceText, removedUnsupportedThreads);
-    const reason = rejectionReason(normalized2);
+    const normalized4 = normalizedCandidate(candidate, sourceText, removedUnsupportedThreads);
+    const reason = rejectionReason(normalized4);
     if (reason) {
-      rejected.push({ candidate: normalized2, reason });
+      rejected.push({ candidate: normalized4, reason });
       continue;
     }
-    accepted.push(normalized2);
+    accepted.push(normalized4);
   }
   return { accepted, rejected, removedUnsupportedThreads };
 }
@@ -2572,6 +2766,12 @@ function assertChatOwner(state) {
     throw new Error("\u62BD\u53D6\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u5199\u5165\u3002");
   }
 }
+async function prefixHash(messages, endMessageId) {
+  if (endMessageId < 0) {
+    return "";
+  }
+  return sha256(sourcePayload(messages.slice(0, endMessageId + 1), 0));
+}
 var ExtractionService = class {
   queue = Promise.resolve();
   settingsRepository = new SettingsRepository();
@@ -2586,6 +2786,56 @@ var ExtractionService = class {
     this.queue = operation.then(() => void 0, () => void 0);
     return operation;
   }
+  /**
+   * Detect edits, deleted floors, and branches that truncate already indexed
+   * history. Derived memories are conservatively rebuilt so facts from a
+   * removed branch can never leak into the current prompt.
+   */
+  async reconcileHistory(state) {
+    const current = state ?? await this.memoryRepository.getOrCreate();
+    if (!current || current.indexedThroughMessageId < 0) {
+      return current;
+    }
+    assertChatOwner(current);
+    const context = getContext();
+    const settings = this.settingsRepository.get();
+    const indexedPastCurrentEnd = current.indexedThroughMessageId >= context.chat.length;
+    const actualPrefixHash = indexedPastCurrentEnd ? "" : await prefixHash(context.chat, current.indexedThroughMessageId);
+    if (!current.indexedPrefixHash && !indexedPastCurrentEnd) {
+      current.indexedPrefixHash = actualPrefixHash;
+      await this.memoryRepository.save(current);
+      return current;
+    }
+    if (!indexedPastCurrentEnd && actualPrefixHash === current.indexedPrefixHash) {
+      return current;
+    }
+    const previousIndexedThrough = current.indexedThroughMessageId;
+    const previousMemoryCount = current.memories.length;
+    let purgeFailed = false;
+    try {
+      await this.vectorStore.purge(current.vectorCollectionId);
+    } catch (error) {
+      purgeFailed = true;
+      logger.warn("\u804A\u5929\u5386\u53F2\u53D8\u5316\u540E\u6E05\u7406\u65E7\u5411\u91CF\u5931\u8D25\uFF0C\u540E\u7EED\u540C\u6B65\u5C06\u91CD\u8BD5\u3002", error);
+    }
+    current.indexedThroughMessageId = -1;
+    current.indexedThroughHash = "";
+    current.indexedPrefixHash = "";
+    current.memories = [];
+    current.pendingRanges = [];
+    current.pendingVectorHashes = [];
+    current.pendingVectorDeleteHashes = [];
+    current.vectorFingerprint = "";
+    delete current.lastInspection;
+    recordDebugTrace(current, settings.debug, "extraction", "\u68C0\u6D4B\u5230\u804A\u5929\u5206\u652F\u3001\u7F16\u8F91\u6216\u5220\u697C\u5C42\uFF0C\u5DF2\u91CD\u7F6E\u5267\u60C5\u7D22\u5F15\u3002", {
+      previousIndexedThrough,
+      currentMessageCount: context.chat.length,
+      removedMemories: previousMemoryCount,
+      purgeFailed
+    });
+    await this.memoryRepository.save(current);
+    return current;
+  }
   async syncPendingVectors(state) {
     const current = state ?? await this.memoryRepository.getOrCreate();
     if (!current) {
@@ -2595,11 +2845,14 @@ var ExtractionService = class {
     const settings = this.settingsRepository.get();
     const config = resolveVectorConfig(settings);
     const fingerprint = await vectorConfigFingerprint(config);
+    const configurationChanged = current.vectorFingerprint !== fingerprint;
+    if (!configurationChanged && current.pendingVectorHashes.length === 0 && current.pendingVectorDeleteHashes.length === 0) {
+      return current;
+    }
     const eligible = current.memories.filter(
       (memory) => memory.status !== "invalid" && memory.status !== "superseded"
     );
     const eligibleHashes = new Set(eligible.map((memory) => memory.vectorHash));
-    const configurationChanged = current.vectorFingerprint !== fingerprint;
     if (configurationChanged) {
       const isRebuild = current.vectorFingerprint.length > 0;
       current.pendingVectorHashes = [...eligibleHashes];
@@ -2650,7 +2903,11 @@ var ExtractionService = class {
     }
     const context = getContext();
     const settings = this.settingsRepository.get();
-    const state = await this.memoryRepository.getOrCreate();
+    let state = await this.memoryRepository.getOrCreate();
+    if (!state) {
+      return null;
+    }
+    state = await this.reconcileHistory(state);
     if (!state) {
       return null;
     }
@@ -2687,7 +2944,10 @@ var ExtractionService = class {
           system: EXTRACTION_SYSTEM_PROMPT,
           prompt: buildExtractionPrompt(snapshot, 0, snapshot.length - 1, chunk.startMessageId),
           jsonSchema: EXTRACTION_SCHEMA,
-          maxTokens: 3072
+          // A five-turn chunk can legitimately contain several independent plot facts.
+          // Leave enough room for the complete structured response: truncating JSON loses
+          // the entire chunk even when the model extracted every fact correctly.
+          maxTokens: 8192
         });
         let parsedCandidates;
         try {
@@ -2700,8 +2960,9 @@ var ExtractionService = class {
           });
           throw error;
         }
+        const atomicCandidates = atomicizeMemoryCandidates(parsedCandidates);
         const assessment = assessMemoryCandidates(
-          parsedCandidates,
+          atomicCandidates,
           snapshot.map((message) => message.mes).join("\n")
         );
         const candidates = assessment.accepted;
@@ -2709,6 +2970,7 @@ var ExtractionService = class {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           candidates: candidates.length,
           parsedCandidates: parsedCandidates.length,
+          atomicCandidates: atomicCandidates.length,
           rejectedCandidates: assessment.rejected.length,
           ...assessment.rejected.length > 0 ? { rejectedReasons: assessment.rejected.map((item) => item.reason).join(" | ") } : {},
           ...assessment.removedUnsupportedThreads.length > 0 ? { removedUnsupportedThreads: assessment.removedUnsupportedThreads.join(" | ") } : {},
@@ -2764,6 +3026,7 @@ var ExtractionService = class {
         assertChatOwner(state);
         state.indexedThroughMessageId = chunk.endMessageId;
         state.indexedThroughHash = chunkSourceHash;
+        state.indexedPrefixHash = await prefixHash(context.chat, chunk.endMessageId);
         state.metrics.extractionChunks += 1;
         state.metrics.candidatesExtracted += candidates.length;
         state.metrics.totalExtractionMs += Math.round(performance.now() - chunkStartedAt);
@@ -2838,8 +3101,8 @@ function normalizedIntent(value) {
   return value.trim().toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
 }
 function isWeakRetrievalIntent(value) {
-  const normalized2 = normalizedIntent(value);
-  return normalized2.length === 0 || WEAK_INTENT_PATTERNS.some((pattern) => pattern.test(normalized2));
+  const normalized4 = normalizedIntent(value);
+  return normalized4.length === 0 || WEAK_INTENT_PATTERNS.some((pattern) => pattern.test(normalized4));
 }
 function previousAssistantMessage(messages, currentInputIndex) {
   for (let index = currentInputIndex - 1; index >= 0; index -= 1) {
@@ -3041,7 +3304,7 @@ function rankMemories(queryPlan, memories, vectorResults) {
     const sceneMatches = exactEntityMatches(queryPlan.keywordSceneQuery, memory);
     const vectorRankScore = reciprocalRankScore(intentRank) * queryPlan.intentWeight + reciprocalRankScore(sceneRank) * queryPlan.sceneWeight;
     const exactMatchScore = intentMatches * 0.7 * queryPlan.intentWeight + sceneMatches * 0.35 * queryPlan.sceneWeight;
-    const score = (memory.pinned ? 100 : 0) + vectorRankScore + exactMatchScore + currentStateBonus(queryPlan, memory) + memory.importance * 2 + (memory.status === "resolved" ? -2 : 0);
+    const score = (memory.pinned ? 100 : 0) + vectorRankScore + exactMatchScore + currentStateBonus(queryPlan, memory) + memory.importance * 2;
     return {
       memory,
       score,
@@ -3056,6 +3319,18 @@ function estimateTokens(text2) {
   const cjkCount = (text2.match(/[\u3400-\u9fff\uf900-\ufaff]/g) ?? []).length;
   const remaining = Math.max(0, text2.length - cjkCount);
   return cjkCount + Math.ceil(remaining / 4);
+}
+function estimateMessageTokens(messages, indices, maxSamples = 200) {
+  if (indices.length === 0) {
+    return 0;
+  }
+  const sampleCount = Math.min(indices.length, Math.max(1, Math.floor(maxSamples)));
+  let sampledTokens = 0;
+  for (let sample = 0; sample < sampleCount; sample += 1) {
+    const position = sampleCount === 1 ? 0 : Math.round(sample * (indices.length - 1) / (sampleCount - 1));
+    sampledTokens += estimateTokens(messages[indices[position] ?? -1]?.mes ?? "");
+  }
+  return Math.round(sampledTokens * indices.length / sampleCount);
 }
 function clean(value) {
   return value?.trim() ?? "";
@@ -3150,17 +3425,48 @@ function selectRecentWindow(messages, size, unit) {
   let retainedStartIndex = currentInputIndex;
   if (normalizedSize === 0) {
     retainedStartIndex = currentInputIndex;
-  } else if (unit === "messages") {
-    const historical = messages.map((message, index) => ({ message, index })).filter(({ message, index }) => index < currentInputIndex && !message.is_system);
-    const firstRetained = historical.at(-normalizedSize);
-    retainedStartIndex = firstRetained?.index ?? (historical.length <= normalizedSize ? 0 : currentInputIndex);
   } else {
-    const historicalUserIndices = messages.map((message, index) => ({ message, index })).filter(({ message, index }) => index < currentInputIndex && message.is_user && !message.is_system).map(({ index }) => index);
-    const firstRetainedUser = historicalUserIndices.at(-normalizedSize);
-    retainedStartIndex = firstRetainedUser ?? (historicalUserIndices.length <= normalizedSize ? 0 : currentInputIndex);
+    let retainedUnits = 0;
+    let foundBoundary = false;
+    for (let index = currentInputIndex - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      const countsTowardWindow = unit === "messages" ? !message?.is_system : Boolean(message?.is_user && !message.is_system);
+      if (!countsTowardWindow) {
+        continue;
+      }
+      retainedUnits += 1;
+      if (retainedUnits === normalizedSize) {
+        retainedStartIndex = index;
+        foundBoundary = true;
+        break;
+      }
+    }
+    if (!foundBoundary) {
+      retainedStartIndex = 0;
+    }
   }
-  const removableIndices = messages.map((message, index) => ({ message, index })).filter(({ message, index }) => index < retainedStartIndex && !message.is_system).map(({ index }) => index);
+  const removableIndices = [];
+  for (let index = 0; index < retainedStartIndex; index += 1) {
+    if (!messages[index]?.is_system) {
+      removableIndices.push(index);
+    }
+  }
   return { currentInputIndex, retainedStartIndex, removableIndices };
+}
+function removeMessagesAtIndices(messages, indices) {
+  if (indices.length === 0) {
+    return;
+  }
+  const removable = new Set(indices);
+  let writeIndex = 0;
+  for (let readIndex = 0; readIndex < messages.length; readIndex += 1) {
+    if (removable.has(readIndex)) {
+      continue;
+    }
+    messages[writeIndex] = messages[readIndex];
+    writeIndex += 1;
+  }
+  messages.length = writeIndex;
 }
 
 // src/prompt/interceptor.ts
@@ -3213,7 +3519,10 @@ async function storyEchoGenerateInterceptor(chat, _contextSize, _abort, type) {
     if (!state) {
       return;
     }
-    state.metrics.generationAttempts += 1;
+    state = await extractionService.reconcileHistory(state);
+    if (!state) {
+      return;
+    }
     const warnings = [];
     const requiredIndexedThrough = sourceWindow.retainedStartIndex - 1;
     if (state.indexedThroughMessageId < requiredIndexedThrough) {
@@ -3237,6 +3546,7 @@ async function storyEchoGenerateInterceptor(chat, _contextSize, _abort, type) {
         return;
       }
     }
+    state.metrics.generationAttempts += 1;
     if (state.indexedThroughMessageId < requiredIndexedThrough) {
       warnings.push(
         `\u5267\u60C5\u7D22\u5F15\u53EA\u8986\u76D6\u5230\u6D88\u606F ${state.indexedThroughMessageId}\uFF0C\u5C1A\u4E0D\u80FD\u5B89\u5168\u88C1\u526A\u5230 ${requiredIndexedThrough}\u3002`
@@ -3365,18 +3675,10 @@ async function storyEchoGenerateInterceptor(chat, _contextSize, _abort, type) {
       settings.recall.maxTokens
     );
     const memoryBlock = selected.length > 0 ? renderMemoryBlock(selected) : "";
-    const estimatedRemovedTokens = window.removableIndices.reduce(
-      (total, index) => total + estimateTokens(chat[index]?.mes ?? ""),
-      0
-    );
+    const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
     const estimatedInjectedTokens = memoryBlock ? estimateTokens(memoryBlock) : 0;
     const anchor = chat[window.retainedStartIndex];
-    const removable = new Set(window.removableIndices);
-    for (let index = chat.length - 1; index >= 0; index -= 1) {
-      if (removable.has(index)) {
-        chat.splice(index, 1);
-      }
-    }
+    removeMessagesAtIndices(chat, window.removableIndices);
     if (memoryBlock) {
       const anchorIndex = anchor ? chat.indexOf(anchor) : 0;
       chat.splice(Math.max(0, anchorIndex), 0, {
@@ -3533,6 +3835,8 @@ var PANEL_ID = "story-echo-settings";
 var settingsRepository2 = new SettingsRepository();
 var memoryRepository2 = new MemoryRepository();
 var vectorStore2 = new SillyTavernVectorStore();
+var cachedVectorCollectionId = "";
+var cachedVectorCountText = "\u672A\u8BFB\u53D6";
 function panelTemplate() {
   const panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -3544,16 +3848,29 @@ function panelTemplate() {
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
       <div class="inline-drawer-content story-echo-panel-body">
-        <label class="checkbox_label story-echo-inline">
-          <input id="story-echo-enabled" type="checkbox">
-          <span>\u542F\u7528\u6ED1\u52A8\u7A97\u53E3\u4E0E\u5386\u53F2\u5267\u60C5\u53EC\u56DE</span>
-        </label>
-
-        <div class="story-echo-grid story-echo-section">
-          <div class="story-echo-section-title story-echo-field-wide">
-            <i class="fa-solid fa-sliders" aria-hidden="true"></i>
-            <span>\u4E0A\u4E0B\u6587\u4E0E\u53EC\u56DE</span>
+        <div class="story-echo-switch-row story-echo-switch-primary">
+          <div class="story-echo-switch-copy">
+            <span class="story-echo-switch-title">\u542F\u7528\u6ED1\u52A8\u7A97\u53E3\u4E0E\u5386\u53F2\u5267\u60C5\u53EC\u56DE</span>
+            <span class="story-echo-switch-description">\u5173\u95ED\u540E\u4E0D\u88C1\u526A\u4E0A\u4E0B\u6587\u3001\u4E0D\u62BD\u53D6\u5386\u53F2\uFF0C\u4E5F\u4E0D\u6CE8\u5165\u5267\u60C5\u8BB0\u5FC6</span>
           </div>
+          <div class="story-echo-toggle">
+            <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
+            <label class="story-echo-toggle-label" for="story-echo-enabled" aria-label="\u542F\u7528\u6ED1\u52A8\u7A97\u53E3\u4E0E\u5386\u53F2\u5267\u60C5\u53EC\u56DE"></label>
+          </div>
+        </div>
+
+        <details class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">\u4E0A\u4E0B\u6587\u4E0E\u53EC\u56DE</span>
+                <span class="story-echo-section-summary-description">\u7A97\u53E3\u3001\u53EC\u56DE\u3001\u67E5\u8BE2\u4E0E\u81EA\u52A8\u62BD\u53D6</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field">
             <span>\u6700\u8FD1\u7A97\u53E3</span>
             <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
@@ -3591,24 +3908,48 @@ function panelTemplate() {
               <option value="openai-compatible">\u81EA\u5B9A\u4E49OpenAI\u517C\u5BB9\u63A5\u53E3</option>
             </select>
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-auto-extract" type="checkbox">
-            <span>\u7A97\u53E3\u8FB9\u754C\u9700\u8981\u65F6\u81EA\u52A8\u62BD\u53D6\u5C1A\u672A\u5904\u7406\u7684\u5386\u53F2</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">\u81EA\u52A8\u8865\u5145\u5386\u53F2\u7D22\u5F15</span>
+              <span class="story-echo-switch-description">\u7A97\u53E3\u8FB9\u754C\u9700\u8981\u65F6\u81EA\u52A8\u62BD\u53D6\u4E00\u4E2A\u5C1A\u672A\u5904\u7406\u7684\u5386\u53F2\u5206\u5757</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-auto-extract" aria-label="\u81EA\u52A8\u8865\u5145\u5386\u53F2\u7D22\u5F15"></label>
+            </div>
+          </div>
           <label class="story-echo-field">
             <span>\u6BCF\u6279\u62BD\u53D6\u8F6E\u6570</span>
             <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-debug" type="checkbox">
-            <span>\u8C03\u8BD5\u6A21\u5F0F\uFF08\u4FDD\u7559\u6700\u8FD150\u6761\u8FD0\u884C\u8F68\u8FF9\uFF09</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">\u8C03\u8BD5\u6A21\u5F0F</span>
+              <span class="story-echo-switch-description">\u5728\u5F53\u524D\u804A\u5929\u4E2D\u4FDD\u7559\u6700\u8FD1 50 \u6761\u6709\u754C\u8FD0\u884C\u8F68\u8FF9</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-debug" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-debug" aria-label="\u8C03\u8BD5\u6A21\u5F0F"></label>
+            </div>
+          </div>
           <p class="story-echo-hint story-echo-field-wide">
             LLM\u6539\u5199\u4F1A\u5728\u6BCF\u6B21\u9700\u8981\u53EC\u56DE\u65F6\u5148\u751F\u6210\u4E00\u53E5\u68C0\u7D22\u67E5\u8BE2\uFF1B\u5931\u8D25\u65F6\u81EA\u52A8\u56DE\u9000\u672C\u5730\u53CC\u8DEF\u67E5\u8BE2\u3002
           </p>
-        </div>
+          </div>
+        </details>
 
-        <div id="story-echo-custom-provider" class="story-echo-grid story-echo-subsection">
+        <details id="story-echo-custom-provider" class="story-echo-subsection story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-cloud" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">\u81EA\u5B9A\u4E49 LLM \u63A5\u53E3</span>
+                <span class="story-echo-section-summary-description">\u5730\u5740\u3001\u6A21\u578B\u3001\u5BC6\u94A5\u4E0E\u56DE\u9000\u7B56\u7565</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>Base URL</span>
             <input id="story-echo-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://example.com/v1">
@@ -3621,24 +3962,44 @@ function panelTemplate() {
             <span>API Key\uFF08\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF09</span>
             <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0Key\u63A5\u53E3\u53EF\u7559\u7A7A">
           </label>
-          <label class="checkbox_label story-echo-inline">
-            <input id="story-echo-allow-http" type="checkbox">
-            <span>\u5141\u8BB8\u4E0D\u5B89\u5168HTTP\uFF08\u4EC5\u5EFA\u8BAE\u5C40\u57DF\u7F51\uFF09</span>
-          </label>
-          <label class="checkbox_label story-echo-inline">
-            <input id="story-echo-fallback-main" type="checkbox">
-            <span>\u81EA\u5B9A\u4E49\u63A5\u53E3\u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">\u5141\u8BB8\u4E0D\u5B89\u5168 HTTP</span>
+              <span class="story-echo-switch-description">\u4EC5\u5EFA\u8BAE\u7528\u4E8E\u53EF\u4FE1\u7684\u5C40\u57DF\u7F51\u670D\u52A1</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-allow-http" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-allow-http" aria-label="\u5141\u8BB8\u81EA\u5B9A\u4E49 LLM \u4F7F\u7528\u4E0D\u5B89\u5168 HTTP"></label>
+            </div>
+          </div>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">\u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5</span>
+              <span class="story-echo-switch-description">\u81EA\u5B9A\u4E49 LLM \u8BF7\u6C42\u5931\u8D25\u540E\u5C1D\u8BD5 SillyTavern \u4E3B\u8FDE\u63A5</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-fallback-main" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-fallback-main" aria-label="\u81EA\u5B9A\u4E49 LLM \u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5"></label>
+            </div>
+          </div>
           <p class="story-echo-hint story-echo-field-wide">
             LLM Key\u4EE5\u660E\u6587\u4FDD\u5B58\u5728\u5F53\u524D\u7528\u6237\u7684\u6269\u5C55\u8BBE\u7F6E\u4E2D\u5E76\u968F\u9152\u9986\u540C\u6B65\uFF1B\u8BF7\u6C42\u7531SillyTavern\u540E\u7AEF\u8F6C\u53D1\uFF0C\u6D4F\u89C8\u5668\u4E0D\u4F1A\u76F4\u63A5\u8FDE\u63A5LLM\u63A5\u53E3\u3002
           </p>
-        </div>
-
-        <div class="story-echo-grid story-echo-section">
-          <div class="story-echo-section-title story-echo-field-wide">
-            <i class="fa-solid fa-database" aria-hidden="true"></i>
-            <span>Embedding \u4E0E Vector Storage</span>
           </div>
+        </details>
+
+        <details class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-database" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">Embedding \u4E0E Vector Storage</span>
+                <span class="story-echo-section-summary-description">\u9009\u62E9\u5411\u91CF\u6765\u6E90\u4E0E\u670D\u52A1\u7AEF\u5B58\u50A8\u65B9\u5F0F</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>Embedding\u6765\u6E90</span>
             <select id="story-echo-vector-source" class="text_pole">
@@ -3650,13 +4011,21 @@ function panelTemplate() {
           <p class="story-echo-hint story-echo-field-wide">
             \u81EA\u5B9A\u4E49\u6A21\u5F0F\u53EA\u66FF\u6362\u5411\u91CF\u751F\u6210\u5668\uFF1B\u5411\u91CF\u4ECD\u7531\u9152\u9986Vector Storage\u4FDD\u5B58\u5E76\u5728\u670D\u52A1\u7AEF\u68C0\u7D22\u3002
           </p>
-        </div>
-
-        <div id="story-echo-volcengine-embedding" class="story-echo-grid story-echo-subsection">
-          <div class="story-echo-section-title story-echo-field-wide">
-            <i class="fa-solid fa-fire" aria-hidden="true"></i>
-            <span>\u706B\u5C71\u65B9\u821F\u591A\u6A21\u6001 Embedding</span>
           </div>
+        </details>
+
+        <details id="story-echo-volcengine-embedding" class="story-echo-subsection story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-fire" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">\u706B\u5C71\u65B9\u821F\u591A\u6A21\u6001 Embedding</span>
+                <span class="story-echo-section-summary-description">\u65B9\u821F\u63A5\u53E3\u3001Endpoint \u4E0E\u8FDE\u63A5\u6D4B\u8BD5</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>\u65B9\u821F Base URL</span>
             <input id="story-echo-volcengine-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
@@ -3669,10 +4038,16 @@ function panelTemplate() {
             <span>\u65B9\u821F API Key\uFF08\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF09</span>
             <input id="story-echo-volcengine-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false">
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-volcengine-allow-http" type="checkbox">
-            <span>\u5141\u8BB8\u4E0D\u5B89\u5168HTTP\uFF08\u4EC5\u5EFA\u8BAE\u5C40\u57DF\u7F51\u517C\u5BB9\u670D\u52A1\uFF09</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">\u5141\u8BB8\u4E0D\u5B89\u5168 HTTP</span>
+              <span class="story-echo-switch-description">\u4EC5\u5EFA\u8BAE\u7528\u4E8E\u53EF\u4FE1\u7684\u5C40\u57DF\u7F51\u517C\u5BB9\u670D\u52A1</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-volcengine-allow-http" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-volcengine-allow-http" aria-label="\u5141\u8BB8\u706B\u5C71\u65B9\u821F\u517C\u5BB9\u63A5\u53E3\u4F7F\u7528\u4E0D\u5B89\u5168 HTTP"></label>
+            </div>
+          </div>
           <div class="story-echo-field-wide story-echo-subsection-actions">
             <button id="story-echo-test-volcengine-embedding" class="menu_button" type="button">
               <i class="fa-solid fa-vial" aria-hidden="true"></i><span>\u6D4B\u8BD5\u706B\u5C71Embedding\u8FDE\u63A5</span>
@@ -3681,9 +4056,21 @@ function panelTemplate() {
           <p class="story-echo-hint story-echo-field-wide">
             \u81EA\u52A8\u8C03\u7528 /embeddings/multimodal\uFF1B\u6BCF\u6BB5\u5267\u60C5\u6587\u672C\u72EC\u7ACB\u751F\u6210\u4E00\u4E2A\u5411\u91CF\uFF0C\u6700\u591A4\u4E2A\u8BF7\u6C42\u5E76\u53D1\u3002\u8BF7\u6C42\u4ECD\u7ECF\u9152\u9986\u670D\u52A1\u7AEF\u4EE3\u7406\uFF0C\u5411\u91CF\u4ECD\u7531Vector Storage\u4FDD\u5B58\u548C\u68C0\u7D22\u3002
           </p>
-        </div>
+          </div>
+        </details>
 
-        <div id="story-echo-custom-embedding" class="story-echo-grid story-echo-subsection">
+        <details id="story-echo-custom-embedding" class="story-echo-subsection story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-vector-square" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">\u81EA\u5B9A\u4E49 OpenAI \u517C\u5BB9 Embedding</span>
+                <span class="story-echo-section-summary-description">\u5730\u5740\u3001\u6A21\u578B\u3001\u5BC6\u94A5\u4E0E\u8FDE\u63A5\u6D4B\u8BD5</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>Embedding Base URL</span>
             <input id="story-echo-embedding-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
@@ -3696,10 +4083,16 @@ function panelTemplate() {
             <span>Embedding API Key\uFF08\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF09</span>
             <input id="story-echo-embedding-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="\u65E0Key\u63A5\u53E3\u53EF\u7559\u7A7A">
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-embedding-allow-http" type="checkbox">
-            <span>\u5141\u8BB8\u4E0D\u5B89\u5168HTTP\uFF08\u4EC5\u5EFA\u8BAE\u5C40\u57DF\u7F51\uFF09</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">\u5141\u8BB8\u4E0D\u5B89\u5168 HTTP</span>
+              <span class="story-echo-switch-description">\u4EC5\u5EFA\u8BAE\u7528\u4E8E\u53EF\u4FE1\u7684\u5C40\u57DF\u7F51 Embedding \u670D\u52A1</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-embedding-allow-http" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-embedding-allow-http" aria-label="\u5141\u8BB8\u81EA\u5B9A\u4E49 Embedding \u4F7F\u7528\u4E0D\u5B89\u5168 HTTP"></label>
+            </div>
+          </div>
           <div class="story-echo-field-wide story-echo-subsection-actions">
             <button id="story-echo-test-embedding" class="menu_button" type="button">
               <i class="fa-solid fa-vial" aria-hidden="true"></i><span>\u6D4B\u8BD5Embedding\u8FDE\u63A5</span>
@@ -3708,7 +4101,8 @@ function panelTemplate() {
           <p class="story-echo-hint story-echo-field-wide">
             \u5916\u90E8Embedding\u8BF7\u6C42\u4F1A\u81EA\u52A8\u7ECF\u9152\u9986\u670D\u52A1\u7AEF\u4EE3\u7406\uFF1B\u9700\u5728config.yaml\u542F\u7528enableCorsProxy\u5E76\u91CD\u542F\u3002Key\u4ECD\u4EE5\u660E\u6587\u968F\u9152\u9986\u8BBE\u7F6E\u540C\u6B65\uFF0C\u5411\u91CF\u7EE7\u7EED\u7531Vector Storage\u4FDD\u5B58\u548C\u68C0\u7D22\u3002
           </p>
-        </div>
+          </div>
+        </details>
 
         <div class="story-echo-actions story-echo-actions-primary" role="group" aria-label="\u4E3B\u8981\u64CD\u4F5C">
           <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
@@ -3866,13 +4260,13 @@ function bindSettings(panel) {
       return;
     }
     try {
-      const normalized2 = normalizeChatCompletionsBaseUrl(value, {
+      const normalized4 = normalizeChatCompletionsBaseUrl(value, {
         allowInsecureHttp: current.llm.custom.allowInsecureHttp
       });
       settingsRepository2.update((settings) => {
-        settings.llm.custom.baseUrl = normalized2;
+        settings.llm.custom.baseUrl = normalized4;
       });
-      input.value = normalized2;
+      input.value = normalized4;
     } catch (error) {
       input.value = current.llm.custom.baseUrl;
       notify.error(error instanceof Error ? error.message : "Base URL\u65E0\u6548\u3002");
@@ -3903,7 +4297,7 @@ function bindSettings(panel) {
       current.vector.source = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
-    void refreshStatus(panel);
+    void refreshStatus(panel, true);
   });
   element(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
@@ -3916,10 +4310,10 @@ function bindSettings(panel) {
       return;
     }
     try {
-      const normalized2 = normalizeEmbeddingsUrl(value, {
+      const normalized4 = normalizeEmbeddingsUrl(value, {
         allowInsecureHttp: current.vector.custom.allowInsecureHttp
       });
-      const baseUrl = normalized2.replace(/\/embeddings\/?$/, "");
+      const baseUrl = normalized4.replace(/\/embeddings\/?$/, "");
       settingsRepository2.update((settings) => {
         settings.vector.custom.baseUrl = baseUrl;
       });
@@ -3955,10 +4349,10 @@ function bindSettings(panel) {
       return;
     }
     try {
-      const normalized2 = normalizeVolcengineMultimodalEmbeddingsUrl(value, {
+      const normalized4 = normalizeVolcengineMultimodalEmbeddingsUrl(value, {
         allowInsecureHttp: current.vector.volcengine.allowInsecureHttp
       });
-      const baseUrl = normalized2.replace(/\/embeddings\/multimodal\/?$/, "");
+      const baseUrl = normalized4.replace(/\/embeddings\/multimodal\/?$/, "");
       settingsRepository2.update((settings) => {
         settings.vector.volcengine.baseUrl = baseUrl;
       });
@@ -4035,16 +4429,16 @@ function bindSettings(panel) {
         status.textContent = `\u6B63\u5728\u5904\u7406\u6D88\u606F ${progress.startMessageId}\uFF5E${progress.endMessageId} / ${progress.targetEndMessageId}\uFF0C\u65B0\u589E ${progress.newMemoryCount} \u6761\u3001\u66F4\u65B0 ${progress.changedMemoryCount} \u6761\u4E8B\u4EF6\u2026\u2026`;
       });
       notify.success("\u7A97\u53E3\u5916\u5386\u53F2\u5904\u7406\u5B8C\u6210\u3002");
-      await refreshStatus(panel);
+      await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : "\u5386\u53F2\u5904\u7406\u5931\u8D25\u3002");
-      await refreshStatus(panel);
+      await refreshStatus(panel, true);
     } finally {
       button.disabled = false;
     }
   });
   element(panel, "#story-echo-refresh-status").addEventListener("click", async () => {
-    await refreshStatus(panel);
+    await refreshStatus(panel, true);
   });
   element(panel, "#story-echo-copy-debug").addEventListener("click", async () => {
     const state = memoryRepository2.getExisting();
@@ -4162,7 +4556,7 @@ function tracesText(state) {
     trace.details ? JSON.stringify(trace.details, null, 2) : ""
   ].filter(Boolean).join("\n")).join("\n\n");
 }
-async function refreshStatus(panel) {
+async function refreshStatus(panel, refreshVectorCount = false) {
   const target = element(panel, "#story-echo-status");
   const stats = element(panel, "#story-echo-stats");
   const inspection = element(panel, "#story-echo-inspection");
@@ -4170,23 +4564,33 @@ async function refreshStatus(panel) {
   try {
     const state = memoryRepository2.getExisting();
     if (!state) {
+      cachedVectorCollectionId = "";
+      cachedVectorCountText = "\u672A\u8BFB\u53D6";
       target.textContent = getCurrentChatId() ? "\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316StoryEcho\u6570\u636E\u3002" : "\u5F53\u524D\u6CA1\u6709\u6253\u5F00\u804A\u5929\u3002";
       stats.textContent = "\u5C1A\u65E0\u7EDF\u8BA1\u6570\u636E\u3002";
       inspection.textContent = "\u5C1A\u65E0\u751F\u6210\u8BB0\u5F55\u3002";
       traces.textContent = "\u8C03\u8BD5\u6A21\u5F0F\u5173\u95ED\u6216\u5C1A\u65E0\u8F68\u8FF9\u3002";
       return;
     }
-    let vectorCountText = "\u672A\u8BFB\u53D6";
-    try {
-      const hashes = await vectorStore2.list(state.vectorCollectionId, resolveVectorConfig(settingsRepository2.get()));
-      vectorCountText = String(hashes.length);
-    } catch (error) {
-      vectorCountText = "Vector Storage\u4E0D\u53EF\u7528";
-      logger.debug("\u8BFB\u53D6\u5411\u91CF\u72B6\u6001\u5931\u8D25\u3002", error);
+    if (cachedVectorCollectionId !== state.vectorCollectionId) {
+      cachedVectorCollectionId = state.vectorCollectionId;
+      cachedVectorCountText = "\u672A\u8BFB\u53D6";
+    }
+    if (refreshVectorCount) {
+      try {
+        const hashes = await vectorStore2.list(
+          state.vectorCollectionId,
+          resolveVectorConfig(settingsRepository2.get())
+        );
+        cachedVectorCountText = String(hashes.length);
+      } catch (error) {
+        cachedVectorCountText = "Vector Storage\u4E0D\u53EF\u7528";
+        logger.debug("\u8BFB\u53D6\u5411\u91CF\u72B6\u6001\u5931\u8D25\u3002", error);
+      }
     }
     target.textContent = [
       `\u5267\u60C5\u4E8B\u4EF6\uFF1A${state.memories.length}`,
-      `\u5411\u91CF\uFF1A${vectorCountText}`,
+      `\u5411\u91CF\uFF1A${cachedVectorCountText}`,
       `\u5F85\u540C\u6B65\u5411\u91CF\uFF1A${state.pendingVectorHashes.length}`,
       `\u5F85\u5220\u9664\u5411\u91CF\uFF1A${state.pendingVectorDeleteHashes.length}`,
       `\u5DF2\u5904\u7406\u5230\u6D88\u606F\uFF1A${state.indexedThroughMessageId}`,
@@ -4230,7 +4634,7 @@ async function registerSettingsPanel() {
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);
   });
-  await refreshStatus(panel);
+  await refreshStatus(panel, true);
 }
 
 // src/index.ts

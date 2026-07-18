@@ -66,6 +66,7 @@ export function chatState(memories: StoryMemory[] = []): StoryEchoChatState {
     vectorCollectionId: 'story_echo_chat-uuid_v1',
     indexedThroughMessageId: 2,
     indexedThroughHash: 'source-1',
+    indexedPrefixHash: '',
     memories,
     pendingRanges: [],
     pendingVectorHashes: [],

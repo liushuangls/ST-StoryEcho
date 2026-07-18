@@ -12,6 +12,7 @@ import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { planNextChunk } from './chunk-planner';
+import { atomicizeMemoryCandidates } from './atomicize';
 import { parseExtractionResponse } from './parser';
 import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from './prompts';
 import { assessMemoryCandidates } from './quality';
@@ -41,6 +42,13 @@ function assertChatOwner(state: StoryEchoChatState): void {
   }
 }
 
+async function prefixHash(messages: TavernChatMessage[], endMessageId: number): Promise<string> {
+  if (endMessageId < 0) {
+    return '';
+  }
+  return sha256(sourcePayload(messages.slice(0, endMessageId + 1), 0));
+}
+
 export class ExtractionService {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly settingsRepository = new SettingsRepository();
@@ -60,6 +68,65 @@ export class ExtractionService {
     return operation;
   }
 
+  /**
+   * Detect edits, deleted floors, and branches that truncate already indexed
+   * history. Derived memories are conservatively rebuilt so facts from a
+   * removed branch can never leak into the current prompt.
+   */
+  async reconcileHistory(state?: StoryEchoChatState): Promise<StoryEchoChatState | null> {
+    const current = state ?? await this.memoryRepository.getOrCreate();
+    if (!current || current.indexedThroughMessageId < 0) {
+      return current;
+    }
+    assertChatOwner(current);
+    const context = getContext();
+    const settings = this.settingsRepository.get();
+    const indexedPastCurrentEnd = current.indexedThroughMessageId >= context.chat.length;
+    const actualPrefixHash = indexedPastCurrentEnd
+      ? ''
+      : await prefixHash(context.chat, current.indexedThroughMessageId);
+
+    // Existing chats created before prefix fingerprints were introduced get a
+    // baseline without discarding their memories. A shortened chat is already
+    // definitive evidence of a branch/delete and must be rebuilt immediately.
+    if (!current.indexedPrefixHash && !indexedPastCurrentEnd) {
+      current.indexedPrefixHash = actualPrefixHash;
+      await this.memoryRepository.save(current);
+      return current;
+    }
+    if (!indexedPastCurrentEnd && actualPrefixHash === current.indexedPrefixHash) {
+      return current;
+    }
+
+    const previousIndexedThrough = current.indexedThroughMessageId;
+    const previousMemoryCount = current.memories.length;
+    let purgeFailed = false;
+    try {
+      await this.vectorStore.purge(current.vectorCollectionId);
+    } catch (error) {
+      purgeFailed = true;
+      logger.warn('聊天历史变化后清理旧向量失败，后续同步将重试。', error);
+    }
+
+    current.indexedThroughMessageId = -1;
+    current.indexedThroughHash = '';
+    current.indexedPrefixHash = '';
+    current.memories = [];
+    current.pendingRanges = [];
+    current.pendingVectorHashes = [];
+    current.pendingVectorDeleteHashes = [];
+    current.vectorFingerprint = '';
+    delete current.lastInspection;
+    recordDebugTrace(current, settings.debug, 'extraction', '检测到聊天分支、编辑或删楼层，已重置剧情索引。', {
+      previousIndexedThrough,
+      currentMessageCount: context.chat.length,
+      removedMemories: previousMemoryCount,
+      purgeFailed,
+    });
+    await this.memoryRepository.save(current);
+    return current;
+  }
+
   async syncPendingVectors(state?: StoryEchoChatState): Promise<StoryEchoChatState | null> {
     const current = state ?? await this.memoryRepository.getOrCreate();
     if (!current) {
@@ -70,11 +137,18 @@ export class ExtractionService {
     const settings = this.settingsRepository.get();
     const config = resolveVectorConfig(settings);
     const fingerprint = await vectorConfigFingerprint(config);
+    const configurationChanged = current.vectorFingerprint !== fingerprint;
+    if (
+      !configurationChanged &&
+      current.pendingVectorHashes.length === 0 &&
+      current.pendingVectorDeleteHashes.length === 0
+    ) {
+      return current;
+    }
     const eligible = current.memories.filter(
       (memory) => memory.status !== 'invalid' && memory.status !== 'superseded',
     );
     const eligibleHashes = new Set(eligible.map((memory) => memory.vectorHash));
-    const configurationChanged = current.vectorFingerprint !== fingerprint;
 
     if (configurationChanged) {
       const isRebuild = current.vectorFingerprint.length > 0;
@@ -144,7 +218,11 @@ export class ExtractionService {
     }
     const context = getContext();
     const settings = this.settingsRepository.get();
-    const state = await this.memoryRepository.getOrCreate();
+    let state = await this.memoryRepository.getOrCreate();
+    if (!state) {
+      return null;
+    }
+    state = await this.reconcileHistory(state);
     if (!state) {
       return null;
     }
@@ -187,7 +265,10 @@ export class ExtractionService {
           system: EXTRACTION_SYSTEM_PROMPT,
           prompt: buildExtractionPrompt(snapshot, 0, snapshot.length - 1, chunk.startMessageId),
           jsonSchema: EXTRACTION_SCHEMA,
-          maxTokens: 3_072,
+          // A five-turn chunk can legitimately contain several independent plot facts.
+          // Leave enough room for the complete structured response: truncating JSON loses
+          // the entire chunk even when the model extracted every fact correctly.
+          maxTokens: 8_192,
         });
         let parsedCandidates;
         try {
@@ -200,8 +281,9 @@ export class ExtractionService {
           });
           throw error;
         }
+        const atomicCandidates = atomicizeMemoryCandidates(parsedCandidates);
         const assessment = assessMemoryCandidates(
-          parsedCandidates,
+          atomicCandidates,
           snapshot.map((message) => message.mes).join('\n'),
         );
         const candidates = assessment.accepted;
@@ -209,6 +291,7 @@ export class ExtractionService {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           candidates: candidates.length,
           parsedCandidates: parsedCandidates.length,
+          atomicCandidates: atomicCandidates.length,
           rejectedCandidates: assessment.rejected.length,
           ...(assessment.rejected.length > 0
             ? { rejectedReasons: assessment.rejected.map((item) => item.reason).join(' | ') }
@@ -272,6 +355,7 @@ export class ExtractionService {
         assertChatOwner(state);
         state.indexedThroughMessageId = chunk.endMessageId;
         state.indexedThroughHash = chunkSourceHash;
+        state.indexedPrefixHash = await prefixHash(context.chat, chunk.endMessageId);
         state.metrics.extractionChunks += 1;
         state.metrics.candidatesExtracted += candidates.length;
         state.metrics.totalExtractionMs += Math.round(performance.now() - chunkStartedAt);

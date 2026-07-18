@@ -10,6 +10,8 @@ describe('MemoryRepository migration', () => {
 
   it('upgrades legacy chat state with diagnostics and consolidation fields', async () => {
     const legacyMemory = { ...memory() } as Record<string, unknown>;
+    legacyMemory['status'] = 'resolved';
+    legacyMemory['unresolvedThreads'] = ['已经完成、不应继续显示的待办'];
     delete legacyMemory['sourceHistory'];
     delete legacyMemory['supersedesMemoryIds'];
     delete legacyMemory['lastOperation'];
@@ -58,6 +60,7 @@ describe('MemoryRepository migration', () => {
     expect(state?.memories[0]?.sourceHistory).toEqual([state?.memories[0]?.source]);
     expect(state?.memories[0]?.supersedesMemoryIds).toEqual([]);
     expect(state?.memories[0]?.lastOperation).toBe('CREATE');
+    expect(state?.memories[0]?.unresolvedThreads).toEqual([]);
     expect(state?.lastInspection?.durationMs).toBe(0);
     expect(state?.lastInspection?.vectorResultCount).toBe(0);
     expect(saveMetadata).toHaveBeenCalledOnce();

@@ -188,6 +188,52 @@ describe('event consolidation', () => {
     expect(state.metrics.actions.SUPERSEDE).toBe(1);
   });
 
+  it('preserves an unrelated fact from a legacy composite memory during partial supersede', async () => {
+    const composite = memory({
+      type: 'revelation',
+      event: '琥珀戒指和银铃的位置都已确认。',
+      entities: ['琥珀戒指', '白塔药铺', '银铃', '北境白塔'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '琥珀戒指位于白塔药铺前厅掌柜抽屉；银铃位于北境白塔顶层悬挂。',
+      injectionText: '白塔药铺的琥珀戒指在抽屉，北境白塔的银铃在顶层。',
+    });
+    const state = chatState([composite]);
+    const movedRing = candidate({
+      type: 'state_change',
+      scene: { location: '白塔药铺后院保险柜', time: '', participants: [] },
+      event: '琥珀戒指移到白塔药铺后院保险柜。',
+      entities: ['琥珀戒指', '白塔药铺'],
+      aliases: [],
+      stateChanges: [{
+        entity: '琥珀戒指',
+        attribute: '位置',
+        before: '白塔药铺前厅掌柜抽屉',
+        after: '白塔药铺后院保险柜',
+      }],
+      retrievalText: '琥珀戒指现在位于白塔药铺后院保险柜。',
+      injectionText: '琥珀戒指已移到白塔药铺后院保险柜。',
+    });
+
+    const result = await applyConsolidationDecisions(state, [{
+      candidateIndex: 0,
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+      reason: '戒指位置变化。',
+      result: movedRing,
+    }], { startMessageId: 10, endMessageId: 11, sourceHash: 'source-ring-move' });
+
+    expect(composite.status).toBe('superseded');
+    expect(result.created).toHaveLength(2);
+    const activeTexts = state.memories
+      .filter((item) => item.status === 'active')
+      .map((item) => item.retrievalText);
+    expect(activeTexts).toContain('琥珀戒指现在位于白塔药铺后院保险柜。');
+    expect(activeTexts).toContain('银铃位于北境白塔顶层悬挂');
+    expect(state.pendingVectorDeleteHashes).toEqual([123]);
+    expect(state.pendingVectorHashes).toHaveLength(2);
+  });
+
   it.each([
     ['MERGE', 'active'],
     ['UPDATE', 'active'],
@@ -213,6 +259,27 @@ describe('event consolidation', () => {
     expect(state.pendingVectorHashes).toEqual([state.memories[0]?.vectorHash]);
     expect(state.metrics.actions[operation]).toBe(1);
     expect(result.changed).toHaveLength(1);
+  });
+
+  it('does not carry a completed thread back into a resolved memory', async () => {
+    const state = chatState([memory({
+      type: 'commitment',
+      unresolvedThreads: ['林雨是否会归还银色钥匙？'],
+    })]);
+
+    await applyConsolidationDecisions(state, [{
+      candidateIndex: 0,
+      operation: 'RESOLVE',
+      targetMemoryId: 'mem-1',
+      reason: '钥匙已经归还。',
+      result: candidate({
+        type: 'commitment',
+        event: '林雨已经归还银色钥匙。',
+        unresolvedThreads: [],
+      }),
+    }], { startMessageId: 10, endMessageId: 11, sourceHash: 'source-resolved' });
+
+    expect(state.memories[0]).toMatchObject({ status: 'resolved', unresolvedThreads: [] });
   });
 
   it('applies IGNORE without changing memory or vector queues', async () => {

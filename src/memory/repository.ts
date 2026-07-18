@@ -17,6 +17,7 @@ function createState(ownerChatId: string): StoryEchoChatState {
     vectorCollectionId: createCollectionId(chatUuid),
     indexedThroughMessageId: -1,
     indexedThroughHash: '',
+    indexedPrefixHash: '',
     memories: [],
     pendingRanges: [],
     pendingVectorHashes: [],
@@ -38,6 +39,7 @@ type StoredState = Omit<
   | 'pendingVectorHashes'
   | 'pendingVectorDeleteHashes'
   | 'vectorFingerprint'
+  | 'indexedPrefixHash'
   | 'metrics'
   | 'debugTraces'
 > & {
@@ -45,6 +47,7 @@ type StoredState = Omit<
   pendingVectorHashes?: number[];
   pendingVectorDeleteHashes?: number[];
   vectorFingerprint?: string;
+  indexedPrefixHash?: string;
   metrics?: StoryEchoChatState['metrics'];
   debugTraces?: StoryEchoChatState['debugTraces'];
 };
@@ -90,6 +93,9 @@ function normalizeState(stored: StoredState): StoryEchoChatState {
     ...stored,
     memories: stored.memories.map((memory) => ({
       ...memory,
+      unresolvedThreads: memory.status === 'resolved'
+        ? []
+        : Array.isArray(memory.unresolvedThreads) ? memory.unresolvedThreads : [],
       sourceHistory: Array.isArray(memory.sourceHistory) && memory.sourceHistory.length > 0
         ? memory.sourceHistory
         : [memory.source],
@@ -103,6 +109,7 @@ function normalizeState(stored: StoredState): StoryEchoChatState {
       ? stored.pendingVectorDeleteHashes
       : [],
     vectorFingerprint: typeof stored.vectorFingerprint === 'string' ? stored.vectorFingerprint : '',
+    indexedPrefixHash: typeof stored.indexedPrefixHash === 'string' ? stored.indexedPrefixHash : '',
     metrics: normalizeMetrics(stored.metrics),
     debugTraces: Array.isArray(stored.debugTraces) ? stored.debugTraces.slice(-50) : [],
     ...(lastInspection ? { lastInspection } : {}),
@@ -139,6 +146,7 @@ export class MemoryRepository {
       !Array.isArray(stored.pendingVectorHashes) ||
       !Array.isArray(stored.pendingVectorDeleteHashes) ||
       typeof stored.vectorFingerprint !== 'string' ||
+      typeof stored.indexedPrefixHash !== 'string' ||
       !stored.metrics ||
       !Array.isArray(stored.debugTraces) ||
       (stored.lastInspection !== undefined &&
@@ -152,7 +160,9 @@ export class MemoryRepository {
           !Array.isArray(memory.sourceHistory) ||
           memory.sourceHistory.length === 0 ||
           !Array.isArray(memory.supersedesMemoryIds) ||
-          !memory.lastOperation,
+          !Array.isArray(memory.unresolvedThreads) ||
+          !memory.lastOperation ||
+          (memory.status === 'resolved' && memory.unresolvedThreads.length > 0),
       )
     ) {
       context.chatMetadata[MODULE_ID] = state;

@@ -82,7 +82,10 @@ export class MainLlmProvider implements LlmProvider {
     const response = await this.complete({
       system: 'You are a connection test. Follow the user instruction exactly.',
       prompt: 'Reply with exactly: OK',
-      maxTokens: 16,
+      // Reasoning models can spend a small output budget entirely on hidden
+      // thoughts and return no visible text, which looks like a broken
+      // connection even though the request succeeded.
+      maxTokens: 128,
     });
 
     if (!response.trim()) {

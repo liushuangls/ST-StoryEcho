@@ -61,8 +61,7 @@ export function rankMemories(
         vectorRankScore +
         exactMatchScore +
         currentStateBonus(queryPlan, memory) +
-        memory.importance * 2 +
-        (memory.status === 'resolved' ? -2 : 0);
+        memory.importance * 2;
       return {
         memory,
         score,

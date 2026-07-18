@@ -333,6 +333,12 @@ export function parseConsolidationResponse(
     const result = target && ['MERGE', 'UPDATE', 'RESOLVE'].includes(operation)
       ? mergeWithMemory(target, candidate)
       : candidate;
+    if (operation === 'RESOLVE') {
+      // A resolved candidate is the current authority for remaining open
+      // threads. Unioning the old pending question back into the memory makes
+      // a completed promise or disproved rumor look unresolved again.
+      result.unresolvedThreads = [...candidate.unresolvedThreads];
+    }
     parsed.set(candidateIndex, {
       candidateIndex,
       operation,

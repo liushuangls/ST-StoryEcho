@@ -184,6 +184,7 @@ export interface StoryEchoChatState {
   vectorCollectionId: string;
   indexedThroughMessageId: number;
   indexedThroughHash: string;
+  indexedPrefixHash: string;
   memories: StoryMemory[];
   pendingRanges: PendingRange[];
   pendingVectorHashes: number[];

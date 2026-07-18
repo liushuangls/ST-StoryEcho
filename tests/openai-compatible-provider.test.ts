@@ -66,6 +66,21 @@ describe('OpenAiCompatibleProvider', () => {
     });
   });
 
+  it('gives reasoning models enough room to finish the connection test', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200 }));
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'model-name';
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    await provider.testConnection();
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.max_tokens).toBe(128);
+  });
+
   it('redacts the configured key from backend errors', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       error: { message: 'credential llm-secret was rejected' },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TavernChatMessage } from '../src/core/types';
-import { selectRecentWindow } from '../src/prompt/window';
+import { removeMessagesAtIndices, selectRecentWindow } from '../src/prompt/window';
 
 const chat: TavernChatMessage[] = [
   { is_user: false, mes: 'greeting' },
@@ -43,5 +43,23 @@ describe('selectRecentWindow', () => {
     const result = selectRecentWindow(chat, 0, unit);
     expect(result?.retainedStartIndex).toBe(5);
     expect(result?.removableIndices).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('compacts a removable prefix while preserving order and system messages', () => {
+    const messages: TavernChatMessage[] = [
+      { is_user: false, mes: 'old greeting' },
+      { is_user: false, is_system: true, mes: 'persistent system message' },
+      { is_user: true, mes: 'old user' },
+      { is_user: false, mes: 'recent assistant' },
+      { is_user: true, mes: 'current input' },
+    ];
+
+    removeMessagesAtIndices(messages, [0, 2]);
+
+    expect(messages.map((message) => message.mes)).toEqual([
+      'persistent system message',
+      'recent assistant',
+      'current input',
+    ]);
   });
 });

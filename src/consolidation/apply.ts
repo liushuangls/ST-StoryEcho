@@ -6,6 +6,7 @@ import type {
 } from '../core/types';
 import { incrementAction } from '../debug/metrics';
 import { createStoryMemory } from '../extraction/memory-factory';
+import { deriveResidualCandidate } from './residual';
 import type { ConsolidationDecision } from './types';
 
 export interface AppliedConsolidation {
@@ -95,6 +96,7 @@ export async function applyConsolidationDecisions(
     }
 
     if (operation === 'SUPERSEDE') {
+      const residualCandidate = deriveResidualCandidate(target, decision.result);
       const replacement = await createStoryMemory(decision.result, source, occupied, {
         sourceHistory: uniqueSources([...target.sourceHistory, source]),
         supersedesMemoryIds: [...new Set([...target.supersedesMemoryIds, target.id])],
@@ -102,15 +104,36 @@ export async function applyConsolidationDecisions(
       });
       replacement.pinned = target.pinned;
       replacement.excluded = target.excluded;
+      occupied.add(replacement.vectorHash);
+      const residual = residualCandidate
+        ? await createStoryMemory(residualCandidate, target.source, occupied, {
+            sourceHistory: target.sourceHistory,
+            supersedesMemoryIds: [...new Set([...target.supersedesMemoryIds, target.id])],
+            lastOperation: 'SUPERSEDE',
+          })
+        : null;
+      if (residual) {
+        residual.pinned = target.pinned;
+        residual.excluded = target.excluded;
+        occupied.add(residual.vectorHash);
+      }
       target.status = 'superseded';
       target.replacedByMemoryId = replacement.id;
       target.lastOperation = 'SUPERSEDE';
       target.updatedAt = new Date().toISOString();
-      occupied.add(replacement.vectorHash);
       state.memories.push(replacement);
+      if (residual) {
+        state.memories.push(residual);
+      }
       state.pendingVectorDeleteHashes.push(target.vectorHash);
       state.pendingVectorHashes.push(replacement.vectorHash);
+      if (residual) {
+        state.pendingVectorHashes.push(residual.vectorHash);
+      }
       created.push(replacement);
+      if (residual) {
+        created.push(residual);
+      }
       changed.push(target);
       incrementAction(state.metrics, 'SUPERSEDE');
       applied.push(decision);

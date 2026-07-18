@@ -111,4 +111,41 @@ describe('rankMemories', () => {
 
     expect(result.map((item) => item.id)).toEqual(['current-location', 'commitment']);
   });
+
+  it('does not demote a resolved fact below an unrelated active state', () => {
+    const disprovedRumor = memory({
+      id: 'disproved-rumor',
+      type: 'clue',
+      status: 'resolved',
+      vectorHash: 1,
+      importance: 0.7,
+      event: '核验确认木箱上没有黑色封条，旧传言为假。',
+      entities: ['鹤鸣书院东库地下室', '木箱', '黑色封条'],
+      aliases: [],
+      retrievalText: '鹤鸣书院东库地下室木箱没有黑色封条，传言已被否定。',
+    });
+    const unrelatedActive = memory({
+      id: 'unrelated-active',
+      type: 'state_change',
+      status: 'active',
+      vectorHash: 2,
+      event: '赤铜通行证当前由苏棠持有。',
+      entities: ['赤铜通行证', '苏棠'],
+      aliases: [],
+      retrievalText: '赤铜通行证当前持有者是苏棠。',
+    });
+    const plan = buildRetrievalQueryPlan([{
+      is_user: true,
+      mes: '鹤鸣书院东库地下室木箱是否有黑色封条，当前核验事实是什么？',
+    }], 0);
+    const result = rankMemories(plan, [unrelatedActive, disprovedRumor], {
+      intent: [
+        { hash: 1, text: '', index: 0, rank: 1 },
+        { hash: 2, text: '', index: 1, rank: 5 },
+      ],
+      scene: [],
+    });
+
+    expect(result.map((item) => item.id)).toEqual(['disproved-rumor', 'unrelated-active']);
+  });
 });

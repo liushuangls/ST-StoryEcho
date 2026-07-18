@@ -172,7 +172,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const response = await this.complete({
       system: 'You are a connection test. Follow the user instruction exactly.',
       prompt: 'Reply with exactly: OK',
-      maxTokens: 16,
+      // Leave enough room for providers that count reasoning tokens against
+      // max_tokens before emitting the visible answer.
+      maxTokens: 128,
     });
     if (!response.trim()) {
       throw new Error('自定义LLM返回了空响应。');

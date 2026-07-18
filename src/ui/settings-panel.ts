@@ -27,6 +27,8 @@ const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
 const memoryRepository = new MemoryRepository();
 const vectorStore = new SillyTavernVectorStore();
+let cachedVectorCollectionId = '';
+let cachedVectorCountText = '未读取';
 
 function panelTemplate(): HTMLElement {
   const panel = document.createElement('div');
@@ -39,16 +41,29 @@ function panelTemplate(): HTMLElement {
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
       <div class="inline-drawer-content story-echo-panel-body">
-        <label class="checkbox_label story-echo-inline">
-          <input id="story-echo-enabled" type="checkbox">
-          <span>启用滑动窗口与历史剧情召回</span>
-        </label>
-
-        <div class="story-echo-grid story-echo-section">
-          <div class="story-echo-section-title story-echo-field-wide">
-            <i class="fa-solid fa-sliders" aria-hidden="true"></i>
-            <span>上下文与召回</span>
+        <div class="story-echo-switch-row story-echo-switch-primary">
+          <div class="story-echo-switch-copy">
+            <span class="story-echo-switch-title">启用滑动窗口与历史剧情召回</span>
+            <span class="story-echo-switch-description">关闭后不裁剪上下文、不抽取历史，也不注入剧情记忆</span>
           </div>
+          <div class="story-echo-toggle">
+            <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
+            <label class="story-echo-toggle-label" for="story-echo-enabled" aria-label="启用滑动窗口与历史剧情召回"></label>
+          </div>
+        </div>
+
+        <details class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">上下文与召回</span>
+                <span class="story-echo-section-summary-description">窗口、召回、查询与自动抽取</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field">
             <span>最近窗口</span>
             <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
@@ -86,24 +101,48 @@ function panelTemplate(): HTMLElement {
               <option value="openai-compatible">自定义OpenAI兼容接口</option>
             </select>
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-auto-extract" type="checkbox">
-            <span>窗口边界需要时自动抽取尚未处理的历史</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">自动补充历史索引</span>
+              <span class="story-echo-switch-description">窗口边界需要时自动抽取一个尚未处理的历史分块</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-auto-extract" aria-label="自动补充历史索引"></label>
+            </div>
+          </div>
           <label class="story-echo-field">
             <span>每批抽取轮数</span>
             <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-debug" type="checkbox">
-            <span>调试模式（保留最近50条运行轨迹）</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">调试模式</span>
+              <span class="story-echo-switch-description">在当前聊天中保留最近 50 条有界运行轨迹</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-debug" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-debug" aria-label="调试模式"></label>
+            </div>
+          </div>
           <p class="story-echo-hint story-echo-field-wide">
             LLM改写会在每次需要召回时先生成一句检索查询；失败时自动回退本地双路查询。
           </p>
-        </div>
+          </div>
+        </details>
 
-        <div id="story-echo-custom-provider" class="story-echo-grid story-echo-subsection">
+        <details id="story-echo-custom-provider" class="story-echo-subsection story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-cloud" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">自定义 LLM 接口</span>
+                <span class="story-echo-section-summary-description">地址、模型、密钥与回退策略</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>Base URL</span>
             <input id="story-echo-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://example.com/v1">
@@ -116,24 +155,44 @@ function panelTemplate(): HTMLElement {
             <span>API Key（随酒馆设置同步）</span>
             <input id="story-echo-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="无Key接口可留空">
           </label>
-          <label class="checkbox_label story-echo-inline">
-            <input id="story-echo-allow-http" type="checkbox">
-            <span>允许不安全HTTP（仅建议局域网）</span>
-          </label>
-          <label class="checkbox_label story-echo-inline">
-            <input id="story-echo-fallback-main" type="checkbox">
-            <span>自定义接口失败时回退主连接</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">允许不安全 HTTP</span>
+              <span class="story-echo-switch-description">仅建议用于可信的局域网服务</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-allow-http" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-allow-http" aria-label="允许自定义 LLM 使用不安全 HTTP"></label>
+            </div>
+          </div>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">失败时回退主连接</span>
+              <span class="story-echo-switch-description">自定义 LLM 请求失败后尝试 SillyTavern 主连接</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-fallback-main" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-fallback-main" aria-label="自定义 LLM 失败时回退主连接"></label>
+            </div>
+          </div>
           <p class="story-echo-hint story-echo-field-wide">
             LLM Key以明文保存在当前用户的扩展设置中并随酒馆同步；请求由SillyTavern后端转发，浏览器不会直接连接LLM接口。
           </p>
-        </div>
-
-        <div class="story-echo-grid story-echo-section">
-          <div class="story-echo-section-title story-echo-field-wide">
-            <i class="fa-solid fa-database" aria-hidden="true"></i>
-            <span>Embedding 与 Vector Storage</span>
           </div>
+        </details>
+
+        <details class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-database" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">Embedding 与 Vector Storage</span>
+                <span class="story-echo-section-summary-description">选择向量来源与服务端存储方式</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>Embedding来源</span>
             <select id="story-echo-vector-source" class="text_pole">
@@ -145,13 +204,21 @@ function panelTemplate(): HTMLElement {
           <p class="story-echo-hint story-echo-field-wide">
             自定义模式只替换向量生成器；向量仍由酒馆Vector Storage保存并在服务端检索。
           </p>
-        </div>
-
-        <div id="story-echo-volcengine-embedding" class="story-echo-grid story-echo-subsection">
-          <div class="story-echo-section-title story-echo-field-wide">
-            <i class="fa-solid fa-fire" aria-hidden="true"></i>
-            <span>火山方舟多模态 Embedding</span>
           </div>
+        </details>
+
+        <details id="story-echo-volcengine-embedding" class="story-echo-subsection story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-fire" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">火山方舟多模态 Embedding</span>
+                <span class="story-echo-section-summary-description">方舟接口、Endpoint 与连接测试</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>方舟 Base URL</span>
             <input id="story-echo-volcengine-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
@@ -164,10 +231,16 @@ function panelTemplate(): HTMLElement {
             <span>方舟 API Key（随酒馆设置同步）</span>
             <input id="story-echo-volcengine-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false">
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-volcengine-allow-http" type="checkbox">
-            <span>允许不安全HTTP（仅建议局域网兼容服务）</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">允许不安全 HTTP</span>
+              <span class="story-echo-switch-description">仅建议用于可信的局域网兼容服务</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-volcengine-allow-http" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-volcengine-allow-http" aria-label="允许火山方舟兼容接口使用不安全 HTTP"></label>
+            </div>
+          </div>
           <div class="story-echo-field-wide story-echo-subsection-actions">
             <button id="story-echo-test-volcengine-embedding" class="menu_button" type="button">
               <i class="fa-solid fa-vial" aria-hidden="true"></i><span>测试火山Embedding连接</span>
@@ -176,9 +249,21 @@ function panelTemplate(): HTMLElement {
           <p class="story-echo-hint story-echo-field-wide">
             自动调用 /embeddings/multimodal；每段剧情文本独立生成一个向量，最多4个请求并发。请求仍经酒馆服务端代理，向量仍由Vector Storage保存和检索。
           </p>
-        </div>
+          </div>
+        </details>
 
-        <div id="story-echo-custom-embedding" class="story-echo-grid story-echo-subsection">
+        <details id="story-echo-custom-embedding" class="story-echo-subsection story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-vector-square" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">自定义 OpenAI 兼容 Embedding</span>
+                <span class="story-echo-section-summary-description">地址、模型、密钥与连接测试</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
           <label class="story-echo-field story-echo-field-wide">
             <span>Embedding Base URL</span>
             <input id="story-echo-embedding-base-url" class="text_pole" type="url" maxlength="2048" placeholder="https://ark.cn-beijing.volces.com/api/v3">
@@ -191,10 +276,16 @@ function panelTemplate(): HTMLElement {
             <span>Embedding API Key（随酒馆设置同步）</span>
             <input id="story-echo-embedding-api-key" class="text_pole" type="password" maxlength="16384" autocomplete="off" spellcheck="false" placeholder="无Key接口可留空">
           </label>
-          <label class="checkbox_label story-echo-inline story-echo-field-wide">
-            <input id="story-echo-embedding-allow-http" type="checkbox">
-            <span>允许不安全HTTP（仅建议局域网）</span>
-          </label>
+          <div class="story-echo-switch-row story-echo-field-wide">
+            <div class="story-echo-switch-copy">
+              <span class="story-echo-switch-title">允许不安全 HTTP</span>
+              <span class="story-echo-switch-description">仅建议用于可信的局域网 Embedding 服务</span>
+            </div>
+            <div class="story-echo-toggle">
+              <input id="story-echo-embedding-allow-http" class="story-echo-toggle-input" type="checkbox">
+              <label class="story-echo-toggle-label" for="story-echo-embedding-allow-http" aria-label="允许自定义 Embedding 使用不安全 HTTP"></label>
+            </div>
+          </div>
           <div class="story-echo-field-wide story-echo-subsection-actions">
             <button id="story-echo-test-embedding" class="menu_button" type="button">
               <i class="fa-solid fa-vial" aria-hidden="true"></i><span>测试Embedding连接</span>
@@ -203,7 +294,8 @@ function panelTemplate(): HTMLElement {
           <p class="story-echo-hint story-echo-field-wide">
             外部Embedding请求会自动经酒馆服务端代理；需在config.yaml启用enableCorsProxy并重启。Key仍以明文随酒馆设置同步，向量继续由Vector Storage保存和检索。
           </p>
-        </div>
+          </div>
+        </details>
 
         <div class="story-echo-actions story-echo-actions-primary" role="group" aria-label="主要操作">
           <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
@@ -427,7 +519,7 @@ function bindSettings(panel: HTMLElement): void {
       current.vector.source = (event.currentTarget as HTMLSelectElement).value as VectorSourceMode;
     });
     syncVisibility(panel, settings);
-    void refreshStatus(panel);
+    void refreshStatus(panel, true);
   });
 
   element<HTMLInputElement>(panel, '#story-echo-embedding-base-url').addEventListener('change', (event) => {
@@ -570,17 +662,17 @@ function bindSettings(panel: HTMLElement): void {
         status.textContent = `正在处理消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
       });
       notify.success('窗口外历史处理完成。');
-      await refreshStatus(panel);
+      await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : '历史处理失败。');
-      await refreshStatus(panel);
+      await refreshStatus(panel, true);
     } finally {
       button.disabled = false;
     }
   });
 
   element<HTMLButtonElement>(panel, '#story-echo-refresh-status').addEventListener('click', async () => {
-    await refreshStatus(panel);
+    await refreshStatus(panel, true);
   });
 
   element<HTMLButtonElement>(panel, '#story-echo-copy-debug').addEventListener('click', async () => {
@@ -715,7 +807,7 @@ function tracesText(state: NonNullable<ReturnType<MemoryRepository['getExisting'
     .join('\n\n');
 }
 
-async function refreshStatus(panel: HTMLElement): Promise<void> {
+async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Promise<void> {
   const target = element<HTMLElement>(panel, '#story-echo-status');
   const stats = element<HTMLElement>(panel, '#story-echo-stats');
   const inspection = element<HTMLElement>(panel, '#story-echo-inspection');
@@ -723,6 +815,8 @@ async function refreshStatus(panel: HTMLElement): Promise<void> {
   try {
     const state = memoryRepository.getExisting();
     if (!state) {
+      cachedVectorCollectionId = '';
+      cachedVectorCountText = '未读取';
       target.textContent = getCurrentChatId()
         ? '当前聊天尚未初始化StoryEcho数据。'
         : '当前没有打开聊天。';
@@ -732,18 +826,26 @@ async function refreshStatus(panel: HTMLElement): Promise<void> {
       return;
     }
 
-    let vectorCountText = '未读取';
-    try {
-      const hashes = await vectorStore.list(state.vectorCollectionId, resolveVectorConfig(settingsRepository.get()));
-      vectorCountText = String(hashes.length);
-    } catch (error) {
-      vectorCountText = 'Vector Storage不可用';
-      logger.debug('读取向量状态失败。', error);
+    if (cachedVectorCollectionId !== state.vectorCollectionId) {
+      cachedVectorCollectionId = state.vectorCollectionId;
+      cachedVectorCountText = '未读取';
+    }
+    if (refreshVectorCount) {
+      try {
+        const hashes = await vectorStore.list(
+          state.vectorCollectionId,
+          resolveVectorConfig(settingsRepository.get()),
+        );
+        cachedVectorCountText = String(hashes.length);
+      } catch (error) {
+        cachedVectorCountText = 'Vector Storage不可用';
+        logger.debug('读取向量状态失败。', error);
+      }
     }
 
     target.textContent = [
       `剧情事件：${state.memories.length}`,
-      `向量：${vectorCountText}`,
+      `向量：${cachedVectorCountText}`,
       `待同步向量：${state.pendingVectorHashes.length}`,
       `待删除向量：${state.pendingVectorDeleteHashes.length}`,
       `已处理到消息：${state.indexedThroughMessageId}`,
@@ -790,5 +892,5 @@ export async function registerSettingsPanel(): Promise<void> {
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);
   });
-  await refreshStatus(panel);
+  await refreshStatus(panel, true);
 }

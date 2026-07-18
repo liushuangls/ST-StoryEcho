@@ -20,12 +20,13 @@ import { resolveVectorConfig } from '../vector/config';
 import type { VectorQueryResult } from '../vector/adapter';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import {
+  estimateMessageTokens,
   estimateMemoryTokens,
   estimateTokens,
   renderMemoryBlock,
   selectWithinBudget,
 } from './render';
-import { selectRecentWindow } from './window';
+import { removeMessagesAtIndices, selectRecentWindow } from './window';
 
 const settingsRepository = new SettingsRepository();
 const memoryRepository = new MemoryRepository();
@@ -99,7 +100,10 @@ export async function storyEchoGenerateInterceptor(
     if (!state) {
       return;
     }
-    state.metrics.generationAttempts += 1;
+    state = await extractionService.reconcileHistory(state);
+    if (!state) {
+      return;
+    }
 
     const warnings: string[] = [];
     const requiredIndexedThrough = sourceWindow.retainedStartIndex - 1;
@@ -125,6 +129,10 @@ export async function storyEchoGenerateInterceptor(
         return;
       }
     }
+
+    // Automatic extraction reloads the chat state from metadata. Count the
+    // attempt only after that hand-off so the increment cannot be overwritten.
+    state.metrics.generationAttempts += 1;
 
     if (state.indexedThroughMessageId < requiredIndexedThrough) {
       warnings.push(
@@ -275,19 +283,11 @@ export async function storyEchoGenerateInterceptor(
       settings.recall.maxTokens,
     );
     const memoryBlock = selected.length > 0 ? renderMemoryBlock(selected) : '';
-    const estimatedRemovedTokens = window.removableIndices.reduce(
-      (total, index) => total + estimateTokens(chat[index]?.mes ?? ''),
-      0,
-    );
+    const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
     const estimatedInjectedTokens = memoryBlock ? estimateTokens(memoryBlock) : 0;
 
     const anchor = chat[window.retainedStartIndex];
-    const removable = new Set(window.removableIndices);
-    for (let index = chat.length - 1; index >= 0; index -= 1) {
-      if (removable.has(index)) {
-        chat.splice(index, 1);
-      }
-    }
+    removeMessagesAtIndices(chat, window.removableIndices);
 
     if (memoryBlock) {
       const anchorIndex = anchor ? chat.indexOf(anchor) : 0;

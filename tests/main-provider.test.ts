@@ -26,6 +26,17 @@ describe('MainLlmProvider', () => {
     });
   });
 
+  it('gives reasoning models enough room to finish the connection test', async () => {
+    const generateRaw = vi.fn().mockResolvedValue('OK');
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ generateRaw }),
+    });
+
+    await new MainLlmProvider().testConnection();
+
+    expect(generateRaw).toHaveBeenCalledWith(expect.objectContaining({ responseLength: 128 }));
+  });
+
   it('temporarily lowers main-connection reasoning for background work', async () => {
     let handler: ((settings: unknown) => void) | undefined;
     const eventSource = {

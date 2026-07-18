@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderMemoryBlock } from '../src/prompt/render';
+import { estimateMessageTokens, renderMemoryBlock } from '../src/prompt/render';
 import { memory } from './fixtures';
 
 describe('renderMemoryBlock', () => {
@@ -22,5 +22,12 @@ describe('renderMemoryBlock', () => {
     expect(block).toContain('回答地点须保留完整层级');
     expect(block).toContain('知情者须明确写出姓名');
     expect(block).not.toContain('我把它藏好了');
+  });
+
+  it('bounds token diagnostics for a large uniform removed prefix', () => {
+    const messages = Array.from({ length: 1_000 }, () => ({ mes: '剧情'.repeat(100) }));
+    const indices = messages.map((_, index) => index);
+
+    expect(estimateMessageTokens(messages, indices, 20)).toBe(200_000);
   });
 });
