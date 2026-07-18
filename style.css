@@ -71,19 +71,22 @@
 }
 
 #story-echo-settings .story-echo-subsection-actions {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  justify-content: flex-end;
 }
 
 #story-echo-settings .story-echo-subsection-actions .menu_button {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 0.4rem;
-  min-width: 12rem;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
   margin: 0;
   padding: 0.5rem 0.8rem;
+  white-space: nowrap;
 }
 
 #story-echo-settings .story-echo-actions {
@@ -187,8 +190,4 @@
     grid-template-columns: 1fr;
   }
 
-  #story-echo-settings .story-echo-subsection-actions .menu_button {
-    min-width: 0;
-    width: 100%;
-  }
 }
