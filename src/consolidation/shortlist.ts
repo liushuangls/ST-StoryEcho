@@ -1,5 +1,6 @@
 import type { StoryMemory } from '../core/types';
 import type { ExtractedMemoryCandidate } from '../extraction/types';
+import { canonicalStateSlot, matchingStateIdentities } from './identity';
 
 function normalized(value: string): string {
   return value.trim().toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
@@ -25,13 +26,13 @@ function memoryTerms(memory: StoryMemory): Set<string> {
 
 function stateSlotsForCandidate(candidate: ExtractedMemoryCandidate): Set<string> {
   return new Set(candidate.stateChanges.map(
-    (change) => `${normalized(change.entity)}\u0000${normalized(change.attribute)}`,
+    (change) => canonicalStateSlot(change.entity, change.attribute, candidate.type),
   ));
 }
 
 function stateSlotsForMemory(memory: StoryMemory): Set<string> {
   return new Set(memory.stateChanges.map(
-    (change) => `${normalized(change.entity)}\u0000${normalized(change.attribute)}`,
+    (change) => canonicalStateSlot(change.entity, change.attribute, memory.type),
   ));
 }
 
@@ -62,7 +63,10 @@ export function shortlistMemories(
         const candidateSlotsAtIndex = allCandidateSlots[index] ?? new Set<string>();
         const candidate = candidates[index]!;
         const exactTerms = [...candidateTermsAtIndex].filter((term) => terms.has(term)).length;
-        const sameSlots = [...candidateSlotsAtIndex].filter((slot) => slots.has(slot)).length;
+        const sameSlots = Math.max(
+          [...candidateSlotsAtIndex].filter((slot) => slots.has(slot)).length,
+          matchingStateIdentities(candidate, memory).length,
+        );
         score = Math.max(
           score,
           normalizedFact(candidate.retrievalText) === normalizedFact(memory.retrievalText) ? 100 : 0,
@@ -79,7 +83,7 @@ export function shortlistMemories(
 }
 
 export function normalizedStateSlot(entity: string, attribute: string): string {
-  return `${normalized(entity)}\u0000${normalized(attribute)}`;
+  return canonicalStateSlot(entity, attribute);
 }
 
 export function normalizedFact(value: string): string {

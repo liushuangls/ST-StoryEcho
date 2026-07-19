@@ -32,6 +32,33 @@ describe('event consolidation', () => {
     expect(decisions[0]).toMatchObject({ operation: 'SUPERSEDE', targetMemoryId: 'mem-1' });
   });
 
+  it.each([
+    ['位置', '存放地点'],
+    ['持有者', '保管人'],
+    ['知情者', '知情范围'],
+    ['传言状态', '核验结果'],
+  ])('normalizes %s and %s into the same state category', (oldAttribute, newAttribute) => {
+    const old = memory({
+      stateChanges: [{ entity: '同一完整实体', attribute: oldAttribute, after: '旧值' }],
+    });
+    const next = candidate({
+      event: '同一完整实体发生了新的状态变化。',
+      stateChanges: [{
+        entity: '同一完整实体',
+        attribute: newAttribute,
+        before: '旧值',
+        after: '新值',
+      }],
+      retrievalText: `同一完整实体的${newAttribute}现在是新值。`,
+      injectionText: '同一完整实体的状态已经变成新值。',
+    });
+
+    expect(fallbackConsolidationDecisions([next], [old])[0]).toMatchObject({
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
   it('accepts a valid LLM merge decision', () => {
     const next = candidate({ consequence: '她答应暂时不用它。' });
     const raw = JSON.stringify({
@@ -324,5 +351,151 @@ describe('event consolidation', () => {
 
     expect(shortlist).toEqual([manual]);
     expect(decisions[0]?.operation).toBe('IGNORE');
+  });
+
+  it('supersedes every stale memory in the same canonical state slot without crossing same-name entities', async () => {
+    const olderRing = memory({
+      id: 'ring-old-a',
+      logicalKey: 'location:琥珀戒指',
+      vectorHash: 201,
+      type: 'state_change',
+      event: '琥珀戒指位于白塔药铺前厅抽屉。',
+      entities: ['琥珀戒指', '白塔药铺'],
+      aliases: [],
+      stateChanges: [{ entity: '琥珀戒指', attribute: '位置', after: '白塔药铺前厅抽屉' }],
+      retrievalText: '琥珀戒指位于白塔药铺前厅抽屉。',
+      injectionText: '琥珀戒指位于白塔药铺前厅抽屉。',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const newerDuplicate = memory({
+      id: 'ring-old-b',
+      logicalKey: 'location:琥珀戒指',
+      vectorHash: 202,
+      type: 'state_change',
+      event: '琥珀戒指后来仍存放在白塔药铺前厅抽屉。',
+      entities: ['琥珀戒指', '白塔药铺'],
+      aliases: [],
+      stateChanges: [{ entity: '琥珀戒指的存放地点', attribute: '存放地点', after: '白塔药铺前厅抽屉' }],
+      retrievalText: '琥珀戒指当前仍在白塔药铺前厅抽屉。',
+      injectionText: '琥珀戒指仍在白塔药铺前厅抽屉。',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    });
+    const otherWhiteTower = memory({
+      id: 'bell-north-tower',
+      logicalKey: 'location:银铃',
+      vectorHash: 203,
+      type: 'state_change',
+      event: '银铃位于北境白塔顶层。',
+      entities: ['银铃', '北境白塔'],
+      aliases: [],
+      stateChanges: [{ entity: '银铃', attribute: '位置', after: '北境白塔顶层' }],
+      retrievalText: '银铃位于北境白塔顶层。',
+      injectionText: '银铃位于北境白塔顶层。',
+    });
+    const moved = candidate({
+      type: 'state_change',
+      event: '琥珀戒指移到白塔药铺后院保险柜。',
+      entities: ['琥珀戒指', '白塔药铺'],
+      aliases: [],
+      stateChanges: [{
+        entity: '琥珀戒指',
+        attribute: '当前位置',
+        before: '白塔药铺前厅抽屉',
+        after: '白塔药铺后院保险柜',
+      }],
+      retrievalText: '琥珀戒指当前位于白塔药铺后院保险柜。',
+      injectionText: '琥珀戒指已移到白塔药铺后院保险柜。',
+    });
+    const state = chatState([olderRing, newerDuplicate, otherWhiteTower]);
+    const decisions = fallbackConsolidationDecisions(
+      [moved],
+      [olderRing, newerDuplicate, otherWhiteTower],
+    );
+
+    const result = await applyConsolidationDecisions(state, decisions, {
+      startMessageId: 20,
+      endMessageId: 21,
+      sourceHash: 'ring-new-source',
+    });
+
+    expect(olderRing.status).toBe('superseded');
+    expect(newerDuplicate.status).toBe('superseded');
+    expect(otherWhiteTower.status).toBe('active');
+    expect(result.decisions[0]?.additionalTargetMemoryIds).toEqual(['ring-old-a']);
+    expect(state.memories.filter((item) => (
+      item.status === 'active' && item.logicalKey === 'location:琥珀戒指'
+    ))).toHaveLength(1);
+    expect(state.pendingVectorDeleteHashes).toEqual(expect.arrayContaining([201, 202]));
+  });
+
+  it('uses one stable commitment key, resolves it once, and supersedes active duplicates', async () => {
+    const promiseEntity = '苏棠向顾青递送青色密函的承诺';
+    const first = memory({
+      id: 'promise-a',
+      logicalKey: `commitment:${promiseEntity}`,
+      vectorHash: 301,
+      type: 'commitment',
+      event: '苏棠承诺把青色密函送给顾青。',
+      entities: ['苏棠', '顾青', '青色密函'],
+      aliases: [],
+      stateChanges: [{ entity: promiseEntity, attribute: '完成状态', after: '未完成' }],
+      unresolvedThreads: ['苏棠是否会把青色密函送给顾青？'],
+      retrievalText: '苏棠向顾青递送青色密函的承诺尚未完成。',
+      injectionText: '苏棠承诺把青色密函送给顾青，该承诺尚未完成。',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const duplicate = memory({
+      id: 'promise-b',
+      logicalKey: `commitment:${promiseEntity}`,
+      vectorHash: 302,
+      type: 'commitment',
+      event: '苏棠再次确认会递送青色密函。',
+      entities: ['苏棠', '顾青', '青色密函'],
+      aliases: [],
+      stateChanges: [{ entity: promiseEntity, attribute: '承诺状态', after: '待履行' }],
+      unresolvedThreads: ['青色密函仍待递送。'],
+      retrievalText: '苏棠向顾青递送青色密函的承诺仍待履行。',
+      injectionText: '苏棠递送青色密函的承诺仍待履行。',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    });
+    const completed = candidate({
+      type: 'commitment',
+      event: '苏棠已按约把青色密函交给顾青。',
+      entities: ['苏棠', '顾青', '青色密函'],
+      aliases: [],
+      stateChanges: [{
+        entity: promiseEntity,
+        attribute: '履行状态',
+        before: '待履行',
+        after: '已完成',
+      }],
+      unresolvedThreads: [],
+      retrievalText: '苏棠向顾青递送青色密函的承诺已经完成。',
+      injectionText: '苏棠已按约把青色密函交给顾青，承诺已经完成。',
+    });
+    const state = chatState([first, duplicate]);
+    const decisions = fallbackConsolidationDecisions([completed], [first, duplicate]);
+
+    expect(decisions[0]).toMatchObject({
+      operation: 'RESOLVE',
+      targetMemoryId: 'promise-b',
+    });
+    const result = await applyConsolidationDecisions(state, decisions, {
+      startMessageId: 30,
+      endMessageId: 31,
+      sourceHash: 'promise-completed-source',
+    });
+
+    const resolved = state.memories.filter((item) => item.status === 'resolved');
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]).toMatchObject({
+      id: 'promise-b',
+      logicalKey: `commitment:${promiseEntity}`,
+      unresolvedThreads: [],
+    });
+    expect(first.status).toBe('superseded');
+    expect(first.replacedByMemoryId).toBe('promise-b');
+    expect(result.decisions[0]?.additionalTargetMemoryIds).toEqual(['promise-a']);
+    expect(state.pendingVectorDeleteHashes).toEqual(expect.arrayContaining([301, 302]));
   });
 });

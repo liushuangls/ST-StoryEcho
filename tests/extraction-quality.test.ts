@@ -68,4 +68,22 @@ describe('memory candidate quality gate', () => {
     expect(result.accepted[0]?.unresolvedThreads).toEqual(['红色铁盒内究竟装着什么']);
     expect(result.removedUnsupportedThreads).toEqual([]);
   });
+
+  it('rejects memories without a valid cited chat floor when source ids are enforced', () => {
+    const result = assessMemoryCandidates([
+      candidate({ sourceMessageIds: [99] }),
+    ], '消息正文', [20, 21]);
+
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected[0]?.reason).toContain('缺少有效源消息ID');
+  });
+
+  it('drops out-of-range citations while retaining valid source ids', () => {
+    const result = assessMemoryCandidates([
+      candidate({ sourceMessageIds: [20, 99, 21] }),
+    ], '消息正文', [20, 21]);
+
+    expect(result.rejected).toEqual([]);
+    expect(result.accepted[0]?.sourceMessageIds).toEqual([20, 21]);
+  });
 });

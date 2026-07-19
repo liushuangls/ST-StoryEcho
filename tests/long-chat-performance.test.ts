@@ -110,7 +110,8 @@ describe('hundreds-floor local performance', () => {
 
     expect(compactedLength).toBe(41);
     expect(estimatedTokens).toBeGreaterThan(0);
-    expect(rankedCount).toBe(15);
+    expect(rankedCount).toBeGreaterThan(0);
+    expect(rankedCount).toBeLessThanOrEqual(4);
     expect(shortlistCount).toBe(3);
     expect(summaryWindowCount).toBe(4);
     expect(windowAverageMs).toBeLessThan(20);

@@ -68,6 +68,13 @@ function migratePerformanceDefaults(settings: StoryEchoSettings, stored: unknown
   if (!Number.isFinite(storedVersion) || storedVersion < 2) {
     settings.extraction.targetTurnsPerChunk = DEFAULT_SETTINGS.extraction.targetTurnsPerChunk;
   }
+  const storedRecall = isRecord(storedRoot['recall']) ? storedRoot['recall'] : {};
+  if (
+    (!Number.isFinite(storedVersion) || storedVersion < 5) &&
+    Number(storedRecall['maxEvents']) === 5
+  ) {
+    settings.recall.maxEvents = DEFAULT_SETTINGS.recall.maxEvents;
+  }
   settings.version = DEFAULT_SETTINGS.version;
 }
 

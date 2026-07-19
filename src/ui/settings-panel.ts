@@ -1,5 +1,6 @@
 import { logger } from '../core/logger';
 import type {
+  ExtractionReferenceMode,
   LlmProviderId,
   RetrievalQueryMode,
   StoryEchoSettings,
@@ -99,7 +100,7 @@ function panelTemplate(): HTMLElement {
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">自动补充历史索引</span>
-              <span class="story-echo-switch-description">窗口边界需要时自动抽取一个尚未处理的历史分块</span>
+              <span class="story-echo-switch-description">窗口外累计满配置轮数后抽取一批；不足一批的原文继续保留</span>
             </div>
             <div class="story-echo-toggle">
               <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
@@ -109,6 +110,22 @@ function panelTemplate(): HTMLElement {
           <label class="story-echo-field">
             <span>每批抽取轮数</span>
             <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
+          </label>
+          <label class="story-echo-field story-echo-field-wide">
+            <span>抽取参考上下文</span>
+            <select id="story-echo-reference-mode" class="text_pole">
+              <option value="character-world-info">角色卡精简信息 + 批次命中世界书（推荐）</option>
+              <option value="character">仅角色卡精简信息</option>
+              <option value="off">关闭</option>
+            </select>
+          </label>
+          <label class="story-echo-field">
+            <span>参考上下文总预算</span>
+            <input id="story-echo-reference-tokens" class="text_pole" type="number" min="256" max="16000" step="100">
+          </label>
+          <label class="story-echo-field">
+            <span>世界书最多条目</span>
+            <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
           </label>
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
@@ -122,6 +139,8 @@ function panelTemplate(): HTMLElement {
           </div>
           <p class="story-echo-hint story-echo-field-wide">
             LLM改写会在每次需要召回时先生成一句检索查询；失败时自动回退本地双路查询。
+            “最多召回事件”只是上限；低分或与最佳结果差距明显的候选会被提前过滤。
+            抽取参考默认最多 3000 Token，只读取角色描述、性格、场景、Persona 与该历史批次直接命中的世界书；不会传入预设、system、jailbreak、示例对话或欢迎语。
           </p>
           </div>
         </details>
@@ -415,7 +434,7 @@ function panelTemplate(): HTMLElement {
           <summary>最近调试轨迹</summary>
           <pre id="story-echo-traces">调试模式关闭或尚无轨迹。</pre>
         </details>
-        <p class="story-echo-hint">调试报告不包含API Key，但会包含阶段总结、检索查询和被召回的剧情文本。</p>
+        <p class="story-echo-hint">调试报告不包含API Key，但会包含有界抽取参考预览、阶段总结、检索查询和被召回的剧情文本。</p>
       </div>
     </div>
   `;
@@ -492,6 +511,12 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-auto-extract').checked = settings.extraction.automatic;
   element<HTMLInputElement>(panel, '#story-echo-extraction-turns').value =
     String(settings.extraction.targetTurnsPerChunk);
+  element<HTMLSelectElement>(panel, '#story-echo-reference-mode').value =
+    settings.extraction.reference.mode;
+  element<HTMLInputElement>(panel, '#story-echo-reference-tokens').value =
+    String(settings.extraction.reference.maxTokens);
+  element<HTMLInputElement>(panel, '#story-echo-reference-world-info').value =
+    String(settings.extraction.reference.maxWorldInfoEntries);
   element<HTMLInputElement>(panel, '#story-echo-debug').checked = settings.debug;
   element<HTMLInputElement>(panel, '#story-echo-base-url').value = settings.llm.custom.baseUrl;
   element<HTMLInputElement>(panel, '#story-echo-model').value = settings.llm.custom.model;
@@ -570,7 +595,7 @@ function bindSettings(panel: HTMLElement): void {
 
   element<HTMLInputElement>(panel, '#story-echo-max-events').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
-      settings.recall.maxEvents = Math.max(0, Math.floor(numberValue(event.currentTarget as HTMLInputElement, 5)));
+      settings.recall.maxEvents = Math.max(0, Math.floor(numberValue(event.currentTarget as HTMLInputElement, 3)));
     });
   });
 
@@ -610,6 +635,27 @@ function bindSettings(panel: HTMLElement): void {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 5));
       settings.extraction.targetTurnsPerChunk = Math.min(20, Math.max(1, value));
+    });
+  });
+
+  element<HTMLSelectElement>(panel, '#story-echo-reference-mode').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      settings.extraction.reference.mode =
+        (event.currentTarget as HTMLSelectElement).value as ExtractionReferenceMode;
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-reference-tokens').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 3_000));
+      settings.extraction.reference.maxTokens = Math.min(16_000, Math.max(256, value));
+    });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-reference-world-info').addEventListener('change', (event) => {
+    settingsRepository.update((settings) => {
+      const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 5));
+      settings.extraction.reference.maxWorldInfoEntries = Math.min(20, Math.max(0, value));
     });
   });
 
@@ -855,7 +901,7 @@ function bindSettings(panel: HTMLElement): void {
           status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
         });
       }
-      notify.success('窗口外历史处理完成；不足 N 轮的尾部原文会继续保留。');
+      notify.success('窗口外历史处理完成；不足所配置抽取或总结批次的尾部原文会继续保留。');
       await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : '历史处理失败。');
@@ -957,6 +1003,7 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
     `记忆：active ${statusCount('active')} / resolved ${statusCount('resolved')} / superseded ${statusCount('superseded')} / invalid ${statusCount('invalid')}`,
     `阶段总结：更新${metrics.summaryUpdates}次，失败${metrics.summaryFailures}次，覆盖${metrics.summaryMessagesCovered}条消息，平均${averageSummary}ms/次`,
     `抽取：${metrics.extractionChunks}块，${metrics.candidatesExtracted}候选，失败${metrics.extractionFailures}次，平均${averageExtraction}ms/块`,
+    `抽取参考：构建${metrics.referenceContextBuilds}次，部分失败${metrics.referenceContextPartialFailures}次，累计${metrics.referenceContextTokens} Token，命中世界书${metrics.referenceWorldInfoEntries}条`,
     `整理：调用${metrics.consolidationCalls}次，失败回退${metrics.consolidationFailures}次，平均${averageConsolidation}ms`,
     `查询改写：请求${metrics.queryRewriteRequests}次，缓存命中${metrics.queryRewriteCacheHits}次，失败回退${metrics.queryRewriteFailures}次，平均${averageQueryRewrite}ms`,
     `动作：CREATE ${metrics.actions.CREATE} / MERGE ${metrics.actions.MERGE} / UPDATE ${metrics.actions.UPDATE} / RESOLVE ${metrics.actions.RESOLVE} / SUPERSEDE ${metrics.actions.SUPERSEDE} / IGNORE ${metrics.actions.IGNORE}`,

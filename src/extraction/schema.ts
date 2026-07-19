@@ -2,6 +2,7 @@ export const MEMORY_CANDIDATE_SCHEMA: Record<string, unknown> = {
         type: 'object',
         additionalProperties: false,
         required: [
+          'sourceMessageIds',
           'type',
           'scene',
           'event',
@@ -18,6 +19,11 @@ export const MEMORY_CANDIDATE_SCHEMA: Record<string, unknown> = {
           'injectionText',
         ],
         properties: {
+          sourceMessageIds: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'integer', minimum: 0 },
+          },
           type: {
             type: 'string',
             enum: [

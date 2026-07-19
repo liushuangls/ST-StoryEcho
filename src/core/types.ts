@@ -1,6 +1,7 @@
 export type WindowUnit = 'turns' | 'messages';
 export type LlmProviderId = 'main' | 'openai-compatible';
 export type RetrievalQueryMode = 'llm' | 'local';
+export type ExtractionReferenceMode = 'off' | 'character' | 'character-world-info';
 export type VectorSourceMode = 'inherit' | 'openai-compatible' | 'volcengine-multimodal';
 export type MemoryType =
   | 'event'
@@ -37,7 +38,7 @@ export interface ExternalEmbeddingSettings {
 }
 
 export interface StoryEchoSettings {
-  version: 4;
+  version: 6;
   enabled: boolean;
   debug: boolean;
   recentWindow: {
@@ -60,6 +61,11 @@ export interface StoryEchoSettings {
   extraction: {
     automatic: boolean;
     targetTurnsPerChunk: number;
+    reference: {
+      mode: ExtractionReferenceMode;
+      maxTokens: number;
+      maxWorldInfoEntries: number;
+    };
   };
   llm: {
     provider: LlmProviderId;
@@ -89,8 +95,12 @@ export interface StoryMemorySource {
 
 export interface StoryMemory {
   id: string;
+  /** Stable identity for a continuing state slot, especially commitments. */
+  logicalKey: string;
   type: MemoryType;
   source: StoryMemorySource;
+  /** Exact chat floors cited by the extraction model as evidence. */
+  sourceMessageIds: number[];
   sourceHistory: StoryMemorySource[];
   scene: {
     location?: string;
@@ -167,6 +177,10 @@ export interface StoryEchoMetrics {
   extractionChunks: number;
   extractionFailures: number;
   candidatesExtracted: number;
+  referenceContextBuilds: number;
+  referenceContextPartialFailures: number;
+  referenceContextTokens: number;
+  referenceWorldInfoEntries: number;
   consolidationCalls: number;
   consolidationFailures: number;
   actions: Record<ConsolidationOperation, number>;

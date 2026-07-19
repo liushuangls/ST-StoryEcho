@@ -26,6 +26,12 @@ export function tuneInternalGenerationSettings(value: unknown): void {
   if ('enable_thinking' in value) {
     value['enable_thinking'] = false;
   }
+  if ('temperature' in value) {
+    value['temperature'] = 0;
+  }
+  if ('top_p' in value) {
+    value['top_p'] = 1;
+  }
 }
 
 async function withLightweightMainReasoning<T>(

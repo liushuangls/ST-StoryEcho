@@ -15,6 +15,8 @@ describe('diagnostics metrics', () => {
     expect(metrics.vectorSyncFailures).toBe(0);
     expect(metrics.queryRewriteRequests).toBe(0);
     expect(metrics.queryRewriteFailures).toBe(0);
+    expect(metrics.referenceContextBuilds).toBe(0);
+    expect(metrics.referenceContextTokens).toBe(0);
   });
 
   it('keeps only the most recent 50 debug traces', () => {

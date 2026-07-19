@@ -106,6 +106,7 @@ export function deriveResidualCandidate(
     : '';
 
   return {
+    sourceMessageIds: [...target.sourceMessageIds],
     type: target.type,
     scene: { location, time, participants },
     event,

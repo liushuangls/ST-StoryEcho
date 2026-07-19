@@ -6,6 +6,7 @@ describe('parseExtractionResponse', () => {
     const result = parseExtractionResponse(`\`\`\`json
       {
         "memories": [{
+          "sourceMessageIds": [20, 21, 21],
           "type": "commitment",
           "scene": {"location": "钟楼", "time": "午夜前", "participants": ["林雨", "林雨"]},
           "event": "林雨答应午夜前不使用钥匙",
@@ -27,6 +28,7 @@ describe('parseExtractionResponse', () => {
     expect(result).toHaveLength(1);
     expect(result[0]?.importance).toBe(1);
     expect(result[0]?.scene.participants).toEqual(['林雨']);
+    expect(result[0]?.sourceMessageIds).toEqual([20, 21]);
   });
 
   it('drops invalid memory items while keeping the response usable', () => {

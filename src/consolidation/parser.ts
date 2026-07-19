@@ -1,6 +1,12 @@
 import type { ConsolidationOperation, StoryMemory } from '../core/types';
 import type { ExtractedMemoryCandidate } from '../extraction/types';
-import { normalizedFact, normalizedStateSlot } from './shortlist';
+import { normalizedFact } from './shortlist';
+import {
+  canonicalStateSlot,
+  commitmentsMatch,
+  isCommitmentCompletion,
+  matchingStateIdentities,
+} from './identity';
 import type { ConsolidationDecision } from './types';
 
 const OPERATIONS = new Set<ConsolidationOperation>([
@@ -63,13 +69,17 @@ function mergeWithMemory(
   candidate: ExtractedMemoryCandidate,
 ): ExtractedMemoryCandidate {
   const changes = new Map(memory.stateChanges.map((change) => [
-    normalizedStateSlot(change.entity, change.attribute),
+    canonicalStateSlot(change.entity, change.attribute, memory.type),
     { ...change, before: change.before ?? '' },
   ]));
   for (const change of candidate.stateChanges) {
-    changes.set(normalizedStateSlot(change.entity, change.attribute), change);
+    changes.set(canonicalStateSlot(change.entity, change.attribute, candidate.type), change);
   }
   return {
+    sourceMessageIds: [...new Set([
+      ...memory.sourceMessageIds,
+      ...candidate.sourceMessageIds,
+    ])].sort((left, right) => left - right),
     type: candidate.type,
     scene: {
       location: candidate.scene.location || memory.scene.location || '',
@@ -236,20 +246,29 @@ export function fallbackConsolidationDecisions(
       };
     }
 
-    const candidateChanges = new Map(candidate.stateChanges.map((change) => [
-      normalizedStateSlot(change.entity, change.attribute),
-      change,
-    ]));
+    if (isCommitmentCompletion(candidate)) {
+      const commitment = memories
+        .filter((memory) => commitmentsMatch(candidate, memory))
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      if (commitment) {
+        const result = mergeWithMemory(commitment, candidate);
+        result.unresolvedThreads = [...candidate.unresolvedThreads];
+        return {
+          candidateIndex,
+          operation: 'RESOLVE',
+          targetMemoryId: commitment.id,
+          reason: '同一承诺或任务已明确完成。',
+          result,
+        };
+      }
+    }
+
     const sameSlot = memories
-      .flatMap((memory) => memory.stateChanges.map((change) => ({ memory, change })))
-      .filter(({ change }) => candidateChanges.has(normalizedStateSlot(change.entity, change.attribute)))
+      .flatMap((memory) => matchingStateIdentities(candidate, memory)
+        .map((match) => ({ memory, match })))
       .sort((left, right) => right.memory.updatedAt.localeCompare(left.memory.updatedAt))[0];
     if (sameSlot) {
-      const candidateChange = candidateChanges.get(
-        normalizedStateSlot(sameSlot.change.entity, sameSlot.change.attribute),
-      );
-      const sameValue = candidateChange &&
-        normalizedFact(candidateChange.after) === normalizedFact(sameSlot.change.after);
+      const sameValue = sameSlot.match.left.after === sameSlot.match.right.after;
       return {
         candidateIndex,
         operation: sameValue ? 'MERGE' : 'SUPERSEDE',
@@ -357,6 +376,7 @@ export function parseConsolidationResponse(
     }
     if (
       decision.operation === 'IGNORE' ||
+      decision.operation === 'RESOLVE' ||
       decision.operation === 'SUPERSEDE' ||
       (decision.operation === 'MERGE' && modelDecision.operation === 'CREATE')
     ) {

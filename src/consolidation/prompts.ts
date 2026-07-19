@@ -27,6 +27,7 @@ function compactCandidate(candidate: ExtractedMemoryCandidate, candidateIndex: n
 function compactMemory(memory: StoryMemory): object {
   return {
     id: memory.id,
+    logicalKey: memory.logicalKey,
     type: memory.type,
     status: memory.status,
     scene: memory.scene,

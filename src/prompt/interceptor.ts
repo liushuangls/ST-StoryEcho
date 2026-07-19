@@ -8,7 +8,6 @@ import type {
 } from '../core/types';
 import { emitDiagnosticsUpdated } from '../debug/events';
 import { recordDebugTrace } from '../debug/metrics';
-import { planNextChunk } from '../extraction/chunk-planner';
 import { extractionService } from '../extraction/service';
 import { isInternalGeneration } from '../llm/internal-generation';
 import { MemoryRepository } from '../memory/repository';
@@ -162,15 +161,7 @@ export async function storyEchoGenerateInterceptor(
     const desiredCoveredThrough = minimumSourceWindow.retainedStartIndex - 1;
     if (state.indexedThroughMessageId < desiredCoveredThrough && settings.extraction.automatic) {
       try {
-        const chunk = planNextChunk(
-          sourceChat,
-          state.indexedThroughMessageId + 1,
-          desiredCoveredThrough,
-          settings.extraction.targetTurnsPerChunk,
-        );
-        if (chunk) {
-          state = await extractionService.processThrough(chunk.endMessageId);
-        }
+        state = await extractionService.processNextThrough(desiredCoveredThrough);
       } catch (error) {
         warnings.push('生成前补充剧情索引失败，未覆盖原文将继续保留。');
         logger.warn('生成前补充剧情索引失败。', error);

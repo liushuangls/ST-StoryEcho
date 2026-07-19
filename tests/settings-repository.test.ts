@@ -75,7 +75,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 4,
+      version: 6,
       extraction: { automatic: true, targetTurnsPerChunk: 5 },
       summary: {
         enabled: true,
@@ -105,7 +105,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 4,
+      version: 6,
       recentWindow: { size: 12, unit: 'turns' },
       summary: {
         enabled: true,
@@ -113,6 +113,54 @@ describe('SettingsRepository credential persistence', () => {
         targetTurnsPerUpdate: 8,
         windowSize: 4,
         maxTokens: 2_048,
+      },
+    });
+  });
+
+  it('moves the old default recall count from five to three without overriding custom counts', () => {
+    const extensionSettings: Record<string, unknown> = {
+      story_echo: {
+        version: 4,
+        recall: { maxEvents: 5 },
+      },
+    };
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    expect(new SettingsRepository().get()).toMatchObject({
+      version: 6,
+      recall: { maxEvents: 3 },
+    });
+
+    extensionSettings['story_echo'] = {
+      version: 4,
+      recall: { maxEvents: 7 },
+    };
+    expect(new SettingsRepository().get().recall.maxEvents).toBe(7);
+  });
+
+  it('adds the controlled extraction reference defaults without overriding existing extraction settings', () => {
+    const extensionSettings: Record<string, unknown> = {
+      story_echo: {
+        version: 5,
+        extraction: { automatic: false, targetTurnsPerChunk: 8 },
+      },
+    };
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    expect(new SettingsRepository().get()).toMatchObject({
+      version: 6,
+      extraction: {
+        automatic: false,
+        targetTurnsPerChunk: 8,
+        reference: {
+          mode: 'character-world-info',
+          maxTokens: 3_000,
+          maxWorldInfoEntries: 5,
+        },
       },
     });
   });

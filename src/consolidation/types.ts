@@ -5,6 +5,8 @@ export interface ConsolidationDecision {
   candidateIndex: number;
   operation: ConsolidationOperation;
   targetMemoryId?: string;
+  /** Extra stale/duplicate memories invalidated by deterministic slot matching. */
+  additionalTargetMemoryIds?: string[];
   reason: string;
   result: ExtractedMemoryCandidate;
 }

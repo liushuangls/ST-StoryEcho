@@ -1,6 +1,7 @@
 import { allocateVectorHash, sha256 } from '../core/hash';
 import type { ConsolidationOperation, StoryMemory, StoryMemorySource } from '../core/types';
 import { createUuid } from '../core/uuid';
+import { deriveLogicalKey } from '../consolidation/identity';
 import type { ExtractedMemoryCandidate } from './types';
 
 export interface MemoryFactoryOptions {
@@ -9,6 +10,7 @@ export interface MemoryFactoryOptions {
   sourceHistory?: StoryMemorySource[];
   supersedesMemoryIds?: string[];
   lastOperation?: ConsolidationOperation;
+  logicalKey?: string;
 }
 
 export async function createStoryMemory(
@@ -28,8 +30,12 @@ export async function createStoryMemory(
 
   return {
     id,
+    logicalKey: options.logicalKey ?? deriveLogicalKey(candidate),
     type: candidate.type,
     source,
+    sourceMessageIds: [...new Set(candidate.sourceMessageIds)]
+      .filter((messageId) => Number.isInteger(messageId) && messageId >= 0)
+      .sort((left, right) => left - right),
     sourceHistory: options.sourceHistory ?? [source],
     scene: {
       ...(location ? { location } : {}),

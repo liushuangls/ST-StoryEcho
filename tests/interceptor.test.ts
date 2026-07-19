@@ -124,6 +124,26 @@ describe('StoryEcho request ordering', () => {
     expect(stored.metrics.generationsDeferred).toBe(1);
   });
 
+  it('keeps raw history and skips extraction until the configured batch has accumulated', async () => {
+    const { context, settings, state } = await installContext({
+      withMemory: false,
+      summaryCoveredThrough: -1,
+    });
+    settings.extraction.automatic = true;
+    settings.extraction.targetTurnsPerChunk = 5;
+    settings.summary.enabled = false;
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    state.indexedPrefixHash = '';
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(context.generateRaw).not.toHaveBeenCalled();
+    expect(context.chatMetadata[MODULE_ID].indexedThroughMessageId).toBe(-1);
+    expect(promptChat).toEqual(sourceChat);
+  });
+
   it('trims only the covered prefix and keeps unsummarized raw beyond the minimum window', async () => {
     const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 0 });
     const promptChat = structuredClone(sourceChat);

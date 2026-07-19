@@ -9,6 +9,7 @@ export function candidate(
   overrides: Partial<ExtractedMemoryCandidate> = {},
 ): ExtractedMemoryCandidate {
   return {
+    sourceMessageIds: [1, 2],
     type: 'state_change',
     scene: { location: '', time: '', participants: ['林雨'] },
     event: '林雨获得银色钥匙',
@@ -30,8 +31,10 @@ export function memory(overrides: Partial<StoryMemory> = {}): StoryMemory {
   const source = { startMessageId: 1, endMessageId: 2, sourceHash: 'source-1' };
   return {
     id: 'mem-1',
+    logicalKey: 'holder:银色钥匙',
     type: 'state_change',
     source,
+    sourceMessageIds: [1, 2],
     sourceHistory: [source],
     scene: { participants: ['林雨'] },
     event: '林雨获得银色钥匙',

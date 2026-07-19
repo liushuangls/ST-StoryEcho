@@ -42,6 +42,15 @@ function textArray(value: unknown, maxItems = 50): string[] {
     : [];
 }
 
+function integerArray(value: unknown, maxItems = 50): number[] {
+  return Array.isArray(value)
+    ? [...new Set(value
+      .slice(0, maxItems)
+      .map((item) => Number(item))
+      .filter((item) => Number.isInteger(item) && item >= 0))]
+    : [];
+}
+
 function jsonPayload(raw: string): string {
   const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   const objectStart = trimmed.indexOf('{');
@@ -125,6 +134,9 @@ export function parseMemoryCandidate(value: unknown): ExtractedMemoryCandidate |
 
     const importanceValue = Number(item['importance']);
     return {
+      sourceMessageIds: integerArray(
+        item['sourceMessageIds'] ?? item['source_message_ids'] ?? item['messageIds'],
+      ),
       type,
       scene: {
         location: text(scene['location'], 300),

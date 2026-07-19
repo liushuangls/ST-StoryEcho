@@ -5,6 +5,7 @@ import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../src/vector/config';
 import { MODULE_ID } from '../src/core/constants';
 import { MemoryRepository } from '../src/memory/repository';
+import type { StoryEchoSettings } from '../src/core/types';
 
 describe('ExtractionService vector synchronization', () => {
   afterEach(() => {
@@ -12,7 +13,7 @@ describe('ExtractionService vector synchronization', () => {
   });
 
   it('does not enumerate the complete vector collection when nothing is pending', async () => {
-    const settings = structuredClone(DEFAULT_SETTINGS);
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     const saveMetadata = vi.fn(async () => undefined);
     const context = {
       chat: [],
@@ -44,13 +45,67 @@ describe('ExtractionService vector synchronization', () => {
   });
 
   it('allows a complete structured response for fact-dense five-turn chunks', async () => {
-    const settings = structuredClone(DEFAULT_SETTINGS);
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    const state = chatState([]);
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    const generateRaw = vi.fn(async (_options: unknown) => '{"memories":[]}');
+    const fiveTurns = Array.from({ length: 5 }, (_, index) => [
+      { is_user: true, mes: `第${index + 1}轮用户剧情` },
+      { is_user: false, mes: `第${index + 1}轮AI剧情` },
+    ]).flat();
+    const context = {
+      chat: fiveTurns,
+      chatId: 'chat-id',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'chat-id',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+      getCharacterCardFields: () => ({
+        description: '顾青是熟悉机关的侦探。',
+        system: '不得进入抽取参考的角色系统提示。',
+      }),
+      getSortedWorldInfoEntries: vi.fn(async () => [{
+        world: '测试世界书',
+        uid: 1,
+        key: ['第1轮用户剧情'],
+        content: '该剧情术语来自测试世界书。',
+      }]),
+      getTokenCountAsync: vi.fn(async (text: string) => Math.ceil(text.length / 2)),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    state.vectorFingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
+
+    await expect(new ExtractionService().processThrough(9)).resolves.toMatchObject({
+      indexedThroughMessageId: 9,
+    });
+    expect(generateRaw).toHaveBeenCalledOnce();
+    expect(generateRaw.mock.calls[0]?.[0]).toMatchObject({ responseLength: 8_192 });
+    const prompt = String((generateRaw.mock.calls[0]?.[0] as { prompt?: string })?.prompt ?? '');
+    expect(prompt).toContain('顾青是熟悉机关的侦探');
+    expect(prompt).toContain('该剧情术语来自测试世界书');
+    expect(prompt).not.toContain('不得进入抽取参考的角色系统提示');
+  });
+
+  it('waits without calling the LLM until the configured turn batch is complete', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.debug = true;
+    settings.extraction.targetTurnsPerChunk = 5;
     const state = chatState([]);
     state.indexedThroughMessageId = -1;
     state.indexedThroughHash = '';
     const generateRaw = vi.fn(async (_options: unknown) => '{"memories":[]}');
     const context = {
-      chat: [{ is_user: true, mes: '一条需要抽取的剧情消息' }],
+      chat: Array.from({ length: 4 }, (_, index) => [
+        { is_user: true, mes: `第${index + 1}轮用户剧情` },
+        { is_user: false, mes: `第${index + 1}轮AI剧情` },
+      ]).flat(),
       chatId: 'chat-id',
       extensionSettings: {
         story_echo: settings,
@@ -66,11 +121,50 @@ describe('ExtractionService vector synchronization', () => {
     vi.stubGlobal('SillyTavern', { getContext: () => context });
     state.vectorFingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
 
-    await expect(new ExtractionService().processThrough(0)).resolves.toMatchObject({
-      indexedThroughMessageId: 0,
-    });
+    const result = await new ExtractionService().processThrough(7);
+
+    expect(result?.indexedThroughMessageId).toBe(-1);
+    expect(result?.debugTraces.at(-1)?.message).toContain('等待凑满');
+    expect(generateRaw).not.toHaveBeenCalled();
+  });
+
+  it('may close an oversized chunk early but never splits its user and assistant pair', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.extraction.targetTurnsPerChunk = 5;
+    const state = chatState([]);
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    const generateRaw = vi.fn(async (_options: unknown) => '{"memories":[]}');
+    const context = {
+      chat: [
+        { is_user: true, mes: '甲'.repeat(20_000) },
+        { is_user: false, mes: '乙'.repeat(20_000) },
+        { is_user: true, mes: '下一轮用户剧情' },
+        { is_user: false, mes: '下一轮AI剧情' },
+      ],
+      chatId: 'chat-id',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'chat-id',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    state.vectorFingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
+
+    const result = await new ExtractionService().processNextThrough(3);
+
+    expect(result?.indexedThroughMessageId).toBe(1);
     expect(generateRaw).toHaveBeenCalledOnce();
-    expect(generateRaw.mock.calls[0]?.[0]).toMatchObject({ responseLength: 8_192 });
+    const prompt = String(generateRaw.mock.calls[0]?.[0] &&
+      (generateRaw.mock.calls[0]![0] as { prompt?: string }).prompt);
+    expect(prompt).toContain('消息 0 到 1');
+    expect(prompt).not.toContain('下一轮用户剧情');
   });
 
   it('invalidates indexed memories when an indexed floor is edited or deleted', async () => {

@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     maxTokens: 1_600,
   },
   recall: {
-    maxEvents: 5,
+    maxEvents: 3,
     maxTokens: 1200,
     scoreThreshold: 0.25,
     queryMode: 'llm',
@@ -25,6 +25,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
   extraction: {
     automatic: true,
     targetTurnsPerChunk: 5,
+    reference: {
+      mode: 'character-world-info',
+      maxTokens: 3_000,
+      maxWorldInfoEntries: 5,
+    },
   },
   llm: {
     provider: 'main',

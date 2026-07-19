@@ -1,10 +1,62 @@
 import type { TavernChatMessage } from '../core/types';
 
+export interface SillyTavernCharacterCardFields {
+  description?: string;
+  personality?: string;
+  persona?: string;
+  scenario?: string;
+  system?: string;
+  jailbreak?: string;
+  charDepthPrompt?: string;
+  creatorNotes?: string;
+  mesExamples?: string;
+  firstMessage?: string;
+  alternateGreetings?: string[];
+}
+
+export interface SillyTavernCharacter {
+  name?: string;
+  avatar?: string;
+  description?: string;
+  personality?: string;
+  scenario?: string;
+  data?: Record<string, unknown>;
+}
+
+export interface SillyTavernWorldInfoEntry {
+  uid?: number | string;
+  world?: string;
+  comment?: string;
+  content?: string;
+  key?: string[];
+  keysecondary?: string[];
+  selective?: boolean;
+  selectiveLogic?: number;
+  disable?: boolean;
+  constant?: boolean;
+  caseSensitive?: boolean;
+  matchWholeWords?: boolean;
+  triggers?: string[];
+  decorators?: string[];
+  order?: number;
+  characterFilter?: {
+    names?: string[];
+    tags?: string[];
+    isExclude?: boolean;
+  };
+}
+
 export interface SillyTavernContext {
   chat: TavernChatMessage[];
   chatId?: string;
   characterId?: number;
   groupId?: string;
+  name1?: string;
+  name2?: string;
+  characters?: SillyTavernCharacter[];
+  groups?: Array<Record<string, unknown>>;
+  tagMap?: Record<string, string[]>;
+  maxContext?: number;
   extensionSettings: Record<string, unknown>;
   chatMetadata: Record<string, unknown>;
   eventSource?: {
@@ -23,6 +75,11 @@ export interface SillyTavernContext {
   }): Promise<string>;
   getRequestHeaders?(): Record<string, string>;
   getCurrentChatId?(): string | null;
+  getCharacterCardFields?(options?: { chid?: number }): SillyTavernCharacterCardFields;
+  getTokenCountAsync?(text: string, padding?: number): Promise<number>;
+  substituteParams?(text: string): string;
+  /** Test/future API seam; current SillyTavern builds expose this from world-info.js. */
+  getSortedWorldInfoEntries?(): Promise<SillyTavernWorldInfoEntry[]>;
 }
 
 interface SillyTavernGlobal {

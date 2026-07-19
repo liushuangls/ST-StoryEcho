@@ -38,6 +38,7 @@ function normalizedCandidate(
   candidate: ExtractedMemoryCandidate,
   sourceText: string,
   removedUnsupportedThreads: string[],
+  validMessageIds?: ReadonlySet<number>,
 ): ExtractedMemoryCandidate {
   const keepUnresolved = !sourceText || EXPLICIT_UNRESOLVED_CUE.test(sourceText);
   if (!keepUnresolved && candidate.unresolvedThreads.length > 0) {
@@ -45,6 +46,9 @@ function normalizedCandidate(
   }
   const normalized = {
     ...candidate,
+    sourceMessageIds: [...new Set(candidate.sourceMessageIds)]
+      .filter((messageId) => !validMessageIds || validMessageIds.has(messageId))
+      .sort((left, right) => left - right),
     unresolvedThreads: keepUnresolved ? candidate.unresolvedThreads : [],
   };
   return {
@@ -53,7 +57,13 @@ function normalizedCandidate(
   };
 }
 
-function rejectionReason(candidate: ExtractedMemoryCandidate): string | null {
+function rejectionReason(
+  candidate: ExtractedMemoryCandidate,
+  requireSourceMessageIds: boolean,
+): string | null {
+  if (requireSourceMessageIds && candidate.sourceMessageIds.length === 0) {
+    return `缺少有效源消息ID：${candidate.event.slice(0, 120)}`;
+  }
   if (
     candidate.type === 'event' &&
     candidate.importance < 0.6 &&
@@ -75,14 +85,21 @@ function rejectionReason(candidate: ExtractedMemoryCandidate): string | null {
 export function assessMemoryCandidates(
   candidates: ExtractedMemoryCandidate[],
   sourceText = '',
+  validMessageIds?: readonly number[],
 ): MemoryCandidateAssessment {
   const accepted: ExtractedMemoryCandidate[] = [];
   const rejected: RejectedMemoryCandidate[] = [];
   const removedUnsupportedThreads: string[] = [];
+  const validMessageIdSet = validMessageIds ? new Set(validMessageIds) : undefined;
 
   for (const candidate of candidates) {
-    const normalized = normalizedCandidate(candidate, sourceText, removedUnsupportedThreads);
-    const reason = rejectionReason(normalized);
+    const normalized = normalizedCandidate(
+      candidate,
+      sourceText,
+      removedUnsupportedThreads,
+      validMessageIdSet,
+    );
+    const reason = rejectionReason(normalized, Boolean(validMessageIds));
     if (reason) {
       rejected.push({ candidate: normalized, reason });
       continue;

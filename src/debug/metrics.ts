@@ -25,6 +25,10 @@ export function createMetrics(): StoryEchoMetrics {
     extractionChunks: 0,
     extractionFailures: 0,
     candidatesExtracted: 0,
+    referenceContextBuilds: 0,
+    referenceContextPartialFailures: 0,
+    referenceContextTokens: 0,
+    referenceWorldInfoEntries: 0,
     consolidationCalls: 0,
     consolidationFailures: 0,
     actions: {

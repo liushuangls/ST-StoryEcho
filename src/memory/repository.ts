@@ -7,6 +7,7 @@ import type {
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { createUuid } from '../core/uuid';
+import { deriveLogicalKey } from '../consolidation/identity';
 
 function createCollectionId(chatUuid: string): string {
   return `${VECTOR_COLLECTION_PREFIX}_${chatUuid}_v${CHAT_STATE_VERSION}`;
@@ -39,8 +40,11 @@ function createState(ownerChatId: string): StoryEchoChatState {
 
 type StoredMemory = Omit<
   StoryMemory,
-  'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'
-> & Partial<Pick<StoryMemory, 'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'>>;
+  'logicalKey' | 'sourceMessageIds' | 'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'
+> & Partial<Pick<
+  StoryMemory,
+  'logicalKey' | 'sourceMessageIds' | 'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'
+>>;
 
 interface StoredStageSummary {
   entries?: unknown;
@@ -211,6 +215,16 @@ function normalizeState(stored: StoredState): StoryEchoChatState {
     ...stored,
     memories: stored.memories.map((memory) => ({
       ...memory,
+      logicalKey: typeof memory.logicalKey === 'string' && memory.logicalKey.trim()
+        ? memory.logicalKey.trim()
+        : deriveLogicalKey(memory),
+      sourceMessageIds: Array.isArray(memory.sourceMessageIds) && memory.sourceMessageIds.length > 0
+        ? [...new Set(memory.sourceMessageIds
+          .map((messageId) => Number(messageId))
+          .filter((messageId) => Number.isInteger(messageId) && messageId >= 0))]
+        : memory.source.startMessageId === memory.source.endMessageId
+          ? [memory.source.startMessageId]
+          : [memory.source.startMessageId, memory.source.endMessageId],
       unresolvedThreads: memory.status === 'resolved'
         ? []
         : Array.isArray(memory.unresolvedThreads) ? memory.unresolvedThreads : [],
@@ -281,6 +295,10 @@ export class MemoryRepository {
         (memory) =>
           !Array.isArray(memory.sourceHistory) ||
           memory.sourceHistory.length === 0 ||
+          typeof memory.logicalKey !== 'string' ||
+          !memory.logicalKey.trim() ||
+          !Array.isArray(memory.sourceMessageIds) ||
+          memory.sourceMessageIds.length === 0 ||
           !Array.isArray(memory.supersedesMemoryIds) ||
           !Array.isArray(memory.unresolvedThreads) ||
           !memory.lastOperation ||

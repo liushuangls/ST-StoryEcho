@@ -50,12 +50,16 @@ describe('MainLlmProvider', () => {
         reasoning_effort: 'max',
         thinking: { type: 'enabled', budget_tokens: 8_000 },
         enable_thinking: true,
+        temperature: 1.1,
+        top_p: 0.85,
       };
       handler?.(settings);
       expect(settings).toEqual({
         reasoning_effort: 'low',
         thinking: { type: 'disabled', budget_tokens: 8_000 },
         enable_thinking: false,
+        temperature: 0,
+        top_p: 1,
       });
       return '{"memories":[]}';
     });
@@ -73,9 +77,9 @@ describe('MainLlmProvider', () => {
     expect(eventSource.off).toHaveBeenCalledWith('settings-ready', expect.any(Function));
   });
 
-  it('leaves providers without reasoning controls unchanged', () => {
+  it('uses deterministic sampling even when reasoning controls are absent', () => {
     const settings = { temperature: 0.4 };
     tuneInternalGenerationSettings(settings);
-    expect(settings).toEqual({ temperature: 0.4 });
+    expect(settings).toEqual({ temperature: 0 });
   });
 });

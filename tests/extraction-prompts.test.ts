@@ -24,5 +24,23 @@ describe('buildExtractionPrompt', () => {
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('该封闭名单优先');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('必须输出两条');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('多个独立entity或attribute必须拆成多条记忆');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('完成状态');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('同一个完整标识');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('sourceMessageIds');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('reference_context没有messageId');
+  });
+
+  it('places controlled reference context before the evidence messages', () => {
+    const prompt = buildExtractionPrompt(
+      [{ is_user: true, mes: '聊天正文' }],
+      0,
+      0,
+      8,
+      '<story_echo_reference_context>只用于消歧</story_echo_reference_context>',
+    );
+
+    expect(prompt.indexOf('<story_echo_reference_context>')).toBeLessThan(
+      prompt.indexOf('<history_messages>'),
+    );
   });
 });

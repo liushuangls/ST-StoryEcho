@@ -1,6 +1,7 @@
 import type { MemoryType, TruthStatus } from '../core/types';
 
 export interface ExtractedMemoryCandidate {
+  sourceMessageIds: number[];
   type: MemoryType;
   scene: {
     location: string;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TavernChatMessage } from '../src/core/types';
-import { planNextChunk } from '../src/extraction/chunk-planner';
+import { countCompletedTurns, planNextChunk } from '../src/extraction/chunk-planner';
 
 const messages: TavernChatMessage[] = [
   { is_user: false, mes: 'greeting' },
@@ -13,6 +13,10 @@ const messages: TavernChatMessage[] = [
 ];
 
 describe('planNextChunk', () => {
+  it('counts only complete user plus assistant turns', () => {
+    expect(countCompletedTurns(messages)).toBe(3);
+    expect(countCompletedTurns([...messages, { is_user: true, mes: 'unfinished' }])).toBe(3);
+  });
   it('ends before the user message that begins the next turn', () => {
     expect(planNextChunk(messages, 0, 6, 2)).toEqual({
       startMessageId: 0,
@@ -36,7 +40,7 @@ describe('planNextChunk', () => {
 
     expect(planNextChunk(longMessages, 0, 2, 5, 1_000)).toEqual({
       startMessageId: 0,
-      endMessageId: 0,
+      endMessageId: 1,
     });
   });
 });

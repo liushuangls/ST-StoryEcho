@@ -6,8 +6,10 @@ import { rankMemories } from '../src/retrieval/ranker';
 function memory(overrides: Partial<StoryMemory>): StoryMemory {
   return {
     id: 'mem-1',
+    logicalKey: 'fact:林雨银色钥匙钟楼钥匙',
     type: 'event',
     source: { startMessageId: 1, endMessageId: 2, sourceHash: 'source' },
+    sourceMessageIds: [1, 2],
     sourceHistory: [{ startMessageId: 1, endMessageId: 2, sourceHash: 'source' }],
     scene: { participants: [] },
     event: '林雨获得银色钥匙',
@@ -146,6 +148,35 @@ describe('rankMemories', () => {
       scene: [],
     });
 
-    expect(result.map((item) => item.id)).toEqual(['disproved-rumor', 'unrelated-active']);
+    expect(result.map((item) => item.id)).toEqual(['disproved-rumor']);
+  });
+
+  it('drops the weak vector tail after a clear best match while retaining pinned memories', () => {
+    const memories = Array.from({ length: 6 }, (_, index) => memory({
+      id: `vector-${index}`,
+      vectorHash: index + 1,
+      entities: [],
+      aliases: [],
+      ...(index === 5 ? { pinned: true } : {}),
+    }));
+    const plan = buildRetrievalQueryPlan([{ is_user: true, mes: '追查完全不同的旧线索' }], 0);
+    const result = rankMemories(plan, memories, {
+      intent: memories.slice(0, 5).map((item, rank) => ({
+        hash: item.vectorHash,
+        text: '',
+        index: rank,
+        rank,
+      })),
+      scene: [],
+    });
+
+    expect(result.map((item) => item.id)).toEqual([
+      'vector-5',
+      'vector-0',
+      'vector-1',
+      'vector-2',
+      'vector-3',
+    ]);
+    expect(result.map((item) => item.id)).not.toContain('vector-4');
   });
 });

@@ -8,10 +8,11 @@ import { recordDebugTrace } from '../debug/metrics';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import { buildExtractionReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
-import { planNextChunk } from './chunk-planner';
+import { countCompletedTurns, planNextChunk } from './chunk-planner';
 import { atomicizeMemoryCandidates } from './atomicize';
 import { parseExtractionResponse } from './parser';
 import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from './prompts';
@@ -24,6 +25,11 @@ export interface ExtractionProgress {
   targetEndMessageId: number;
   newMemoryCount: number;
   changedMemoryCount: number;
+}
+
+interface ExtractionRunOptions {
+  maxChunks: number;
+  onProgress?: (progress: ExtractionProgress) => void;
 }
 
 function sourcePayload(messages: TavernChatMessage[], sourceStartMessageId: number): string {
@@ -59,10 +65,30 @@ export class ExtractionService {
     targetEndMessageId: number,
     onProgress?: (progress: ExtractionProgress) => void,
   ): Promise<StoryEchoChatState | null> {
+    return this.enqueue(targetEndMessageId, {
+      maxChunks: Number.MAX_SAFE_INTEGER,
+      ...(onProgress ? { onProgress } : {}),
+    });
+  }
+
+  processNextThrough(
+    targetEndMessageId: number,
+    onProgress?: (progress: ExtractionProgress) => void,
+  ): Promise<StoryEchoChatState | null> {
+    return this.enqueue(targetEndMessageId, {
+      maxChunks: 1,
+      ...(onProgress ? { onProgress } : {}),
+    });
+  }
+
+  private enqueue(
+    targetEndMessageId: number,
+    options: ExtractionRunOptions,
+  ): Promise<StoryEchoChatState | null> {
     const requestedChatId = getCurrentChatId();
     const operation = this.queue.then(
-      () => this.processThroughNow(targetEndMessageId, requestedChatId, onProgress),
-      () => this.processThroughNow(targetEndMessageId, requestedChatId, onProgress),
+      () => this.processThroughNow(targetEndMessageId, requestedChatId, options),
+      () => this.processThroughNow(targetEndMessageId, requestedChatId, options),
     );
     this.queue = operation.then(() => undefined, () => undefined);
     return operation;
@@ -216,7 +242,7 @@ export class ExtractionService {
   private async processThroughNow(
     targetEndMessageId: number,
     requestedChatId: string | null,
-    onProgress?: (progress: ExtractionProgress) => void,
+    options: ExtractionRunOptions,
   ): Promise<StoryEchoChatState | null> {
     if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
       throw new Error('等待抽取期间聊天发生切换，已取消任务。');
@@ -244,7 +270,8 @@ export class ExtractionService {
     }
 
     try {
-      while (start <= maximumEnd) {
+      let processedChunks = 0;
+      while (start <= maximumEnd && processedChunks < options.maxChunks) {
         const chunkStartedAt = performance.now();
         const chunk = planNextChunk(
           context.chat,
@@ -264,11 +291,67 @@ export class ExtractionService {
             ...(message.name ? { name: message.name } : {}),
             mes: message.mes,
           }));
+        const fullTurnBatch = countCompletedTurns(snapshot) >=
+          Math.max(1, Math.floor(settings.extraction.targetTurnsPerChunk));
+        // A normal tail waits until the configured number of complete
+        // user+assistant turns has accumulated. The sole early exception is a
+        // chunk cut by the hard character limit, otherwise an unusually long
+        // reply could block indexing forever.
+        const stoppedBeforeRequestedEnd = chunk.endMessageId < maximumEnd;
+        if (!fullTurnBatch && !stoppedBeforeRequestedEnd) {
+          recordDebugTrace(state, settings.debug, 'extraction', '剧情抽取等待凑满配置批次。', {
+            startMessageId: chunk.startMessageId,
+            availableEndMessageId: chunk.endMessageId,
+            completedTurns: countCompletedTurns(snapshot),
+            targetTurns: settings.extraction.targetTurnsPerChunk,
+          });
+          break;
+        }
         const chunkSourceHash = await sha256(sourcePayload(snapshot, chunk.startMessageId));
+
+        let referenceContext = '';
+        try {
+          const reference = await buildExtractionReferenceContext(
+            snapshot,
+            settings.extraction.reference,
+            context,
+          );
+          referenceContext = reference.text;
+          if (reference.text) {
+            state.metrics.referenceContextBuilds += 1;
+            state.metrics.referenceContextTokens += reference.tokenCount;
+            state.metrics.referenceWorldInfoEntries += reference.worldInfoEntries.length;
+          }
+          if (reference.warnings.length > 0) {
+            state.metrics.referenceContextPartialFailures += 1;
+          }
+          recordDebugTrace(state, settings.debug, 'extraction', '抽取参考上下文已构建。', {
+            range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+            mode: settings.extraction.reference.mode,
+            tokens: reference.tokenCount,
+            characterFields: reference.characterFields.join(',') || '-',
+            worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
+            truncated: reference.truncated,
+            warnings: reference.warnings.join(' | ') || '-',
+            referencePreview: reference.text.slice(0, 4_000) || '-',
+          });
+        } catch (error) {
+          state.metrics.referenceContextPartialFailures += 1;
+          recordDebugTrace(state, settings.debug, 'error', '抽取参考上下文构建失败，继续仅使用聊天正文。', {
+            range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
 
         const raw = await completeWithConfiguredProvider(settings, {
           system: EXTRACTION_SYSTEM_PROMPT,
-          prompt: buildExtractionPrompt(snapshot, 0, snapshot.length - 1, chunk.startMessageId),
+          prompt: buildExtractionPrompt(
+            snapshot,
+            0,
+            snapshot.length - 1,
+            chunk.startMessageId,
+            referenceContext,
+          ),
           jsonSchema: EXTRACTION_SCHEMA,
           // A five-turn chunk can legitimately contain several independent plot facts.
           // Leave enough room for the complete structured response: truncating JSON loses
@@ -290,6 +373,9 @@ export class ExtractionService {
         const assessment = assessMemoryCandidates(
           atomicCandidates,
           snapshot.map((message) => message.mes).join('\n'),
+          snapshot.flatMap((message, offset) => (
+            message.is_system ? [] : [chunk.startMessageId + offset]
+          )),
         );
         const candidates = assessment.accepted;
         recordDebugTrace(state, settings.debug, 'extraction', '剧情候选抽取完成。', {
@@ -374,7 +460,10 @@ export class ExtractionService {
             .map((decision) => [
               decision.candidateIndex,
               decision.operation,
-              decision.targetMemoryId ?? '-',
+              [
+                decision.targetMemoryId,
+                ...(decision.additionalTargetMemoryIds ?? []),
+              ].filter(Boolean).join(',') || '-',
               decision.reason,
             ].join(':'))
             .join(' | ')
@@ -398,13 +487,14 @@ export class ExtractionService {
           logger.warn('剧情记忆已保存，但向量同步失败，稍后将重试。', error);
         }
 
-        onProgress?.({
+        options.onProgress?.({
           startMessageId: chunk.startMessageId,
           endMessageId: chunk.endMessageId,
           targetEndMessageId: maximumEnd,
           newMemoryCount: applied.created.length,
           changedMemoryCount: applied.changed.length,
         });
+        processedChunks += 1;
         start = chunk.endMessageId + 1;
       }
     } catch (error) {

@@ -2,7 +2,7 @@ import { sha256 } from '../core/hash';
 import { logger } from '../core/logger';
 import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
 import { recordDebugTrace } from '../debug/metrics';
-import { planNextChunk } from '../extraction/chunk-planner';
+import { countCompletedTurns, planNextChunk } from '../extraction/chunk-planner';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
@@ -36,23 +36,6 @@ function sourcePayload(messages: TavernChatMessage[], sourceStartMessageId: numb
     name: message.name || '',
     content: message.mes,
   })));
-}
-
-function countCompletedTurns(messages: TavernChatMessage[]): number {
-  let waitingForAssistant = false;
-  let completed = 0;
-  for (const message of messages) {
-    if (message.is_system) {
-      continue;
-    }
-    if (message.is_user) {
-      waitingForAssistant = true;
-    } else if (waitingForAssistant) {
-      completed += 1;
-      waitingForAssistant = false;
-    }
-  }
-  return completed;
 }
 
 function normalizeSummary(raw: string): string {

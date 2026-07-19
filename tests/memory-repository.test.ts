@@ -15,6 +15,8 @@ describe('MemoryRepository migration', () => {
     delete legacyMemory['sourceHistory'];
     delete legacyMemory['supersedesMemoryIds'];
     delete legacyMemory['lastOperation'];
+    delete legacyMemory['logicalKey'];
+    delete legacyMemory['sourceMessageIds'];
     const saveMetadata = vi.fn(async () => undefined);
     const context: SillyTavernContext = {
       chat: [],
@@ -65,6 +67,8 @@ describe('MemoryRepository migration', () => {
     expect(state?.memories[0]?.sourceHistory).toEqual([state?.memories[0]?.source]);
     expect(state?.memories[0]?.supersedesMemoryIds).toEqual([]);
     expect(state?.memories[0]?.lastOperation).toBe('CREATE');
+    expect(state?.memories[0]?.logicalKey).toBe('holder:银色钥匙');
+    expect(state?.memories[0]?.sourceMessageIds).toEqual([1, 2]);
     expect(state?.memories[0]?.unresolvedThreads).toEqual([]);
     expect(state?.lastInspection?.durationMs).toBe(0);
     expect(state?.lastInspection?.vectorResultCount).toBe(0);
