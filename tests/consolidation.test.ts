@@ -188,6 +188,23 @@ describe('event consolidation', () => {
     });
   });
 
+  it('rejects incomplete or malformed LLM actions so the structured layer can retry', () => {
+    const next = candidate();
+    expect(() => parseConsolidationResponse(
+      JSON.stringify({ actions: [] }),
+      [next],
+      [memory()],
+    )).toThrow(/各返回一次动作/);
+    expect(() => parseConsolidationResponse(JSON.stringify({
+      actions: [{
+        candidateIndex: 0,
+        operation: 'MERGE',
+        targetMemoryId: 'missing-memory',
+        reason: '错误目标',
+      }],
+    }), [next], [memory()])).toThrow(/无效目标/);
+  });
+
   it('ignores a model-supplied rewritten result and derives merged facts locally', () => {
     const next = candidate({ consequence: '林雨答应暂时保管银色钥匙。' });
     const raw = JSON.stringify({

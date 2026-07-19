@@ -15,17 +15,18 @@ describe('buildExtractionPrompt', () => {
     expect(prompt).not.toContain('hidden system note');
   });
 
-  it('spells out the fixed candidate field names for providers that ignore JSON Schema', () => {
-    expect(EXTRACTION_SYSTEM_PROMPT).toContain('type、scene、event');
+  it('spells out classified roots and critical rules for providers that ignore JSON Schema', () => {
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain(
+      'episodes、stateFacts、relationships、commitments、revelations、clues六个数组',
+    );
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('truthStatus只能是');
-    expect(EXTRACTION_SYSTEM_PROMPT).toContain('不要改名为secret、content、confidence');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('只填写各分类要求的事实字段');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('importance低于0.6的普通事件不要输出');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('一闪而过的猜测');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('该封闭名单优先');
-    expect(EXTRACTION_SYSTEM_PROMPT).toContain('必须输出两条');
-    expect(EXTRACTION_SYSTEM_PROMPT).toContain('多个独立entity或attribute必须拆成多条记忆');
-    expect(EXTRACTION_SYSTEM_PROMPT).toContain('完成状态');
-    expect(EXTRACTION_SYSTEM_PROMPT).toContain('同一个完整标识');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('同一原文可以同时产生一条完整episode和多条stateFacts');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('每个独立entity+attribute必须单独一项');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('同一承诺或任务从提出到完成放入commitments');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('sourceMessageIds');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('reference_context没有messageId');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('我叫刘爽');

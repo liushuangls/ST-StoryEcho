@@ -277,6 +277,8 @@ interface LlmProvider {
 }
 ```
 
+所有 JSON 任务通过统一的结构化调用层执行三级协商：`deepseek-*` 优先 JSON Object，其他自定义模型优先 JSON Schema，两种结构化模式之后才是普通模式 + 明文 Schema/示例。Provider 异常、空输出、JSON 解析失败或本地校验失败时进入下一层；自定义 Provider 三层均失败后，才按设置回退主连接。详细顺序见 [PIPELINE_V2.md](PIPELINE_V2.md)。
+
 ### 6.1 主连接
 
 默认 Provider 调用 `SillyTavern.getContext().generateRaw()`：
@@ -287,7 +289,7 @@ interface LlmProvider {
 - 只把 StoryEcho 提供的 system prompt 和任务 prompt 交给 `generateRaw`，不走正常角色上下文组装；
 - 不携带角色卡 system/jailbreak、作者注释、示例对话、欢迎语、主提示词或 Prompt Manager 提示内容；
 - 继续使用当前连接/模型/采样参数，文本补全 API 仍使用当前 instruct 格式；
-- 主连接采用严格提示词加本地解析校验，不强制 JSON Schema，以兼容部分后端的空对象问题；
+- 从酒馆上下文的 `mainApi`、`chatCompletionSettings` 与 `getChatCompletionModel()` 读取当前来源和精确模型名；`deepseek-*` 主连接优先 JSON Object，其他模型优先 JSON Schema，能力不匹配的层级会跳过，最后使用普通 JSON；
 - 酒馆的 raw prompt 事件仍会触发，因此其他扩展若主动监听并改写该事件，可能影响后台请求；
 - 抽取调用标记为后台任务，不触发 StoryEcho 自己的生成拦截。
 
@@ -314,7 +316,7 @@ interface OpenAiCompatibleConfig {
   -> <Base URL>/chat/completions
 ```
 
-StoryEcho向同源后端提交 `chat_completion_source: "custom"`、模型、消息、规范化Base URL和可选Authorization Header；SillyTavern负责拼接 `/chat/completions`并请求外部接口。严格Schema开启时使用酒馆的 `json_schema`格式。Key保存在扩展设置中并会经过前端运行时，不具备SecretManager隔离，但无需额外安装服务端插件。
+StoryEcho向同源后端提交 `chat_completion_source: "custom"`、模型、消息、规范化Base URL和可选Authorization Header；SillyTavern负责拼接 `/chat/completions`并请求外部接口。JSON Object 通过 `custom_include_body` 透传 `response_format.type=json_object`；`deepseek-*` 优先使用它，其他模型则优先酒馆的 `json_schema` 格式，最后都退回明文 JSON。Key保存在扩展设置中并会经过前端运行时，不具备SecretManager隔离，但无需额外安装服务端插件。
 
 ### 6.3 Base URL规范化
 
@@ -369,15 +371,23 @@ https://example.com/v1/chat/completions
 
 参考块被标记为不可信只读数据，只能辅助实体、别名、地点和专名消歧。抽取 Schema 要求每个候选返回 `sourceMessageIds`；质量门只接受当前 `history_messages` 范围内的非 system 消息 ID，随后将精确楼层写入记忆元数据。没有有效聊天来源的候选不进入整理和向量管线。主连接的连接/模型仍然生效；Chat Completion 设置可用时后台任务关闭高强度推理并将 temperature 设为 0、top_p 设为 1，文本补全 API 仍可能套用 instruct 格式。其他扩展也可能通过酒馆公开的 raw prompt 事件修改请求。
 
-输出候选事件，不直接写入存储。解析后先执行一次保守的原子化：若同一候选的 `retrievalText` 含有多个互不共享实体的独立分句，则按实体分成多条候选；共享实体、无法安全拆分或仅为总括句时保持原样。这样“白塔药铺的戒指”和“北境白塔的银铃”即使被模型合写，也不会因其中一个事实更新而整条被取代。
+输出分类候选，不直接写入存储。根结构按剧情、状态、关系、承诺、揭示和线索分类；剧情与冲突保持完整场景及因果链，不再按实体或标点通用原子化。状态只按“完整实体 + 规范状态槽”拆分，关系只按关系边拆分，承诺只按稳定承诺键拆分。模型不再重复生成三份相似的事件、检索和注入文本；后两者由本地按类型确定性构造。
 
-原子化后再执行确定性的质量门槛：无持续结构、低重要度的普通事件会被拒绝；带原因、结果、状态变化、未解决线索或明确知情范围的事件会获得最低重要度校正。`unresolvedThreads`还必须能在源片段中找到明确疑问、未解状态或待办目标信号；模型仅因信息缺失而杜撰的“去向不明”“内容未知”会被移除。解析数量、原子化数量、拒绝数量、移除的伪线索和拒绝原因写入调试轨迹。
+类型归一化后再执行确定性的质量门槛：无持续结构、低重要度的普通事件会被拒绝；带原因、结果、状态变化、未解决线索或明确知情范围的事件会获得最低重要度校正。`unresolvedThreads`还必须能在源片段中找到明确疑问、未解状态或待办目标信号；模型仅因信息缺失而杜撰的“去向不明”“内容未知”会被移除。解析数量、分类数量、拒绝数量、移除的伪线索和拒绝原因写入调试轨迹。
 
-主连接抽取允许最多 8192输出 Token。五轮高信息密度剧情可能同时产生多条结构化事件；输出上限只作为防护而不要求模型用满，避免模型已正确抽取、却因 JSON 尾部被截断而丢失整个分块。
+结构化抽取按模型选择 JSON Object 或 JSON Schema 为首选，最后使用普通 JSON。三种模式均失败时按完整轮次自适应拆批，任何失败范围都不推进游标。角色正常回复的 8K 输出设置与内部抽取预算互相独立。
 
 ### 7.3 合并整理
 
-对每个候选：
+对每个候选先执行确定性整理：
+
+1. 同一状态槽的同值确认直接合并，新值直接取代全部活跃旧值；
+2. 同一关系槽按关系变化更新；
+3. 同一承诺按稳定逻辑键推进并在完成时解决；
+4. 明确纠正或否定使被纠正事实失效；
+5. 只有语义含糊的剧情、线索或实体关系进入 LLM 整理。
+
+LLM 整理阶段：
 
 1. 根据实体和候选检索文本找出少量相似旧记忆；
 2. 将候选与这些旧记忆交给 LLM；
@@ -393,7 +403,11 @@ https://example.com/v1/chat/completions
 
 `SUPERSEDE` 将旧记忆标为 `superseded`、记录新旧 ID关系并创建最新有效记忆。应用主决策后，本地还会按规范化状态槽扫描全部候选旧记忆：位置/当前位置/存放地点、持有/保管者、知情范围、承诺状态、真伪状态等近义属性归入同一槽，一次更新可取代多个旧目标。实体必须按完整规范名匹配，因此“白塔药铺”和“北境白塔”不会仅因共享“白塔”而串线。每条记忆保存直接证据来自 User、Assistant 或两者；Assistant 无时间推进依据的裸冲突不能覆盖 User 明确确认的状态，但来源楼层严格更晚、事实状态为 confirmed 且包含同槽状态转移的叙事属于正式剧情推进，可以更新旧状态。后续 User 修正仍可覆盖 Assistant 叙事，已完成承诺也是允许的低权威状态推进。对于旧版本遗留的复合记忆，若只取代其中一个实体，系统还会从不含被改实体的独立分句生成残余记忆，避免另一个事实随整条旧记忆一起丢失；不能安全拆分时宁可不猜。任何检索文本变化都会分配新向量哈希，同时把旧哈希放入 `pendingVectorDeleteHashes`，防止旧事实继续被语义召回。
 
-使用主连接时，StoryEcho在单次后台请求的 `CHAT_COMPLETION_SETTINGS_READY` 生命周期内把已有的推理强度降为 `low`，请求结束立即移除监听器；用户正常角色生成的预设不被修改。主连接不强制发送 JSON Schema，而是由严格 Prompt和容错解析器校验结果，以兼容会对结构化请求返回空对象的后端。
+使用主连接时，StoryEcho在单次后台请求的 `CHAT_COMPLETION_SETTINGS_READY` 生命周期内把已有的推理强度降为 `low`，请求结束立即移除监听器；用户正常角色生成的预设不被修改。主连接按其暴露的实际能力加入 JSON Object、JSON Schema 和普通 JSON 协商。
+
+### 7.4 前后台任务协调
+
+前台生成、手动处理与回复后后台维护共用单一协调器。当前任务不可抢占；后台运行期间到来的前台任务进入等待队列，并在当前批次结束后优先于未开始的后台任务。前台上下文准备取得租约，租约持续到真实回复完成，期间不得启动新的后台 LLM。内部 `generateRaw` 使用请求标记识别，不能再以全局内部生成深度跳过并发到来的用户请求。队列执行前重新核对聊天与历史修订，失败时扩大安全原文窗口而不是裁掉未覆盖历史。
 
 ## 8. 查询与排序
 

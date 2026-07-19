@@ -344,8 +344,12 @@ export function parseConsolidationResponse(
   if (!Array.isArray(actions)) {
     throw new Error('整理结果缺少actions数组。');
   }
+  if (actions.length !== candidates.length) {
+    throw new Error(`整理结果必须为${candidates.length}个候选各返回一次动作。`);
+  }
 
   const parsed = new Map<number, ConsolidationDecision>();
+  const seenIndices = new Set<number>();
   for (const value of actions.slice(0, 20)) {
     const action = record(value);
     const candidateIndex = Number(
@@ -359,16 +363,25 @@ export function parseConsolidationResponse(
       candidateIndex < 0 ||
       candidateIndex >= candidates.length ||
       !OPERATIONS.has(operation) ||
-      parsed.has(candidateIndex)
+      seenIndices.has(candidateIndex)
     ) {
-      continue;
+      throw new Error('整理结果包含无效或重复的candidateIndex/operation。');
     }
+    seenIndices.add(candidateIndex);
     const targetMemoryId = String(
       action['targetMemoryId'] ?? action['target_memory_id'] ?? action['targetId'] ?? '',
     ).trim();
+    if (
+      typeof (
+        action['targetMemoryId'] ?? action['target_memory_id'] ?? action['targetId']
+      ) !== 'string' ||
+      typeof (action['reason'] ?? action['rationale']) !== 'string'
+    ) {
+      throw new Error(`整理结果的候选${candidateIndex}缺少字符串targetMemoryId或reason。`);
+    }
     const needsTarget = !['CREATE', 'IGNORE'].includes(operation);
     if (needsTarget && !allowedTargets.has(targetMemoryId)) {
-      continue;
+      throw new Error(`整理结果的候选${candidateIndex}引用了无效目标。`);
     }
     const candidate = candidates[candidateIndex]!;
     const target = targetMemoryId
@@ -398,6 +411,9 @@ export function parseConsolidationResponse(
         .slice(0, 500) || '模型未提供原因。',
       result,
     });
+  }
+  if (seenIndices.size !== candidates.length) {
+    throw new Error('整理结果没有覆盖全部候选。');
   }
 
   return fallback.map((decision) => {

@@ -1,6 +1,8 @@
 import { EXTENSION_VERSION } from '../core/constants';
 import type { StoryEchoChatState, StoryEchoSettings } from '../core/types';
+import { structuredOutputDiagnosticsSnapshot } from '../llm/structured-diagnostics';
 import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../prompt/render';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 
 export function buildDebugReport(
   state: StoryEchoChatState,
@@ -47,6 +49,10 @@ export function buildDebugReport(
       vectorModel: settings.vector.model,
     },
     metrics: state.metrics,
+    runtimeDiagnostics: {
+      structuredOutput: structuredOutputDiagnosticsSnapshot(),
+      taskQueue: storyEchoTaskCoordinator.snapshot(),
+    },
     lastInspection: state.lastInspection ?? null,
     selectedMemories: state.memories
       .filter((memory) => selected.has(memory.id))

@@ -1,11 +1,12 @@
 import { sha256 } from '../core/hash';
 import { logger } from '../core/logger';
 import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
+import { storyContent } from '../content/story-content';
 import { recordDebugTrace } from '../debug/metrics';
 import { countCompletedTurns, planNextChunk } from '../extraction/chunk-planner';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
-import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
 import { SettingsRepository } from '../settings/repository';
 import { buildStageSummaryPrompt, STAGE_SUMMARY_SYSTEM_PROMPT } from './prompts';
 
@@ -38,7 +39,28 @@ function sourcePayload(messages: TavernChatMessage[], sourceStartMessageId: numb
   })));
 }
 
-function normalizeSummary(raw: string): string {
+function escapedRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function summaryIdentity(context: SillyTavernContext): {
+  userUiPersona: string;
+  assistantCharacter: string;
+} {
+  const character = Number.isInteger(context.characterId)
+    ? context.characters?.[context.characterId!]
+    : undefined;
+  return {
+    userUiPersona: context.name1?.trim() ?? '',
+    assistantCharacter: context.name2?.trim() || character?.name?.trim() || '',
+  };
+}
+
+export function normalizeSummary(
+  raw: string,
+  sourceMessages: TavernChatMessage[] = [],
+  userUiPersona = '',
+): string {
   const withoutFence = raw
     .trim()
     .replace(/^```(?:text|markdown|md)?\s*/i, '')
@@ -52,10 +74,15 @@ function normalizeSummary(raw: string): string {
   if (!withoutWrapper) {
     throw new Error('阶段总结模型返回了空内容。');
   }
-  if (withoutWrapper.length > MAX_STORED_SUMMARY_CHARACTERS) {
+  const sourceText = sourceMessages.map((message) => storyContent(message)).join('\n');
+  const persona = userUiPersona.trim();
+  const identitySafe = persona.length >= 2 && !sourceText.includes(persona)
+    ? withoutWrapper.replace(new RegExp(escapedRegExp(persona), 'gu'), '用户角色')
+    : withoutWrapper;
+  if (identitySafe.length > MAX_STORED_SUMMARY_CHARACTERS) {
     throw new Error('阶段总结模型返回内容过长。');
   }
-  return withoutWrapper;
+  return identitySafe;
 }
 
 function assertChatOwner(state: StoryEchoChatState): void {
@@ -161,15 +188,17 @@ export class StageSummaryService {
 
         const startedAt = performance.now();
         const snapshotHash = await sha256(sourcePayload(snapshot, chunk.startMessageId));
+        const identity = summaryIdentity(context);
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
           prompt: buildStageSummaryPrompt(
             snapshot,
             chunk.startMessageId,
+            identity,
           ),
           maxTokens: settings.summary.maxTokens,
         });
-        const text = normalizeSummary(raw);
+        const text = normalizeSummary(raw, snapshot, identity.userUiPersona);
         // Read the live chat again instead of trusting the context object
         // captured before the LLM call. SillyTavern can replace the chat array
         // when a message is edited or a branch is switched while generation is
@@ -206,6 +235,7 @@ export class StageSummaryService {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           summaryCharacters: text.length,
           summaryEntries: state.stageSummary.entries.length,
+          personaLabelSanitized: text !== normalizeSummary(raw, snapshot),
         });
         await this.memoryRepository.save(state);
         updatedChunks += 1;

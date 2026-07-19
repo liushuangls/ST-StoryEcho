@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MODULE_ID } from '../src/core/constants';
 import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import { buildStageSummaryPrompt } from '../src/summary/prompts';
-import { StageSummaryService } from '../src/summary/service';
+import { normalizeSummary, StageSummaryService } from '../src/summary/service';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState } from './fixtures';
 
@@ -42,12 +42,29 @@ describe('independent stage summaries', () => {
         { is_user: false, name: 'Assistant', mes: '众人抵达新港。' },
       ],
       12,
+      { userUiPersona: '刘爽', assistantCharacter: '福尔摩斯' },
     );
 
     expect(prompt).toContain('消息 12 到 13');
     expect(prompt).toContain('"messageId":12');
     expect(prompt).toContain('"messageId":13');
+    expect(prompt).toContain('"userUiPersona":"刘爽"');
+    expect(prompt).toContain('"speaker":"user-character"');
+    expect(prompt).not.toContain('"speaker":"刘爽"');
     expect(prompt).not.toContain('previous_summary');
+  });
+
+  it('removes an unsupported UI persona name from a stage summary', () => {
+    const source = [
+      { is_user: true, mes: '我走进了贝克街。' },
+      { is_user: false, mes: '福尔摩斯抬头看向来客。' },
+    ];
+
+    expect(normalizeSummary('刘爽走进贝克街并见到福尔摩斯。', source, '刘爽'))
+      .toBe('用户角色走进贝克街并见到福尔摩斯。');
+    expect(normalizeSummary('刘爽明确介绍了自己的姓名。', [
+      { is_user: true, mes: '我叫刘爽。' },
+    ], '刘爽')).toContain('刘爽');
   });
 
   it('waits for a complete automatic batch and keeps the coverage cursor unchanged', async () => {

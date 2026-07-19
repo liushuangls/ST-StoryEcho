@@ -2,14 +2,23 @@ import { logger } from '../core/logger';
 import type { StoryEchoSettings, TavernChatMessage } from '../core/types';
 import { emitDiagnosticsUpdated } from '../debug/events';
 import { extractionService } from '../extraction/service';
-import { isInternalGeneration } from '../llm/internal-generation';
+import { recordExtractionCooldownSkip } from '../llm/structured-diagnostics';
 import { MemoryRepository } from '../memory/repository';
-import { getContext } from '../platform/sillytavern';
+import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { selectRecentWindow } from '../prompt/window';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
 
 const BACKGROUND_DELAY_MS = 750;
+const EXTRACTION_BACKOFF_BASE_MS = 30_000;
+const EXTRACTION_BACKOFF_MAX_MS = 15 * 60_000;
+
+export interface BackgroundProcessingSnapshot {
+  extractionCooldownActive: boolean;
+  extractionCooldownRemainingMs: number;
+  extractionCooldownFailures: number;
+}
 
 /**
  * Background work only covers history that the configured minimum raw window
@@ -53,8 +62,17 @@ export class BackgroundProcessingScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private operation: Promise<void> | undefined;
   private rerunRequested = false;
+  private requestedChatId: string | null = null;
   private historyRequiresReconcile = true;
   private historyRevision = 0;
+  private extractionCooldown:
+    | {
+        ownerChatId: string;
+        startMessageId: number;
+        failures: number;
+        nextRetryAt: number;
+      }
+    | undefined;
   private verifiedPrefix:
     | {
         ownerChatId: string;
@@ -87,16 +105,18 @@ export class BackgroundProcessingScheduler {
     // chat. Unlike the broader generation events it is not normally emitted
     // by generateRaw(), so internal extraction calls cannot recursively queue
     // more extraction work.
-    const eventName = context.event_types?.['MESSAGE_RECEIVED'];
+    const eventTypes = {
+      ...(context.event_types ?? {}),
+      ...(context.eventTypes ?? {}),
+    };
+    const eventName = eventTypes?.['MESSAGE_RECEIVED'];
     if (!eventSource || !eventName) {
       logger.warn('当前SillyTavern未提供回复完成事件，自动抽取仍会在生成前安全补齐。');
       return;
     }
 
     const handler = (): void => {
-      if (isInternalGeneration()) {
-        return;
-      }
+      storyEchoTaskCoordinator.releaseForegroundLease('assistant-message-received');
       this.schedule();
     };
     eventSource.on(eventName, handler);
@@ -104,6 +124,7 @@ export class BackgroundProcessingScheduler {
     const markHistoryDirty = (): void => {
       this.historyRequiresReconcile = true;
       this.verifiedPrefix = undefined;
+      this.extractionCooldown = undefined;
       this.historyRevision += 1;
     };
     const mutationEvents = [
@@ -115,17 +136,40 @@ export class BackgroundProcessingScheduler {
     ];
     const registeredNames = new Set([eventName]);
     for (const eventKey of mutationEvents) {
-      const mutationEventName = context.event_types?.[eventKey];
+      const mutationEventName = eventTypes?.[eventKey];
       if (!mutationEventName || registeredNames.has(mutationEventName)) {
         continue;
       }
-      eventSource.on(mutationEventName, markHistoryDirty);
+      const mutationHandler = eventKey === 'CHAT_CHANGED'
+        ? (): void => {
+            markHistoryDirty();
+            storyEchoTaskCoordinator.releaseForegroundLease('chat-changed');
+          }
+        : markHistoryDirty;
+      eventSource.on(mutationEventName, mutationHandler);
       this.registeredEvents.push({
         eventName: mutationEventName,
         eventSource,
-        handler: markHistoryDirty,
+        handler: mutationHandler,
       });
       registeredNames.add(mutationEventName);
+    }
+    const releaseEvents = ['GENERATION_STOPPED', 'GENERATION_ABORTED'];
+    const releaseForeground = (): void => {
+      storyEchoTaskCoordinator.releaseForegroundLease('generation-stopped');
+    };
+    for (const eventKey of releaseEvents) {
+      const releaseEventName = eventTypes?.[eventKey];
+      if (!releaseEventName || registeredNames.has(releaseEventName)) {
+        continue;
+      }
+      eventSource.on(releaseEventName, releaseForeground);
+      this.registeredEvents.push({
+        eventName: releaseEventName,
+        eventSource,
+        handler: releaseForeground,
+      });
+      registeredNames.add(releaseEventName);
     }
     logger.info('已启用回复后的后台剧情整理。');
   }
@@ -142,7 +186,20 @@ export class BackgroundProcessingScheduler {
     this.registeredEvents = [];
     this.historyRequiresReconcile = true;
     this.verifiedPrefix = undefined;
+    this.extractionCooldown = undefined;
+    this.requestedChatId = null;
     this.historyRevision += 1;
+  }
+
+  snapshot(now = Date.now()): BackgroundProcessingSnapshot {
+    const remaining = this.extractionCooldown
+      ? Math.max(0, this.extractionCooldown.nextRetryAt - now)
+      : 0;
+    return {
+      extractionCooldownActive: remaining > 0,
+      extractionCooldownRemainingMs: remaining,
+      extractionCooldownFailures: this.extractionCooldown?.failures ?? 0,
+    };
   }
 
   schedule(): void {
@@ -156,9 +213,13 @@ export class BackgroundProcessingScheduler {
   }
 
   runNow(): Promise<void> {
+    this.requestedChatId = getCurrentChatId(getContext());
     this.rerunRequested = true;
     if (!this.operation) {
-      this.operation = this.drain().finally(() => {
+      this.operation = storyEchoTaskCoordinator.enqueueBackground(
+        '回复后整理历史',
+        () => this.drain(),
+      ).finally(() => {
         this.operation = undefined;
         if (this.rerunRequested) {
           void this.runNow();
@@ -171,7 +232,12 @@ export class BackgroundProcessingScheduler {
   private async drain(): Promise<void> {
     while (this.rerunRequested) {
       this.rerunRequested = false;
+      const requestedChatId = this.requestedChatId;
       try {
+        if (!requestedChatId || getCurrentChatId(getContext()) !== requestedChatId) {
+          logger.debug('后台剧情整理排队期间聊天已切换，已丢弃过期任务。');
+          continue;
+        }
         await this.processCurrentChat();
       } catch (error) {
         // Extraction and summary services already record bounded diagnostics.
@@ -186,7 +252,6 @@ export class BackgroundProcessingScheduler {
     const settings = this.settingsRepository.get();
     if (
       !settings.enabled ||
-      isInternalGeneration() ||
       (!settings.extraction.automatic && !(settings.summary.enabled && settings.summary.automatic))
     ) {
       return;
@@ -224,17 +289,45 @@ export class BackgroundProcessingScheduler {
 
     if (settings.extraction.automatic && state.indexedThroughMessageId < targetEndMessageId) {
       const extractionRevision = this.historyRevision;
-      state = await extractionService.processNextThroughVerifiedHistory(targetEndMessageId) ?? state;
-      if (this.historyRevision !== extractionRevision) {
-        // A delete/edit/swipe may occur while the extraction LLM is running.
-        // Force the next reconciliation to compare unequal even if the
-        // extraction just wrote a fresh hash for the already-mutated prefix.
-        this.historyRequiresReconcile = true;
-        this.verifiedPrefix = undefined;
-        if (state.indexedThroughMessageId >= 0) {
-          state.indexedPrefixHash = `dirty:${this.historyRevision}`;
-          state = await extractionService.reconcileHistory(state) ?? state;
-          this.historyRequiresReconcile = false;
+      const extractionStart = state.indexedThroughMessageId + 1;
+      const cooldown = this.extractionCooldown;
+      const sameFailedBlock = cooldown?.ownerChatId === state.ownerChatId
+        && cooldown.startMessageId === extractionStart;
+      if (sameFailedBlock && cooldown.nextRetryAt > Date.now()) {
+        recordExtractionCooldownSkip();
+        logger.debug(`自动抽取处于退避期，${cooldown.nextRetryAt - Date.now()}ms后可重试。`);
+      } else {
+        try {
+          state = await extractionService.processNextThroughVerifiedHistory(targetEndMessageId) ?? state;
+          this.extractionCooldown = undefined;
+        } catch (error) {
+          if (this.historyRevision === extractionRevision) {
+            const failures = sameFailedBlock ? cooldown.failures + 1 : 1;
+            const delayMs = Math.min(
+              EXTRACTION_BACKOFF_MAX_MS,
+              EXTRACTION_BACKOFF_BASE_MS * (2 ** Math.min(5, failures - 1)),
+            );
+            this.extractionCooldown = {
+              ownerChatId: state.ownerChatId,
+              startMessageId: extractionStart,
+              failures,
+              nextRetryAt: Date.now() + delayMs,
+            };
+            logger.warn(`自动抽取失败，已退避 ${delayMs}ms；手动处理与生成前安全补齐不受影响。`, error);
+          }
+        }
+        if (this.historyRevision !== extractionRevision) {
+          // A delete/edit/swipe may occur while the extraction LLM is running.
+          // Force the next reconciliation to compare unequal even if the
+          // extraction just wrote a fresh hash for the already-mutated prefix.
+          this.historyRequiresReconcile = true;
+          this.verifiedPrefix = undefined;
+          this.extractionCooldown = undefined;
+          if (state.indexedThroughMessageId >= 0) {
+            state.indexedPrefixHash = `dirty:${this.historyRevision}`;
+            state = await extractionService.reconcileHistory(state) ?? state;
+            this.historyRequiresReconcile = false;
+          }
         }
       }
       if (!this.historyRequiresReconcile) {

@@ -2,6 +2,132 @@ import { describe, expect, it } from 'vitest';
 import { parseExtractionResponse } from '../src/extraction/parser';
 
 describe('parseExtractionResponse', () => {
+  it('parses classified extraction output and deterministically renders memory text', () => {
+    const result = parseExtractionResponse(JSON.stringify({
+      episodes: [{
+        sourceMessageIds: [10, 11],
+        kind: 'event',
+        scene: { location: '煤窖', time: '深夜', participants: ['陌白', '福尔摩斯'] },
+        action: '陌白与福尔摩斯取得罗盘和胶片，并离开旧砖洞',
+        cause: '两人追查失踪案线索',
+        consequence: '两件证物被带走',
+        entities: ['陌白', '福尔摩斯', '罗盘', '胶片'],
+        aliases: [],
+        unresolvedThreads: ['胶片内容尚待冲洗'],
+        knownBy: ['陌白', '福尔摩斯'],
+        truthStatus: 'confirmed',
+        importance: 0.9,
+      }],
+      stateFacts: [{
+        sourceMessageIds: [11],
+        scene: { location: '煤窖', time: '深夜', participants: ['陌白'] },
+        entity: '罗盘',
+        attribute: '持有者',
+        before: '旧砖洞',
+        after: '陌白',
+        aliases: ['星纹罗盘'],
+        knownBy: ['陌白', '福尔摩斯'],
+        truthStatus: 'confirmed',
+        importance: 0.9,
+      }],
+      relationships: [],
+      commitments: [],
+      revelations: [],
+      clues: [],
+    }));
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({
+      type: 'event',
+      event: '陌白与福尔摩斯取得罗盘和胶片，并离开旧砖洞',
+      stateChanges: [],
+    });
+    expect(result[0]?.retrievalText).toContain('地点：煤窖');
+    expect(result[1]).toMatchObject({
+      type: 'state_change',
+      event: '罗盘的持有者由旧砖洞变为陌白',
+      stateChanges: [{ entity: '罗盘', attribute: '持有者', before: '旧砖洞', after: '陌白' }],
+      injectionText: '罗盘的持有者由旧砖洞变为陌白。',
+    });
+  });
+
+  it('maps relationship and commitment categories to stable state slots', () => {
+    const common = {
+      sourceMessageIds: [2],
+      scene: { location: '', time: '', participants: [] },
+      knownBy: ['陌白'],
+      truthStatus: 'confirmed',
+      importance: 0.8,
+    };
+    const result = parseExtractionResponse(JSON.stringify({
+      episodes: [],
+      stateFacts: [],
+      relationships: [{
+        ...common,
+        leftEntity: '福尔摩斯',
+        rightEntity: '陌白',
+        relationType: '信任',
+        before: '戒备',
+        after: '互相信任',
+      }],
+      commitments: [{
+        ...common,
+        actor: '陌白',
+        beneficiary: '福尔摩斯',
+        action: '归还',
+        object: '怀表',
+        previousStatus: 'pending',
+        status: 'completed',
+      }],
+      revelations: [],
+      clues: [],
+    }));
+
+    expect(result.map((item) => item.type)).toEqual(['relationship_change', 'commitment']);
+    expect(result[0]?.stateChanges[0]).toMatchObject({ attribute: '信任关系', after: '互相信任' });
+    expect(result[1]?.stateChanges[0]).toMatchObject({ attribute: '完成状态', before: '未完成', after: '已完成' });
+    expect(result[1]?.unresolvedThreads).toEqual([]);
+  });
+
+  it('accepts a complete classified response with no memories', () => {
+    expect(parseExtractionResponse(JSON.stringify({
+      episodes: [],
+      stateFacts: [],
+      relationships: [],
+      commitments: [],
+      revelations: [],
+      clues: [],
+    }))).toEqual([]);
+  });
+
+  it('rejects partial or malformed classified output so structured completion can retry', () => {
+    expect(() => parseExtractionResponse(JSON.stringify({
+      episodes: [],
+    }))).toThrow(/stateFacts.*数组/);
+
+    expect(() => parseExtractionResponse(JSON.stringify({
+      episodes: [{
+        sourceMessageIds: [],
+        kind: 'event',
+        scene: { location: '', time: '', participants: [] },
+        action: '发生了一件事',
+        cause: '',
+        consequence: '',
+        entities: [],
+        aliases: [],
+        unresolvedThreads: [],
+        knownBy: [],
+        truthStatus: 'confirmed',
+        importance: 0.5,
+      }],
+      stateFacts: [],
+      relationships: [],
+      commitments: [],
+      revelations: [],
+      clues: [],
+    }))).toThrow(/episodes\[0\].*结构/);
+  });
+
   it('parses and normalizes valid candidates', () => {
     const result = parseExtractionResponse(`\`\`\`json
       {
@@ -31,11 +157,10 @@ describe('parseExtractionResponse', () => {
     expect(result[0]?.sourceMessageIds).toEqual([20, 21]);
   });
 
-  it('drops invalid memory items while keeping the response usable', () => {
-    const result = parseExtractionResponse(JSON.stringify({
+  it('rejects a non-empty legacy response with no valid items so completion can retry', () => {
+    expect(() => parseExtractionResponse(JSON.stringify({
       memories: [{ type: 'unknown', event: 'x' }],
-    }));
-    expect(result).toEqual([]);
+    }))).toThrow(/没有得到任何合法剧情记忆/);
   });
 
   it('accepts common schema aliases returned by the main connection', () => {

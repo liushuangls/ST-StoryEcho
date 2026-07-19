@@ -93,7 +93,7 @@ function typeForStateChange(
 function atomicizeStateChanges(
   candidate: ExtractedMemoryCandidate,
 ): ExtractedMemoryCandidate[] | null {
-  if (candidate.stateChanges.length < 2) {
+  if (candidate.stateChanges.length === 0) {
     return null;
   }
 
@@ -178,7 +178,20 @@ export function atomicizeMemoryCandidate(
 ): ExtractedMemoryCandidate[] {
   const stateChangeMemories = atomicizeStateChanges(candidate);
   if (stateChangeMemories) {
+    if (['event', 'conflict', 'revelation', 'clue'].includes(candidate.type)) {
+      return [
+        { ...candidate, stateChanges: [] },
+        ...stateChangeMemories,
+      ];
+    }
     return stateChangeMemories;
+  }
+
+  // Narrative memories are semantic units. Splitting them by punctuation or
+  // entity mentions destroys the scene/goal/causal chain and was the source
+  // of fragmented real-chat metadata.
+  if (['event', 'conflict', 'revelation', 'clue', 'commitment', 'relationship_change'].includes(candidate.type)) {
+    return [candidate];
   }
 
   const atomicClauses: AtomicClause[] = clauses(candidate.retrievalText)
@@ -268,4 +281,15 @@ export function atomicizeMemoryCandidates(
   candidates: ExtractedMemoryCandidate[],
 ): ExtractedMemoryCandidate[] {
   return candidates.flatMap(atomicizeMemoryCandidate).slice(0, 30);
+}
+
+export const normalizeMemoryCandidateByType = atomicizeMemoryCandidate;
+
+export function normalizeCandidatesByType(
+  candidates: ExtractedMemoryCandidate[],
+  maximumCandidates = 30,
+): ExtractedMemoryCandidate[] {
+  return candidates
+    .flatMap(normalizeMemoryCandidateByType)
+    .slice(0, Math.max(0, maximumCandidates));
 }

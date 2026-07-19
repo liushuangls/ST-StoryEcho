@@ -1,0 +1,85 @@
+import { describe, expect, it, vi } from 'vitest';
+import { StoryEchoTaskCoordinator } from '../src/runtime/task-coordinator';
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+async function flushQueue(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe('StoryEchoTaskCoordinator', () => {
+  it('finishes the active background batch, runs foreground next, and holds later work for the reply', async () => {
+    const coordinator = new StoryEchoTaskCoordinator(60_000);
+    const backgroundGate = deferred();
+    const order: string[] = [];
+    const firstBackground = coordinator.enqueueBackground('background-1', async () => {
+      order.push('background-1');
+      await backgroundGate.promise;
+    });
+    await flushQueue();
+
+    const secondBackground = coordinator.enqueueBackground('background-2', async () => {
+      order.push('background-2');
+    });
+    const manual = coordinator.enqueueManual('manual', async () => {
+      order.push('manual');
+    });
+    const foreground = coordinator.enqueueForeground('foreground', async () => {
+      order.push('foreground');
+      return true;
+    });
+    await flushQueue();
+    expect(order).toEqual(['background-1']);
+    expect(coordinator.snapshot()).toMatchObject({
+      runningKind: 'background',
+      queuedForeground: 1,
+      queuedManual: 1,
+      queuedBackground: 1,
+    });
+
+    backgroundGate.resolve(undefined);
+    await firstBackground;
+    await foreground;
+    await flushQueue();
+    expect(order).toEqual(['background-1', 'foreground']);
+    expect(coordinator.snapshot().foregroundLeaseActive).toBe(true);
+
+    coordinator.releaseForegroundLease('test-reply');
+    await Promise.all([manual, secondBackground]);
+    expect(order).toEqual(['background-1', 'foreground', 'manual', 'background-2']);
+  });
+
+  it('does not acquire a lease for an obsolete foreground task', async () => {
+    const coordinator = new StoryEchoTaskCoordinator(60_000);
+    await coordinator.enqueueForeground(
+      'obsolete',
+      async () => false,
+      { holdForegroundLease: (prepared) => prepared },
+    );
+
+    expect(coordinator.snapshot().foregroundLeaseActive).toBe(false);
+  });
+
+  it('continues draining after a task rejects', async () => {
+    const coordinator = new StoryEchoTaskCoordinator(60_000);
+    const failure = coordinator.enqueueManual('failure', async () => {
+      throw new Error('boom');
+    });
+    const next = vi.fn(async () => undefined);
+    const success = coordinator.enqueueBackground('success', next);
+
+    await expect(failure).rejects.toThrow('boom');
+    await success;
+    expect(next).toHaveBeenCalledOnce();
+  });
+});

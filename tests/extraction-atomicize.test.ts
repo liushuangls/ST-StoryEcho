@@ -3,8 +3,8 @@ import { atomicizeMemoryCandidate } from '../src/extraction/atomicize';
 import { candidate } from './fixtures';
 
 describe('extraction candidate atomicization', () => {
-  it('splits independent same-name entity facts into separate memories', () => {
-    const result = atomicizeMemoryCandidate(candidate({
+  it('keeps a complete revelation instead of splitting it by entity clauses', () => {
+    const original = candidate({
       type: 'revelation',
       scene: { location: '', time: '', participants: [] },
       event: '琥珀戒指和银铃的位置都已确认。',
@@ -14,26 +14,22 @@ describe('extraction candidate atomicization', () => {
       knownBy: ['刘爽'],
       retrievalText: '琥珀戒指位于白塔药铺前厅掌柜抽屉；银铃位于北境白塔顶层悬挂。',
       injectionText: '白塔药铺的琥珀戒指在抽屉，北境白塔的银铃在顶层。',
-    }));
+    });
+    const result = atomicizeMemoryCandidate(original);
 
-    expect(result).toHaveLength(2);
-    expect(result.map((item) => item.entities)).toEqual([
-      ['琥珀戒指', '白塔药铺'],
-      ['银铃', '北境白塔'],
-    ]);
-    expect(result[0]?.retrievalText).not.toContain('银铃');
-    expect(result[1]?.retrievalText).not.toContain('琥珀戒指');
-    expect(result[0]?.injectionText).not.toContain('北境白塔');
-    expect(result[1]?.injectionText).not.toContain('白塔药铺');
+    expect(result).toEqual([original]);
   });
 
-  it('does not split clauses that share a core entity', () => {
+  it('normalizes one state slot without splitting it by surrounding clauses', () => {
     const original = candidate({
       entities: ['银色钥匙', '暮钟旅店', '红色铁盒'],
       retrievalText: '银色钥匙已从暮钟旅店取出；银色钥匙现在位于红色铁盒。',
     });
 
-    expect(atomicizeMemoryCandidate(original)).toEqual([original]);
+    const result = atomicizeMemoryCandidate(original);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.stateChanges).toEqual(original.stateChanges);
+    expect(result[0]?.retrievalText).toContain('银色钥匙');
   });
 
   it('splits every independent state slot even when the model returned one broad clause', () => {
@@ -82,8 +78,8 @@ describe('extraction candidate atomicization', () => {
     expect(result[1]?.scene.participants).toEqual([]);
   });
 
-  it('splits prefix-named entities even without structured state changes', () => {
-    const result = atomicizeMemoryCandidate(candidate({
+  it('does not split a revelation with prefix-named entities', () => {
+    const original = candidate({
       type: 'revelation',
       scene: { location: '', time: '', participants: ['青石'] },
       event: '青石发现密信，青石台出现裂缝。',
@@ -92,11 +88,31 @@ describe('extraction candidate atomicization', () => {
       stateChanges: [],
       retrievalText: '女修青石发现密信；地点青石台出现裂缝。',
       injectionText: '青石发现了密信；青石台出现了裂缝。',
+    });
+    const result = atomicizeMemoryCandidate(original);
+
+    expect(result).toEqual([original]);
+  });
+
+  it('preserves a complete plot episode while deriving its independent state slots', () => {
+    const result = atomicizeMemoryCandidate(candidate({
+      type: 'event',
+      event: '众人在煤窖取得罗盘和胶片，陌白把它们收入风衣暗袋。',
+      entities: ['陌白', '罗盘', '胶片', '煤窖'],
+      stateChanges: [
+        { entity: '罗盘', attribute: '持有者', before: '', after: '陌白' },
+        { entity: '胶片', attribute: '持有者', before: '', after: '陌白' },
+      ],
+      retrievalText: '煤窖取得罗盘和胶片，陌白持有两件证物。',
+      injectionText: '陌白等人在煤窖取得了罗盘和胶片，并收进风衣暗袋。',
     }));
 
-    expect(result).toHaveLength(2);
-    expect(result.map((item) => item.entities)).toEqual([['青石'], ['青石台']]);
-    expect(result[0]?.event).not.toContain('青石台');
-    expect(result[1]?.event).not.toContain('密信');
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({
+      type: 'event',
+      event: '众人在煤窖取得罗盘和胶片，陌白把它们收入风衣暗袋。',
+      stateChanges: [],
+    });
+    expect(result.slice(1).map((item) => item.stateChanges[0]?.entity)).toEqual(['罗盘', '胶片']);
   });
 });

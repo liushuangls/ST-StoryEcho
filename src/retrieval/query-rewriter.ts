@@ -1,7 +1,7 @@
 import { sha256 } from '../core/hash';
 import type { LlmRequest, StoryEchoSettings, TavernChatMessage } from '../core/types';
 import { storyContent } from '../content/story-content';
-import { completeWithConfiguredProvider } from '../llm/complete';
+import { completeStructuredWithConfiguredProvider } from '../llm/complete';
 
 const MAX_CONTEXT_MESSAGES = 3;
 const MAX_CONTEXT_CHARACTERS = 1_200;
@@ -124,7 +124,7 @@ export function parseQueryRewriteResponse(raw: string): string {
 export class QueryRewriteService {
   private readonly cache = new Map<string, string>();
 
-  constructor(private readonly complete: QueryRewriteCompletion = completeWithConfiguredProvider) {}
+  constructor(private readonly complete?: QueryRewriteCompletion) {}
 
   async rewrite(
     settings: StoryEchoSettings,
@@ -149,13 +149,20 @@ export class QueryRewriteService {
     }
 
     const startedAt = performance.now();
-    const raw = await this.complete(settings, {
+    const request: LlmRequest = {
       system: QUERY_REWRITE_SYSTEM_PROMPT,
       prompt,
       jsonSchema: QUERY_REWRITE_SCHEMA,
+      jsonExample: { query: '用户先前明确告知的姓名' },
       maxTokens: 768,
-    });
-    const query = parseQueryRewriteResponse(raw);
+    };
+    const query = this.complete
+      ? parseQueryRewriteResponse(await this.complete(settings, request))
+      : await completeStructuredWithConfiguredProvider(
+          settings,
+          request,
+          parseQueryRewriteResponse,
+        );
     this.cache.set(cacheKey, query);
     if (this.cache.size > MAX_CACHE_ENTRIES) {
       const oldest = this.cache.keys().next().value as string | undefined;

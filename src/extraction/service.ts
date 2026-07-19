@@ -1,12 +1,13 @@
 import { logger } from '../core/logger';
 import { sha256 } from '../core/hash';
-import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
+import type { StoryEchoChatState, StoryEchoSettings, TavernChatMessage } from '../core/types';
 import { storyMessages } from '../content/story-content';
 import { applyConsolidationDecisions } from '../consolidation/apply';
 import { decideConsolidation } from '../consolidation/service';
 import { shortlistMemories } from '../consolidation/shortlist';
 import { recordDebugTrace } from '../debug/metrics';
-import { completeWithConfiguredProvider } from '../llm/complete';
+import { completeStructuredWithConfiguredProvider } from '../llm/complete';
+import { recordAdaptiveExtractionSplit } from '../llm/structured-diagnostics';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { buildExtractionReferenceContext } from '../reference/context';
@@ -14,12 +15,13 @@ import { SettingsRepository } from '../settings/repository';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { countCompletedTurns, planNextChunk } from './chunk-planner';
-import { atomicizeMemoryCandidates } from './atomicize';
+import { normalizeCandidatesByType } from './atomicize';
 import { classifyEvidenceRole } from './evidence';
 import { parseExtractionResponse } from './parser';
 import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from './prompts';
 import { assessMemoryCandidates } from './quality';
 import { EXTRACTION_SCHEMA } from './schema';
+import type { ExtractedMemoryCandidate } from './types';
 
 export interface ExtractionProgress {
   startMessageId: number;
@@ -56,6 +58,92 @@ async function prefixHash(messages: TavernChatMessage[], endMessageId: number): 
     return '';
   }
   return sha256(sourcePayload(messages.slice(0, endMessageId + 1), 0));
+}
+
+function turnAlignedSplitIndex(messages: TavernChatMessage[]): number | null {
+  const boundaries: number[] = [];
+  let waitingForAssistant = false;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.is_system) {
+      continue;
+    }
+    if (message?.is_user) {
+      waitingForAssistant = true;
+      continue;
+    }
+    if (waitingForAssistant) {
+      waitingForAssistant = false;
+      if (index + 1 < messages.length) {
+        boundaries.push(index + 1);
+      }
+    }
+  }
+  if (boundaries.length === 0) {
+    return null;
+  }
+  const midpoint = messages.length / 2;
+  return boundaries.sort((left, right) => (
+    Math.abs(left - midpoint) - Math.abs(right - midpoint)
+  ))[0] ?? null;
+}
+
+export async function extractCandidatesAdaptive(
+  settings: StoryEchoSettings,
+  messages: TavernChatMessage[],
+  sourceStartMessageId: number,
+  referenceContext = '',
+  onSplit?: (leftTurns: number, rightTurns: number) => void,
+): Promise<ExtractedMemoryCandidate[]> {
+  const promptMessages = storyMessages(messages);
+  try {
+    return await completeStructuredWithConfiguredProvider(settings, {
+      system: EXTRACTION_SYSTEM_PROMPT,
+      prompt: buildExtractionPrompt(
+        promptMessages,
+        0,
+        promptMessages.length - 1,
+        sourceStartMessageId,
+        referenceContext,
+      ),
+      jsonSchema: EXTRACTION_SCHEMA,
+      jsonExample: {
+        episodes: [],
+        stateFacts: [],
+        relationships: [],
+        commitments: [],
+        revelations: [],
+        clues: [],
+      },
+      // A dense multi-turn chunk can contain several independent facts. The
+      // JSON must finish or the entire attempt is rejected and split below.
+      maxTokens: 8_192,
+    }, parseExtractionResponse);
+  } catch (error) {
+    const splitIndex = turnAlignedSplitIndex(messages);
+    if (splitIndex === null) {
+      throw error;
+    }
+    const left = messages.slice(0, splitIndex);
+    const right = messages.slice(splitIndex);
+    recordAdaptiveExtractionSplit();
+    onSplit?.(countCompletedTurns(left), countCompletedTurns(right));
+    const leftCandidates = await extractCandidatesAdaptive(
+      settings,
+      left,
+      sourceStartMessageId,
+      referenceContext,
+      onSplit,
+    );
+    const rightCandidates = await extractCandidatesAdaptive(
+      settings,
+      right,
+      sourceStartMessageId + splitIndex,
+      referenceContext,
+      onSplit,
+    );
+    return [...leftCandidates, ...rightCandidates];
+  }
 }
 
 export class ExtractionService {
@@ -427,33 +515,33 @@ export class ExtractionService {
           });
         }
 
-        const raw = await completeWithConfiguredProvider(settings, {
-          system: EXTRACTION_SYSTEM_PROMPT,
-          prompt: buildExtractionPrompt(
-            promptSnapshot,
-            0,
-            snapshot.length - 1,
-            chunk.startMessageId,
-            referenceContext,
-          ),
-          jsonSchema: EXTRACTION_SCHEMA,
-          // A five-turn chunk can legitimately contain several independent plot facts.
-          // Leave enough room for the complete structured response: truncating JSON loses
-          // the entire chunk even when the model extracted every fact correctly.
-          maxTokens: 8_192,
-        });
         let parsedCandidates;
         try {
-          parsedCandidates = parseExtractionResponse(raw);
+          parsedCandidates = await extractCandidatesAdaptive(
+            settings,
+            snapshot,
+            chunk.startMessageId,
+            referenceContext,
+            (leftTurns, rightTurns) => {
+              recordDebugTrace(state, settings.debug, 'extraction', '结构化抽取失败，按完整轮次拆分重试。', {
+                range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+                leftTurns,
+                rightTurns,
+              });
+            },
+          );
         } catch (error) {
           recordDebugTrace(state, settings.debug, 'extraction', '剧情候选解析失败。', {
             range: `${chunk.startMessageId}-${chunk.endMessageId}`,
             error: error instanceof Error ? error.message : String(error),
-            rawResponse: raw.slice(0, 4_000),
           });
           throw error;
         }
-        const atomicCandidates = atomicizeMemoryCandidates(parsedCandidates);
+        const candidateLimit = Math.min(
+          12,
+          Math.max(6, countCompletedTurns(snapshot) * 3),
+        );
+        const atomicCandidates = normalizeCandidatesByType(parsedCandidates, candidateLimit);
         const assessment = assessMemoryCandidates(
           atomicCandidates,
           promptSnapshot.map((message) => message.mes).join('\n'),
@@ -474,6 +562,7 @@ export class ExtractionService {
           candidates: candidates.length,
           parsedCandidates: parsedCandidates.length,
           atomicCandidates: atomicCandidates.length,
+          candidateLimit,
           rejectedCandidates: assessment.rejected.length,
           ...(assessment.rejected.length > 0
             ? { rejectedReasons: assessment.rejected.map((item) => item.reason).join(' | ') }
@@ -481,7 +570,7 @@ export class ExtractionService {
           ...(assessment.removedUnsupportedThreads.length > 0
             ? { removedUnsupportedThreads: assessment.removedUnsupportedThreads.join(' | ') }
             : {}),
-          ...(parsedCandidates.length === 0 ? { emptyResponse: raw.slice(0, 4_000) } : {}),
+          ...(parsedCandidates.length === 0 ? { emptyResponse: '合法空memories数组' } : {}),
         });
         const currentSourceHash = await sha256(sourcePayload(
           context.chat.slice(chunk.startMessageId, chunk.endMessageId + 1),

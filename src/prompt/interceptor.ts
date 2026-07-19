@@ -9,9 +9,9 @@ import type {
 import { emitDiagnosticsUpdated } from '../debug/events';
 import { recordDebugTrace } from '../debug/metrics';
 import { extractionService } from '../extraction/service';
-import { isInternalGeneration } from '../llm/internal-generation';
+import { isInternalGenerationRequest } from '../llm/internal-generation';
 import { MemoryRepository } from '../memory/repository';
-import { getContext } from '../platform/sillytavern';
+import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import {
   buildRetrievalQueryPlan,
   withRewrittenRetrievalQuery,
@@ -22,6 +22,7 @@ import { queryRewriteService } from '../retrieval/query-rewriter';
 import { rankMemories, type RetrievalVectorResults } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import type { VectorQueryResult } from '../vector/adapter';
 import { resolveVectorConfig } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
@@ -128,14 +129,14 @@ function requestSystemMessage(
   };
 }
 
-export async function storyEchoGenerateInterceptor(
+async function prepareStoryEchoPrompt(
   chat: TavernChatMessage[],
   _contextSize: number,
   _abort: () => void,
   type?: string,
 ): Promise<void> {
   const settings = settingsRepository.get();
-  if (!settings.enabled || isInternalGeneration() || !isSupportedGenerationType(type)) {
+  if (!settings.enabled || !isSupportedGenerationType(type)) {
     return;
   }
 
@@ -504,4 +505,41 @@ export async function storyEchoGenerateInterceptor(
   } catch (error) {
     logger.error('生成拦截失败，已放行原始生成。', error);
   }
+}
+
+export async function storyEchoGenerateInterceptor(
+  chat: TavernChatMessage[],
+  contextSize: number,
+  abort: () => void,
+  type?: string,
+): Promise<void> {
+  const settings = settingsRepository.get();
+  if (
+    !settings.enabled
+    || !isSupportedGenerationType(type)
+    || isInternalGenerationRequest(chat)
+  ) {
+    return;
+  }
+
+  const requestedContext = getContext();
+  const requestedChatId = getCurrentChatId(requestedContext);
+  const requestedSourceChat = requestedContext.chat;
+  await storyEchoTaskCoordinator.enqueueForeground(
+    '生成前上下文准备',
+    async () => {
+      const currentContext = getContext();
+      const currentChatId = getCurrentChatId(currentContext);
+      const sameChat = requestedChatId
+        ? currentChatId === requestedChatId
+        : currentContext.chat === requestedSourceChat;
+      if (!sameChat) {
+        logger.info('等待队列期间聊天已切换，已取消过期的上下文准备任务。');
+        return false;
+      }
+      await prepareStoryEchoPrompt(chat, contextSize, abort, type);
+      return true;
+    },
+    { holdForegroundLease: (prepared) => prepared },
+  );
 }

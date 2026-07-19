@@ -18,13 +18,22 @@ import { countCompletedTurns } from '../extraction/chunk-planner';
 import { extractionService } from '../extraction/service';
 import { fetchCustomLlmModels } from '../llm/model-list';
 import { createLlmProvider } from '../llm/provider-factory';
+import {
+  resetStructuredOutputDiagnostics,
+  structuredOutputDiagnosticsSnapshot,
+} from '../llm/structured-diagnostics';
 import { normalizeChatCompletionsBaseUrl } from '../llm/url';
 import { MemoryRepository } from '../memory/repository';
-import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import {
+  getContext,
+  getCurrentChatId,
+  getMainConnectionIdentity,
+} from '../platform/sillytavern';
 import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../prompt/render';
 import { selectRecentWindow } from '../prompt/window';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { resolveVectorConfig } from '../vector/config';
 import { resolveEmbeddingClient } from '../vector/embedding-providers';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
@@ -40,13 +49,19 @@ const memoryMetadataManager = new MemoryMetadataManager(
   memoryRepository,
   async (state) => extractionService.syncPendingVectors(state),
   async () => {
-    const settings = settingsRepository.get();
-    const chat = getContext().chat;
-    const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
-    if (!window || window.retainedStartIndex <= 0) {
-      throw new Error('当前没有窗口外历史可供重建。');
-    }
-    await extractionService.rebuildThrough(window.retainedStartIndex - 1);
+    const requestedChatId = getCurrentChatId();
+    return storyEchoTaskCoordinator.enqueueManual('重建自动剧情元数据', async () => {
+      if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+        throw new Error('等待重建期间聊天已切换，已取消任务。');
+      }
+      const settings = settingsRepository.get();
+      const chat = getContext().chat;
+      const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
+      if (!window || window.retainedStartIndex <= 0) {
+        throw new Error('当前没有窗口外历史可供重建。');
+      }
+      await extractionService.rebuildThrough(window.retainedStartIndex - 1);
+    });
   },
 );
 let cachedVectorCollectionId = '';
@@ -909,7 +924,10 @@ function bindSettings(panel: HTMLElement): void {
     const button = event.currentTarget as HTMLButtonElement;
     button.disabled = true;
     try {
-      await createLlmProvider(settingsRepository.get()).testConnection();
+      await storyEchoTaskCoordinator.enqueueManual(
+        '测试LLM连接',
+        () => createLlmProvider(settingsRepository.get()).testConnection(),
+      );
       notify.success('LLM连接测试成功。');
     } catch (error) {
       notify.error(error instanceof Error ? error.message : 'LLM连接测试失败。');
@@ -923,21 +941,31 @@ function bindSettings(panel: HTMLElement): void {
     const status = element<HTMLElement>(panel, '#story-echo-status');
     button.disabled = true;
     try {
-      const settings = settingsRepository.get();
-      const chat = getContext().chat;
-      const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
-      if (!window || window.retainedStartIndex <= 0) {
+      const requestedChatId = getCurrentChatId();
+      const processed = await storyEchoTaskCoordinator.enqueueManual('主动处理窗口外历史', async () => {
+        if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+          throw new Error('等待处理期间聊天已切换，已取消任务。');
+        }
+        const settings = settingsRepository.get();
+        const chat = getContext().chat;
+        const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
+        if (!window || window.retainedStartIndex <= 0) {
+          return false;
+        }
+        const target = window.retainedStartIndex - 1;
+        await extractionService.processThrough(target, (progress) => {
+          status.textContent = `正在抽取消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
+        });
+        if (settings.summary.enabled) {
+          await stageSummaryService.processAllThrough(target, (progress) => {
+            status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
+          });
+        }
+        return true;
+      });
+      if (!processed) {
         notify.info('当前没有窗口外历史需要处理。');
         return;
-      }
-      const target = window.retainedStartIndex - 1;
-      await extractionService.processThrough(target, (progress) => {
-        status.textContent = `正在抽取消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
-      });
-      if (settings.summary.enabled) {
-        await stageSummaryService.processAllThrough(target, (progress) => {
-          status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
-        });
       }
       notify.success('窗口外历史处理完成；不足所配置抽取或总结批次的尾部原文会继续保留。');
       await refreshStatus(panel, true);
@@ -976,7 +1004,7 @@ function bindSettings(panel: HTMLElement): void {
     }
   });
 
-  element<HTMLButtonElement>(panel, '#story-echo-reset-stats').addEventListener('click', async () => {
+  element<HTMLButtonElement>(panel, '#story-echo-reset-stats').addEventListener('click', async (event) => {
     const state = memoryRepository.getExisting();
     if (!state) {
       notify.info('当前聊天还没有统计数据。');
@@ -985,10 +1013,29 @@ function bindSettings(panel: HTMLElement): void {
     if (!globalThis.confirm('重置当前聊天的StoryEcho统计、调试轨迹和最近检查记录？')) {
       return;
     }
-    resetDiagnostics(state);
-    await memoryRepository.save(state);
-    await refreshStatus(panel);
-    notify.success('当前聊天统计已重置。');
+    const button = event.currentTarget as HTMLButtonElement;
+    const requestedChatId = getCurrentChatId();
+    button.disabled = true;
+    try {
+      await storyEchoTaskCoordinator.enqueueManual('重置当前聊天统计', async () => {
+        if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+          throw new Error('等待重置期间聊天已切换，已取消任务。');
+        }
+        const current = memoryRepository.getExisting();
+        if (!current) {
+          throw new Error('当前聊天的StoryEcho数据已不可用。');
+        }
+        resetDiagnostics(current);
+        resetStructuredOutputDiagnostics();
+        await memoryRepository.save(current);
+      });
+      await refreshStatus(panel);
+      notify.success('当前聊天统计已重置。');
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '重置统计失败。');
+    } finally {
+      button.disabled = false;
+    }
   });
 }
 
@@ -1037,6 +1084,8 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
     0,
     metrics.estimatedRemovedTokens - metrics.estimatedInjectedTokens,
   );
+  const structured = structuredOutputDiagnosticsSnapshot();
+  const queue = storyEchoTaskCoordinator.snapshot();
   return [
     `记忆：active ${statusCount('active')} / resolved ${statusCount('resolved')} / superseded ${statusCount('superseded')} / invalid ${statusCount('invalid')}`,
     `阶段总结：更新${metrics.summaryUpdates}次，失败${metrics.summaryFailures}次，覆盖${metrics.summaryMessagesCovered}条消息，平均${averageSummary}ms/次`,
@@ -1044,6 +1093,9 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
     `抽取参考：构建${metrics.referenceContextBuilds}次，部分失败${metrics.referenceContextPartialFailures}次，累计${metrics.referenceContextTokens} Token，命中世界书${metrics.referenceWorldInfoEntries}条`,
     `整理：调用${metrics.consolidationCalls}次，失败回退${metrics.consolidationFailures}次，平均${averageConsolidation}ms`,
     `查询改写：请求${metrics.queryRewriteRequests}次，缓存命中${metrics.queryRewriteCacheHits}次，失败回退${metrics.queryRewriteFailures}次，平均${averageQueryRewrite}ms`,
+    `结构化输出：Object ${structured.successes['json-object']}/${structured.attempts['json-object']}（失败${structured.failures['json-object']}）｜Schema ${structured.successes['json-schema']}/${structured.attempts['json-schema']}（失败${structured.failures['json-schema']}）｜明文 ${structured.successes.text}/${structured.attempts.text}（失败${structured.failures.text}）`,
+    `结构化降级：Provider回退${structured.providerFallbacks}次，自适应拆批${structured.adaptiveSplits}次，自动冷却跳过${structured.extractionCooldownSkips}次，最近${structured.lastProvider ?? '-'} / ${structured.lastMode ?? '-'} / ${structured.lastOutcome ?? '-'}`,
+    `任务队列：运行${queue.runningKind ?? (queue.foregroundLeaseActive ? '等待角色回复' : '空闲')}，排队前台${queue.queuedForeground}/手动${queue.queuedManual}/后台${queue.queuedBackground}，最长等待${queue.maximumQueueWaitMs}ms`,
     `动作：CREATE ${metrics.actions.CREATE} / MERGE ${metrics.actions.MERGE} / UPDATE ${metrics.actions.UPDATE} / RESOLVE ${metrics.actions.RESOLVE} / SUPERSEDE ${metrics.actions.SUPERSEDE} / IGNORE ${metrics.actions.IGNORE}`,
     `向量：查询${metrics.vectorQueries}次，查询失败${metrics.vectorQueryFailures}次，同步失败${metrics.vectorSyncFailures}次，写入${metrics.vectorItemsInserted}，删除${metrics.vectorItemsDeleted}，重建${metrics.vectorRebuilds}次`,
     `上下文：尝试${metrics.generationAttempts}次，裁剪${metrics.generationsTrimmed}次，延迟裁剪${metrics.generationsDeferred}次，移除${metrics.messagesRemoved}条原文，注入${metrics.memoriesInjected}条记忆`,
@@ -1091,6 +1143,31 @@ function tracesText(state: NonNullable<ReturnType<MemoryRepository['getExisting'
     .join('\n\n');
 }
 
+function runtimeStatusText(): string[] {
+  const queue = storyEchoTaskCoordinator.snapshot();
+  const background = backgroundProcessingScheduler.snapshot();
+  const queued = queue.queuedForeground + queue.queuedManual + queue.queuedBackground;
+  const running = queue.runningKind
+    ? `${queue.runningKind}/${queue.runningName}`
+    : queue.foregroundLeaseActive ? '等待角色回复' : '空闲';
+  let identityText = '未识别';
+  try {
+    const identity = getMainConnectionIdentity();
+    identityText = [identity.source || identity.mainApi, identity.model].filter(Boolean).join('/') || '未识别';
+  } catch {
+    // The panel can render before SillyTavern has finished publishing context.
+  }
+  return [
+    `主连接：${identityText}`,
+    `任务：${running}`,
+    `排队：前台${queue.queuedForeground}/手动${queue.queuedManual}/后台${queue.queuedBackground}（共${queued}）`,
+    `最长等待：${queue.maximumQueueWaitMs}ms`,
+    ...(background.extractionCooldownActive
+      ? [`自动抽取退避：${Math.ceil(background.extractionCooldownRemainingMs / 1_000)}秒（连续失败${background.extractionCooldownFailures}次）`]
+      : []),
+  ];
+}
+
 async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Promise<void> {
   const target = element<HTMLElement>(panel, '#story-echo-status');
   const stageSummaryTarget = element<HTMLElement>(panel, '#story-echo-summary');
@@ -1102,9 +1179,12 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     if (!state) {
       cachedVectorCollectionId = '';
       cachedVectorCountText = '未读取';
-      target.textContent = getCurrentChatId()
-        ? '当前聊天尚未初始化StoryEcho数据。'
-        : '当前没有打开聊天。';
+      target.textContent = [
+        getCurrentChatId()
+          ? '当前聊天尚未初始化StoryEcho数据。'
+          : '当前没有打开聊天。',
+        ...runtimeStatusText(),
+      ].join('｜');
       stats.textContent = '尚无统计数据。';
       stageSummaryTarget.textContent = '尚无阶段总结。';
       inspection.textContent = '尚无生成记录。';
@@ -1148,6 +1228,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       `抽取批次：每${currentSettings.extraction.targetTurnsPerChunk}轮（窗口外待处理${pendingExtractionTurns}轮）`,
       `阶段总结：${state.stageSummary.entries.length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
       `集合：${state.vectorCollectionId}`,
+      ...runtimeStatusText(),
     ].join('｜');
     const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
     const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);

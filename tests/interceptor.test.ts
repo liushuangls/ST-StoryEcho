@@ -3,10 +3,12 @@ import { MODULE_ID } from '../src/core/constants';
 import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import { storyEchoGenerateInterceptor } from '../src/prompt/interceptor';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
+import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../src/vector/config';
 import { chatState, memory } from './fixtures';
 
 afterEach(() => {
+  storyEchoTaskCoordinator.resetForTests();
   vi.unstubAllGlobals();
 });
 

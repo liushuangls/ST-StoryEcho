@@ -260,12 +260,18 @@ export interface LlmRequest {
   system: string;
   prompt: string;
   jsonSchema?: Record<string, unknown>;
+  jsonExample?: unknown;
+  structuredOutput?: LlmStructuredOutputMode;
   maxTokens?: number;
   signal?: AbortSignal;
 }
 
+export type LlmStructuredOutputMode = 'json-object' | 'json-schema' | 'text';
+
 export interface LlmProvider {
   readonly id: LlmProviderId;
+  supportsStructuredOutput(mode: LlmStructuredOutputMode): boolean;
+  structuredOutputOrder(): readonly LlmStructuredOutputMode[];
   complete(request: LlmRequest): Promise<string>;
   testConnection(): Promise<void>;
 }

@@ -51,12 +51,16 @@ export interface SillyTavernContext {
   chatId?: string;
   characterId?: number;
   groupId?: string;
+  /** SillyTavern's top-level API id. Chat completions use `openai`. */
+  mainApi?: string;
   name1?: string;
   name2?: string;
   characters?: SillyTavernCharacter[];
   groups?: Array<Record<string, unknown>>;
   tagMap?: Record<string, string[]>;
   maxContext?: number;
+  chatCompletionSettings?: Record<string, unknown>;
+  textCompletionSettings?: Record<string, unknown>;
   extensionSettings: Record<string, unknown>;
   chatMetadata: Record<string, unknown>;
   eventSource?: {
@@ -65,6 +69,7 @@ export interface SillyTavernContext {
     removeListener?(event: string, handler: (...args: unknown[]) => void | Promise<void>): void;
   };
   event_types?: Record<string, string>;
+  eventTypes?: Record<string, string>;
   saveSettingsDebounced(): void;
   saveMetadata(): Promise<void>;
   generateRaw(options: {
@@ -75,11 +80,18 @@ export interface SillyTavernContext {
   }): Promise<string>;
   getRequestHeaders?(): Record<string, string>;
   getCurrentChatId?(): string | null;
+  getChatCompletionModel?(settings?: Record<string, unknown>): string | null;
   getCharacterCardFields?(options?: { chid?: number }): SillyTavernCharacterCardFields;
   getTokenCountAsync?(text: string, padding?: number): Promise<number>;
   substituteParams?(text: string): string;
   /** Test/future API seam; current SillyTavern builds expose this from world-info.js. */
   getSortedWorldInfoEntries?(): Promise<SillyTavernWorldInfoEntry[]>;
+}
+
+export interface MainConnectionIdentity {
+  mainApi: string;
+  source: string;
+  model: string;
 }
 
 interface SillyTavernGlobal {
@@ -118,6 +130,68 @@ export function getCurrentChatId(context = getContext()): string | null {
   }
 
   return null;
+}
+
+const CHAT_MODEL_KEYS: Record<string, string> = {
+  ai21: 'ai21_model',
+  aimlapi: 'aimlapi_model',
+  azure_openai: 'azure_openai_model',
+  chutes: 'chutes_model',
+  claude: 'claude_model',
+  cohere: 'cohere_model',
+  cometapi: 'cometapi_model',
+  custom: 'custom_model',
+  deepseek: 'deepseek_model',
+  electronhub: 'electronhub_model',
+  fireworks: 'fireworks_model',
+  groq: 'groq_model',
+  makersuite: 'google_model',
+  minimax: 'minimax_model',
+  mistralai: 'mistralai_model',
+  moonshot: 'moonshot_model',
+  nanogpt: 'nanogpt_model',
+  openai: 'openai_model',
+  openrouter: 'openrouter_model',
+  perplexity: 'perplexity_model',
+  pollinations: 'pollinations_model',
+  siliconflow: 'siliconflow_model',
+  vertexai: 'vertexai_model',
+  workers_ai: 'workers_ai_model',
+  xai: 'xai_model',
+  zai: 'zai_model',
+};
+
+/**
+ * Resolve the model selected by SillyTavern without reading credentials.
+ *
+ * SillyTavern 1.18 exposes getChatCompletionModel() directly. The field map is
+ * retained for older compatible builds and test doubles where that helper is
+ * absent.
+ */
+export function getMainConnectionIdentity(context = getContext()): MainConnectionIdentity {
+  const mainApi = typeof context.mainApi === 'string' ? context.mainApi.trim() : '';
+  if (mainApi !== 'openai') {
+    return { mainApi, source: '', model: '' };
+  }
+
+  const settings = context.chatCompletionSettings ?? {};
+  const source = typeof settings['chat_completion_source'] === 'string'
+    ? settings['chat_completion_source'].trim()
+    : '';
+  let model = '';
+  try {
+    const resolved = context.getChatCompletionModel?.(settings);
+    model = typeof resolved === 'string' ? resolved.trim() : '';
+  } catch {
+    // Fall through to the stable source-to-setting mapping below.
+  }
+  if (!model) {
+    const modelKey = CHAT_MODEL_KEYS[source];
+    const fallback = modelKey ? settings[modelKey] : undefined;
+    model = typeof fallback === 'string' ? fallback.trim() : '';
+  }
+
+  return { mainApi, source, model };
 }
 
 export async function getRequestHeaders(context = getContext()): Promise<Record<string, string>> {

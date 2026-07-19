@@ -6,11 +6,16 @@ import {
   backgroundTargetMessageId,
 } from '../src/background/scheduler';
 import { extractionService } from '../src/extraction/service';
+import {
+  resetStructuredOutputDiagnostics,
+  structuredOutputDiagnosticsSnapshot,
+} from '../src/llm/structured-diagnostics';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { stageSummaryService } from '../src/summary/service';
 import { chatState } from './fixtures';
 
 afterEach(() => {
+  resetStructuredOutputDiagnostics();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -143,6 +148,59 @@ describe('backgroundTargetMessageId', () => {
     expect(reconcile).toHaveBeenCalledOnce();
     expect(extract).toHaveBeenCalledTimes(2);
     expect(extract.mock.calls.map(([target]) => target)).toEqual([3, 5]);
+  });
+
+  it('backs off the same failed automatic extraction block without blocking later foreground safety work', async () => {
+    let now = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const chat = [
+      ...turn('u1', 'a1'),
+      ...turn('u2', 'a2'),
+      ...turn('u3', 'a3'),
+    ];
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.enabled = true;
+    settings.recentWindow = { size: 1, unit: 'turns' };
+    settings.extraction.automatic = true;
+    settings.summary.enabled = false;
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.indexedThroughMessageId = -1;
+    const context = {
+      chat,
+      chatId: 'chat-id',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'chat-id',
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    vi.spyOn(extractionService, 'reconcileHistory').mockResolvedValue(state);
+    const extract = vi.spyOn(extractionService, 'processNextThroughVerifiedHistory')
+      .mockRejectedValueOnce(new Error('temporary provider failure'))
+      .mockImplementation(async (target) => {
+        state.indexedThroughMessageId = target;
+        return state;
+      });
+    const scheduler = new BackgroundProcessingScheduler();
+
+    await scheduler.runNow();
+    expect(scheduler.snapshot(now)).toMatchObject({
+      extractionCooldownActive: true,
+      extractionCooldownFailures: 1,
+      extractionCooldownRemainingMs: 30_000,
+    });
+
+    await scheduler.runNow();
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(structuredOutputDiagnosticsSnapshot().extractionCooldownSkips).toBe(1);
+
+    now += 30_001;
+    await scheduler.runNow();
+    expect(extract).toHaveBeenCalledTimes(2);
+    expect(scheduler.snapshot(now).extractionCooldownActive).toBe(false);
   });
 
   it('invalidates the append-only shortcut after a delete or branch event', async () => {

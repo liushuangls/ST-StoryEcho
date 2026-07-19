@@ -6,6 +6,8 @@ import type {
   TruthStatus,
 } from '../core/types';
 import { MemoryRepository, type StoryMemoryEdit } from '../memory/repository';
+import { getCurrentChatId } from '../platform/sillytavern';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { notify } from './notifications';
 
 const TYPE_LABELS: Readonly<Record<MemoryType, string>> = {
@@ -286,6 +288,7 @@ export class MemoryMetadataManager {
   private populatedMemoryId = '';
   private populatedUpdatedAt = '';
   private editorDirty = false;
+  private editorRevision = 0;
 
   constructor(
     private readonly repository: MemoryRepository,
@@ -300,6 +303,7 @@ export class MemoryMetadataManager {
     )) {
       const markDirty = (): void => {
         this.editorDirty = true;
+        this.editorRevision += 1;
       };
       control.addEventListener('input', markDirty);
       control.addEventListener('change', markDirty);
@@ -366,15 +370,30 @@ export class MemoryMetadataManager {
       const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
       try {
-        const state = await this.repository.updateMemory(
-          this.selectedMemoryId,
-          this.readEdit(panel),
+        const memoryId = this.selectedMemoryId;
+        const edit = this.readEdit(panel);
+        const submittedRevision = this.editorRevision;
+        const requestedChatId = getCurrentChatId();
+        const { syncError } = await storyEchoTaskCoordinator.enqueueManual(
+          '保存剧情记忆元数据',
+          async () => {
+            if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+              throw new Error('等待保存期间聊天已切换，已取消修改。');
+            }
+            const state = await this.repository.updateMemory(memoryId, edit);
+            try {
+              await this.syncVectors(state);
+              return { syncError: null };
+            } catch (error) {
+              return { syncError: error };
+            }
+          },
         );
-        this.editorDirty = false;
-        try {
-          await this.syncVectors(state);
-        } catch (error) {
-          notify.info(`修改已保存；向量同步将在稍后重试：${error instanceof Error ? error.message : String(error)}`);
+        if (this.selectedMemoryId === memoryId && this.editorRevision === submittedRevision) {
+          this.editorDirty = false;
+        }
+        if (syncError) {
+          notify.info(`修改已保存；向量同步将在稍后重试：${syncError instanceof Error ? syncError.message : String(syncError)}`);
         }
         await onChanged();
         notify.success('剧情记忆元数据已保存。');
@@ -405,15 +424,30 @@ export class MemoryMetadataManager {
       const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
       try {
-        const state = await this.repository.removeMemory(current.id);
-        this.selectedMemoryId = '';
-        this.editorDirty = false;
-        this.populatedMemoryId = '';
-        this.populatedUpdatedAt = '';
-        try {
-          await this.syncVectors(state);
-        } catch (error) {
-          notify.info(`记忆已删除；旧向量清理将在稍后重试：${error instanceof Error ? error.message : String(error)}`);
+        const requestedChatId = getCurrentChatId();
+        const { syncError } = await storyEchoTaskCoordinator.enqueueManual(
+          '删除剧情记忆元数据',
+          async () => {
+            if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+              throw new Error('等待删除期间聊天已切换，已取消操作。');
+            }
+            const state = await this.repository.removeMemory(current.id);
+            try {
+              await this.syncVectors(state);
+              return { syncError: null };
+            } catch (error) {
+              return { syncError: error };
+            }
+          },
+        );
+        if (this.selectedMemoryId === current.id) {
+          this.selectedMemoryId = '';
+          this.editorDirty = false;
+          this.populatedMemoryId = '';
+          this.populatedUpdatedAt = '';
+        }
+        if (syncError) {
+          notify.info(`记忆已删除；旧向量清理将在稍后重试：${syncError instanceof Error ? syncError.message : String(syncError)}`);
         }
         await onChanged();
         notify.success('剧情记忆已删除。');

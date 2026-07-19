@@ -66,6 +66,27 @@ describe('OpenAiCompatibleProvider', () => {
     });
   });
 
+  it('passes DeepSeek-compatible json_object through SillyTavern custom_include_body', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '{}' } }],
+    }), { status: 200 }));
+    const config = customConfig();
+    config.baseUrl = 'https://api.deepseek.com/v1';
+    config.model = 'deepseek-v4-pro';
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    await provider.complete({
+      system: 'system',
+      prompt: 'prompt',
+      structuredOutput: 'json-object',
+      jsonSchema: { type: 'object' },
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.custom_include_body).toBe('response_format:\n  type: json_object');
+    expect(body.json_schema).toBeUndefined();
+  });
+
   it('gives reasoning models enough room to finish the connection test', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: 'OK' } }],

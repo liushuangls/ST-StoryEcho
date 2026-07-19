@@ -14,11 +14,19 @@ export const STAGE_SUMMARY_SYSTEM_PROMPT = `你是一个严格的长篇角色扮
 6. 删除寒暄、无后果动作、重复描写、文风模仿和对未来回复的指令。
 7. 使用中立第三人称；避免指代不清的“我、你、他、那里、那个”。
 8. 输出一条可独立阅读的中文阶段总结正文，不引用不存在的上一版总结，不要解释过程，不要输出Markdown代码块或JSON。
-9. 总结长度必须服从输出预算；空间不足时优先保留当前局势、关键因果、人物关系、承诺、秘密、线索和未解决事项。`;
+9. 总结长度必须服从输出预算；空间不足时优先保留当前局势、关键因果、人物关系、承诺、秘密、线索和未解决事项。
+10. userUiPersona只是SillyTavern界面上的说话者标签，不等于剧情角色姓名，也不是姓名、种族、性别、年龄、身份或关系的证据。原文未明确给出用户剧情身份时统一写“用户角色”。
+11. assistantCharacter可用于标识AI所扮演的角色，但原文冲突时以本批原文为准。不得根据预设习惯或界面名字新增稳定身份。`;
+
+export interface StageSummaryIdentity {
+  userUiPersona: string;
+  assistantCharacter: string;
+}
 
 export function buildStageSummaryPrompt(
   messages: TavernChatMessage[],
   sourceStartMessageId: number,
+  identity: StageSummaryIdentity = { userUiPersona: '', assistantCharacter: '' },
 ): string {
   const payload = messages
     .map((message, offset) => ({ message, messageId: sourceStartMessageId + offset }))
@@ -26,7 +34,9 @@ export function buildStageSummaryPrompt(
     .map(({ message, messageId }) => ({
       messageId,
       role: message.is_user ? 'user' : 'assistant',
-      name: message.name || '',
+      speaker: message.is_user
+        ? 'user-character'
+        : message.name || identity.assistantCharacter || 'assistant-character',
       content: storyContent(message),
     }))
     .filter(({ content }) => content.length > 0);
@@ -34,6 +44,13 @@ export function buildStageSummaryPrompt(
 
   return [
     `请把消息 ${sourceStartMessageId} 到 ${sourceEndMessageId} 总结为一条独立阶段总结。`,
+    '<speaker_identity>',
+    JSON.stringify({
+      userUiPersona: identity.userUiPersona,
+      assistantCharacter: identity.assistantCharacter,
+      userIdentityRule: 'userUiPersona仅为界面标签；剧情身份只能来自history_messages正文。',
+    }),
+    '</speaker_identity>',
     '<history_messages>',
     JSON.stringify(payload),
     '</history_messages>',
