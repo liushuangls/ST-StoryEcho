@@ -3,6 +3,7 @@ import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import {
   buildQueryRewriteInput,
   parseQueryRewriteResponse,
+  QUERY_REWRITE_SYSTEM_PROMPT,
   QueryRewriteService,
   type QueryRewriteCompletion,
 } from '../src/retrieval/query-rewriter';
@@ -27,6 +28,12 @@ describe('query rewrite input', () => {
       '林雨点了点头。',
     ]);
     expect(JSON.stringify(input)).not.toContain('系统注入');
+  });
+
+  it('tells the model not to copy unrelated assistant guesses into self-contained queries', () => {
+    expect(QUERY_REWRITE_SYSTEM_PROMPT).toContain('用户发言已经自包含时');
+    expect(QUERY_REWRITE_SYSTEM_PROMPT).toContain('用户明确陈述或纠正的事实优先');
+    expect(QUERY_REWRITE_SYSTEM_PROMPT).toContain('用户先前明确告知的姓名');
   });
 });
 

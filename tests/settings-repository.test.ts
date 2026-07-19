@@ -38,6 +38,172 @@ describe('SettingsRepository credential persistence', () => {
     });
   });
 
+  it('round-trips every user-editable setting without silently replacing values', () => {
+    const extensionSettings: Record<string, unknown> = {};
+    const saveSettingsDebounced = vi.fn();
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced }),
+    });
+    const repository = new SettingsRepository();
+
+    const written = repository.update((settings) => {
+      settings.enabled = true;
+      settings.debug = true;
+      settings.recentWindow = { size: 37, unit: 'messages' };
+      settings.summary = {
+        enabled: false,
+        automatic: false,
+        targetTurnsPerUpdate: 7,
+        windowSize: 9,
+        maxTokens: 2_304,
+      };
+      settings.recall = {
+        maxEvents: 11,
+        maxTokens: 4_500,
+        scoreThreshold: 0.41,
+        queryMode: 'local',
+      };
+      settings.extraction = {
+        automatic: false,
+        targetTurnsPerChunk: 3,
+        reference: {
+          mode: 'character',
+          maxTokens: 2_700,
+          maxWorldInfoEntries: 8,
+        },
+      };
+      settings.llm = {
+        provider: 'openai-compatible',
+        custom: {
+          baseUrl: 'http://sub2api:8080/v1',
+          model: 'deepseek-v4-flash',
+          apiKey: 'llm-key',
+          timeoutMs: 75_000,
+          allowInsecureHttp: true,
+          fallbackToMain: false,
+          strictJsonSchema: true,
+        },
+      };
+      settings.vector = {
+        source: 'volcengine-multimodal',
+        model: 'inherited-model',
+        custom: {
+          baseUrl: 'http://embedding:8080/v1',
+          model: 'custom-embedding',
+          apiKey: 'embedding-key',
+          timeoutMs: 76_000,
+          allowInsecureHttp: true,
+        },
+        volcengine: {
+          baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+          model: 'ep-m-test',
+          apiKey: 'ark-key',
+          timeoutMs: 77_000,
+          allowInsecureHttp: false,
+        },
+      };
+    });
+
+    expect(written.extraction.targetTurnsPerChunk).toBe(3);
+    expect(repository.get()).toEqual(written);
+    expect(saveSettingsDebounced).toHaveBeenCalledOnce();
+  });
+
+  it('normalizes corrupted or out-of-range persisted values before services consume them', () => {
+    const extensionSettings: Record<string, unknown> = {
+      story_echo: {
+        version: 6,
+        recentWindow: { size: -12, unit: 'floors' },
+        summary: {
+          targetTurnsPerUpdate: 0,
+          windowSize: 999,
+          maxTokens: 12,
+        },
+        recall: {
+          maxEvents: 999,
+          maxTokens: -1,
+          scoreThreshold: 9,
+          queryMode: 'magic',
+        },
+        extraction: {
+          targetTurnsPerChunk: 99,
+          reference: {
+            mode: 'everything',
+            maxTokens: 1,
+            maxWorldInfoEntries: 99,
+          },
+        },
+        llm: {
+          provider: 'unknown',
+          custom: {
+            baseUrl: '  https://example.com/v1  ',
+            model: '  model-name  ',
+            timeoutMs: 1,
+          },
+        },
+        vector: {
+          source: '   ',
+          model: '  inherited  ',
+          custom: { timeoutMs: 999_999 },
+          volcengine: { timeoutMs: 0 },
+        },
+      },
+    };
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    const settings = new SettingsRepository().get();
+
+    expect(settings).toMatchObject({
+      recentWindow: { size: 0, unit: 'turns' },
+      summary: { targetTurnsPerUpdate: 1, windowSize: 100, maxTokens: 128 },
+      recall: { maxEvents: 50, maxTokens: 0, scoreThreshold: 1, queryMode: 'llm' },
+      extraction: {
+        targetTurnsPerChunk: 20,
+        reference: {
+          mode: 'character-world-info',
+          maxTokens: 256,
+          maxWorldInfoEntries: 20,
+        },
+      },
+      llm: {
+        provider: 'main',
+        custom: {
+          baseUrl: 'https://example.com/v1',
+          model: 'model-name',
+          timeoutMs: 1_000,
+        },
+      },
+      vector: {
+        source: 'inherit',
+        model: 'inherited',
+        custom: { timeoutMs: 300_000 },
+        volcengine: { timeoutMs: 1_000 },
+      },
+    });
+  });
+
+  it('normalizes edits before saving so UI and background services share one effective value', () => {
+    const extensionSettings: Record<string, unknown> = {};
+    const saveSettingsDebounced = vi.fn();
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced }),
+    });
+
+    const settings = new SettingsRepository().update((current) => {
+      current.extraction.targetTurnsPerChunk = 3.9;
+      current.recall.scoreThreshold = -2;
+      current.summary.maxTokens = 99_999;
+    });
+
+    expect(settings.extraction.targetTurnsPerChunk).toBe(3);
+    expect(settings.recall.scoreThreshold).toBe(0);
+    expect(settings.summary.maxTokens).toBe(8_192);
+    expect(extensionSettings['story_echo']).toBe(settings);
+    expect(saveSettingsDebounced).toHaveBeenCalledOnce();
+  });
+
   it('migrates an existing Volcengine custom key into the dedicated provider once', () => {
     const extensionSettings: Record<string, unknown> = {
       story_echo: {

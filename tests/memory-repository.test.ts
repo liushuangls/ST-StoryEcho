@@ -1,7 +1,30 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SillyTavernContext } from '../src/platform/sillytavern';
-import { MemoryRepository } from '../src/memory/repository';
-import { memory } from './fixtures';
+import { MemoryRepository, type StoryMemoryEdit } from '../src/memory/repository';
+import { chatState, memory } from './fixtures';
+
+function editable(overrides: Partial<StoryMemoryEdit> = {}): StoryMemoryEdit {
+  return {
+    type: 'state_change',
+    status: 'active',
+    truthStatus: 'confirmed',
+    importance: 0.9,
+    event: '银色钥匙现在由顾青持有',
+    cause: '林雨完成交接',
+    consequence: '',
+    scene: { location: '钟楼', time: '午夜', participants: ['林雨', '顾青'] },
+    entities: ['银色钥匙', '顾青'],
+    aliases: ['钟楼钥匙'],
+    stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '顾青' }],
+    unresolvedThreads: [],
+    knownBy: ['林雨', '顾青'],
+    retrievalText: '银色钥匙（钟楼钥匙）当前由顾青持有。',
+    injectionText: '较早时，林雨把银色钥匙交给了顾青。',
+    pinned: true,
+    excluded: false,
+    ...overrides,
+  };
+}
 
 describe('MemoryRepository migration', () => {
   afterEach(() => {
@@ -126,5 +149,103 @@ describe('MemoryRepository migration', () => {
       updatedAt: '2026-01-02T00:00:00.000Z',
     });
     expect(saveMetadata).toHaveBeenCalledOnce();
+  });
+});
+
+describe('MemoryRepository manual metadata editing', () => {
+  afterEach(() => {
+    globalThis.SillyTavern = undefined;
+  });
+
+  function contextWithMemory() {
+    const saveMetadata = vi.fn(async () => undefined);
+    const state = chatState([memory()]);
+    const context: SillyTavernContext = {
+      chat: [
+        { is_user: true, mes: '林雨拿到钥匙' },
+        { is_user: false, mes: '林雨收好钥匙' },
+        { is_user: true, mes: '继续' },
+      ],
+      chatId: 'chat-id',
+      extensionSettings: {},
+      chatMetadata: { story_echo: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata,
+      generateRaw: vi.fn(async () => ''),
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+    return { context, saveMetadata };
+  }
+
+  it('persists an edited memory, protects it from automatic consolidation, and replaces its vector', async () => {
+    const { saveMetadata } = contextWithMemory();
+
+    const state = await new MemoryRepository().updateMemory('mem-1', editable());
+    const updated = state.memories[0];
+
+    expect(updated).toMatchObject({
+      id: 'mem-1',
+      event: '银色钥匙现在由顾青持有',
+      logicalKey: 'holder:银色钥匙',
+      scene: { location: '钟楼', time: '午夜', participants: ['林雨', '顾青'] },
+      pinned: true,
+      manuallyEdited: true,
+      lastOperation: 'UPDATE',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    expect(updated?.vectorHash).not.toBe(123);
+    expect(updated?.retrievalHash).not.toBe('retrieval-1');
+    expect(state.pendingVectorDeleteHashes).toContain(123);
+    expect(state.pendingVectorHashes).toContain(updated?.vectorHash);
+    expect(saveMetadata).toHaveBeenCalledOnce();
+  });
+
+  it('does not requeue a vector when only non-retrieval metadata changes', async () => {
+    contextWithMemory();
+    const original = memory();
+
+    const state = await new MemoryRepository().updateMemory('mem-1', editable({
+      retrievalText: original.retrievalText,
+      injectionText: '人工修正后的注入文本。',
+    }));
+
+    expect(state.memories[0]?.vectorHash).toBe(123);
+    expect(state.pendingVectorHashes).toEqual([]);
+    expect(state.pendingVectorDeleteHashes).toEqual([]);
+  });
+
+  it('queues vector deletion when an edited memory is marked invalid', async () => {
+    contextWithMemory();
+    const original = memory();
+
+    const state = await new MemoryRepository().updateMemory('mem-1', editable({
+      status: 'invalid',
+      retrievalText: original.retrievalText,
+    }));
+
+    expect(state.memories[0]?.status).toBe('invalid');
+    expect(state.pendingVectorHashes).toEqual([]);
+    expect(state.pendingVectorDeleteHashes).toEqual([123]);
+  });
+
+  it('deletes a memory and queues its stored vector for removal', async () => {
+    contextWithMemory();
+
+    const state = await new MemoryRepository().removeMemory('mem-1');
+
+    expect(state.memories).toEqual([]);
+    expect(state.pendingVectorHashes).toEqual([]);
+    expect(state.pendingVectorDeleteHashes).toEqual([123]);
+  });
+
+  it('rejects malformed manual state changes instead of corrupting chat metadata', async () => {
+    const { context } = contextWithMemory();
+
+    await expect(new MemoryRepository().updateMemory('mem-1', editable({
+      stateChanges: [{ entity: '', attribute: '持有者', after: '顾青' }],
+    }))).rejects.toThrow('状态主体不能为空');
+
+    expect((context.chatMetadata['story_echo'] as ReturnType<typeof chatState>).memories[0]?.event)
+      .toBe('林雨获得银色钥匙');
   });
 });

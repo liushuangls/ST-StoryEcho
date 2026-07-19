@@ -1,3 +1,7 @@
+import {
+  backgroundProcessingScheduler,
+  backgroundTargetMessageId,
+} from '../background/scheduler';
 import { logger } from '../core/logger';
 import type {
   ExtractionReferenceMode,
@@ -10,6 +14,7 @@ import type {
 import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
 import { resetDiagnostics } from '../debug/metrics';
 import { buildDebugReport } from '../debug/report';
+import { countCompletedTurns } from '../extraction/chunk-planner';
 import { extractionService } from '../extraction/service';
 import { fetchCustomLlmModels } from '../llm/model-list';
 import { createLlmProvider } from '../llm/provider-factory';
@@ -24,12 +29,26 @@ import { resolveVectorConfig } from '../vector/config';
 import { resolveEmbeddingClient } from '../vector/embedding-providers';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { normalizeEmbeddingsUrl, normalizeVolcengineMultimodalEmbeddingsUrl } from '../vector/url';
+import { MemoryMetadataManager, memoryManagerTemplate } from './memory-manager';
 import { notify } from './notifications';
 
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
 const memoryRepository = new MemoryRepository();
 const vectorStore = new SillyTavernVectorStore();
+const memoryMetadataManager = new MemoryMetadataManager(
+  memoryRepository,
+  async (state) => extractionService.syncPendingVectors(state),
+  async () => {
+    const settings = settingsRepository.get();
+    const chat = getContext().chat;
+    const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
+    if (!window || window.retainedStartIndex <= 0) {
+      throw new Error('当前没有窗口外历史可供重建。');
+    }
+    await extractionService.rebuildThrough(window.retainedStartIndex - 1);
+  },
+);
 let cachedVectorCollectionId = '';
 let cachedVectorCountText = '未读取';
 
@@ -418,6 +437,7 @@ function panelTemplate(): HTMLElement {
         </div>
 
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
+        ${memoryManagerTemplate()}
         <details class="story-echo-diagnostics">
           <summary>当前阶段总结</summary>
           <pre id="story-echo-summary">尚无阶段总结。</pre>
@@ -450,7 +470,11 @@ function element<T extends HTMLElement>(panel: HTMLElement, selector: string): T
 }
 
 function numberValue(input: HTMLInputElement, fallback: number): number {
-  const value = Number(input.value);
+  const raw = input.value.trim();
+  if (!raw) {
+    return fallback;
+  }
+  const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
 }
 
@@ -542,70 +566,81 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
 }
 
 function bindSettings(panel: HTMLElement): void {
+  const scheduleDerivedUpdate = (): void => {
+    backgroundProcessingScheduler.schedule();
+    void refreshStatus(panel);
+  };
   element<HTMLInputElement>(panel, '#story-echo-enabled').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.enabled = (event.currentTarget as HTMLInputElement).checked;
     });
+    scheduleDerivedUpdate();
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-window-size').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-window-size').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       settings.recentWindow.size = Math.max(0, Math.floor(numberValue(event.currentTarget as HTMLInputElement, 10)));
     });
+    scheduleDerivedUpdate();
   });
 
   element<HTMLSelectElement>(panel, '#story-echo-window-unit').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.recentWindow.unit = (event.currentTarget as HTMLSelectElement).value as WindowUnit;
     });
+    scheduleDerivedUpdate();
   });
 
   element<HTMLInputElement>(panel, '#story-echo-summary-enabled').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.summary.enabled = (event.currentTarget as HTMLInputElement).checked;
     });
+    scheduleDerivedUpdate();
   });
 
   element<HTMLInputElement>(panel, '#story-echo-summary-automatic').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.summary.automatic = (event.currentTarget as HTMLInputElement).checked;
     });
+    scheduleDerivedUpdate();
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-summary-turns').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-summary-turns').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 10));
       settings.summary.targetTurnsPerUpdate = Math.min(100, Math.max(1, value));
     });
+    scheduleDerivedUpdate();
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-summary-window').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-summary-window').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 4));
       settings.summary.windowSize = Math.min(100, Math.max(1, value));
     });
+    void refreshStatus(panel);
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-summary-max-tokens').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-summary-max-tokens').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 1_600));
       settings.summary.maxTokens = Math.min(8_192, Math.max(128, value));
     });
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-max-events').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-max-events').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       settings.recall.maxEvents = Math.max(0, Math.floor(numberValue(event.currentTarget as HTMLInputElement, 3)));
     });
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-max-tokens').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-max-tokens').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       settings.recall.maxTokens = Math.max(0, Math.floor(numberValue(event.currentTarget as HTMLInputElement, 1200)));
     });
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-threshold').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-threshold').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       const value = numberValue(event.currentTarget as HTMLInputElement, 0.25);
       settings.recall.scoreThreshold = Math.min(1, Math.max(0, value));
@@ -629,13 +664,15 @@ function bindSettings(panel: HTMLElement): void {
     settingsRepository.update((settings) => {
       settings.extraction.automatic = (event.currentTarget as HTMLInputElement).checked;
     });
+    scheduleDerivedUpdate();
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-extraction-turns').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-extraction-turns').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 5));
       settings.extraction.targetTurnsPerChunk = Math.min(20, Math.max(1, value));
     });
+    scheduleDerivedUpdate();
   });
 
   element<HTMLSelectElement>(panel, '#story-echo-reference-mode').addEventListener('change', (event) => {
@@ -645,14 +682,14 @@ function bindSettings(panel: HTMLElement): void {
     });
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-reference-tokens').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-reference-tokens').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 3_000));
       settings.extraction.reference.maxTokens = Math.min(16_000, Math.max(256, value));
     });
   });
 
-  element<HTMLInputElement>(panel, '#story-echo-reference-world-info').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-reference-world-info').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 5));
       settings.extraction.reference.maxWorldInfoEntries = Math.min(20, Math.max(0, value));
@@ -1071,6 +1108,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       stageSummaryTarget.textContent = '尚无阶段总结。';
       inspection.textContent = '尚无生成记录。';
       traces.textContent = '调试模式关闭或尚无轨迹。';
+      memoryMetadataManager.render(panel, null);
       return;
     }
 
@@ -1091,16 +1129,26 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       }
     }
 
+    const currentSettings = settingsRepository.get();
+    const context = getContext();
+    const backgroundTarget = backgroundTargetMessageId(context.chat, currentSettings);
+    const pendingExtractionTurns = backgroundTarget > state.indexedThroughMessageId
+      ? countCompletedTurns(context.chat.slice(
+          state.indexedThroughMessageId + 1,
+          backgroundTarget + 1,
+        ))
+      : 0;
     target.textContent = [
       `剧情事件：${state.memories.length}`,
       `向量：${cachedVectorCountText}`,
       `待同步向量：${state.pendingVectorHashes.length}`,
       `待删除向量：${state.pendingVectorDeleteHashes.length}`,
       `已处理到消息：${state.indexedThroughMessageId}`,
+      `抽取批次：每${currentSettings.extraction.targetTurnsPerChunk}轮（窗口外待处理${pendingExtractionTurns}轮）`,
       `阶段总结：${state.stageSummary.entries.length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
       `集合：${state.vectorCollectionId}`,
     ].join('｜');
-    const summaryWindowSize = Math.max(1, Math.floor(settingsRepository.get().summary.windowSize));
+    const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
     const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);
     const currentStateCorrection = renderCurrentStateCoordinationBlock(state.memories);
     stageSummaryTarget.textContent = visibleSummaries.length > 0
@@ -1118,6 +1166,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     stats.textContent = statsText(state);
     inspection.textContent = inspectionText(state);
     traces.textContent = tracesText(state);
+    memoryMetadataManager.render(panel, state);
   } catch (error) {
     const message = error instanceof Error ? error.message : '读取当前聊天状态失败。';
     target.textContent = message;
@@ -1125,6 +1174,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     stats.textContent = `读取失败：${message}`;
     inspection.textContent = '读取失败。';
     traces.textContent = '读取失败。';
+    memoryMetadataManager.render(panel, null);
   }
 }
 
@@ -1154,8 +1204,19 @@ export async function registerSettingsPanel(): Promise<void> {
   const settings = settingsRepository.get();
   syncForm(panel, settings);
   bindSettings(panel);
+  memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);
   });
+  const context = getContext();
+  const chatRefreshEvents = new Set([
+    context.event_types?.['CHAT_CHANGED'],
+    context.event_types?.['CHAT_LOADED'],
+  ].filter((eventName): eventName is string => Boolean(eventName)));
+  for (const eventName of chatRefreshEvents) {
+    context.eventSource?.on(eventName, () => {
+      globalThis.setTimeout(() => void refreshStatus(panel, true), 0);
+    });
+  }
   await refreshStatus(panel, true);
 }

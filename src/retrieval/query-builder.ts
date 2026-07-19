@@ -11,6 +11,8 @@ const WEAK_INTENT_PATTERNS = [
   /^(goon|continue|next|okay|ok)$/iu,
 ];
 
+const CONTEXT_REFERENCE_PATTERN = /(?:那里|那边|那儿|这里|这边|这儿|那把|这把|那枚|这枚|那个|这个|那件|这件|上述|前面|上一个|上一件|刚才|方才|接下来|随后|之后|该人物|该物品|该地点|他们|她们|它们|(?:他|她|它)(?:的|现在|刚才|随后|手里|身上|说|做|去|来|拿|把|呢|吗|会|能|要))/u;
+
 export interface RetrievalQueryPlan {
   intentQuery: string;
   sceneQuery: string;
@@ -59,8 +61,11 @@ export function buildRetrievalQueryPlan(
   const sceneTailLimit = Math.max(0, Math.floor(sceneTailCharacters));
   const assistant = previousAssistantMessage(messages, currentInputIndex);
   const scene = assistant ? storyContent(assistant) : '';
-  const sceneQuery = sceneTailLimit > 0 ? scene.slice(-sceneTailLimit) : '';
   const weakIntent = isWeakRetrievalIntent(intentQuery);
+  const needsSceneContext = weakIntent || CONTEXT_REFERENCE_PATTERN.test(intentQuery);
+  const sceneQuery = needsSceneContext && sceneTailLimit > 0
+    ? scene.slice(-sceneTailLimit)
+    : '';
 
   return {
     intentQuery,
@@ -70,7 +75,7 @@ export function buildRetrievalQueryPlan(
     strategy: 'local',
     weakIntent,
     intentWeight: weakIntent ? 0.25 : 1,
-    sceneWeight: weakIntent ? 1 : 0.35,
+    sceneWeight: weakIntent ? 1 : needsSceneContext ? 0.55 : 0,
   };
 }
 

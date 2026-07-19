@@ -128,6 +128,176 @@ describe('ExtractionService vector synchronization', () => {
     expect(generateRaw).not.toHaveBeenCalled();
   });
 
+  it('uses a newly configured three-turn extraction batch on the very next run', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.extraction.targetTurnsPerChunk = 3;
+    const state = chatState([]);
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    const generateRaw = vi.fn(async (_options: unknown) => '{"memories":[]}');
+    const context = {
+      chat: Array.from({ length: 4 }, (_, index) => [
+        { is_user: true, mes: `第${index + 1}轮用户剧情` },
+        { is_user: false, mes: `第${index + 1}轮AI剧情` },
+      ]).flat(),
+      chatId: 'chat-id',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'chat-id',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    state.vectorFingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
+
+    const result = await new ExtractionService().processNextThrough(7);
+
+    expect(result?.indexedThroughMessageId).toBe(5);
+    expect(generateRaw).toHaveBeenCalledOnce();
+    const prompt = String((generateRaw.mock.calls[0]?.[0] as { prompt?: string })?.prompt ?? '');
+    expect(prompt).toContain('消息 0 到 5');
+    expect(prompt).not.toContain('第4轮用户剧情');
+  });
+
+  it('persists stable user profile facts as editable structured metadata', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.extraction.targetTurnsPerChunk = 3;
+    const state = chatState([]);
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    const profileMemory = (
+      messageId: number,
+      attribute: string,
+      after: string,
+    ) => ({
+      sourceMessageIds: [messageId],
+      type: 'state_change',
+      scene: { location: '', time: '', participants: ['用户'] },
+      event: `用户的${attribute}为${after}`,
+      cause: '',
+      consequence: '',
+      entities: ['用户', after],
+      aliases: [],
+      stateChanges: [{ entity: '用户', attribute, before: '', after }],
+      unresolvedThreads: [],
+      knownBy: ['用户'],
+      truthStatus: 'confirmed',
+      importance: 0.9,
+      retrievalText: `用户明确说明${attribute}为${after}`,
+      injectionText: `用户曾明确说明其${attribute}为${after}。`,
+    });
+    const generateRaw = vi.fn(async (_options: unknown) => JSON.stringify({
+      memories: [
+        profileMemory(0, '姓名', '刘爽'),
+        profileMemory(2, '出生年份', '1997年'),
+        profileMemory(4, '性别', '男'),
+      ],
+    }));
+    const context = {
+      chat: [
+        { is_user: true, mes: '我叫刘爽。' },
+        { is_user: false, mes: '你好，刘爽。' },
+        { is_user: true, mes: '我1997年出生。' },
+        { is_user: false, mes: '知道了。' },
+        { is_user: true, mes: '我是男的。' },
+        { is_user: false, mes: '明白。' },
+      ],
+      chatId: 'chat-id',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'chat-id',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => (
+      new Response(String(input) === '/api/vector/list' ? '[]' : '{}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    state.vectorFingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
+
+    const result = await new ExtractionService().processThrough(5);
+
+    expect(result?.memories).toHaveLength(3);
+    expect(result?.memories.map((item) => item.logicalKey).sort()).toEqual([
+      'custom:出生年份:用户',
+      'custom:姓名:用户',
+      'custom:性别:用户',
+    ]);
+    expect(result?.memories.every((item) => item.evidenceRole === 'user')).toBe(true);
+    expect(result?.pendingVectorHashes).toEqual([]);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      '/api/vector/list',
+      '/api/vector/insert',
+    ]);
+  });
+
+  it('rebuilds already processed automatic metadata while preserving manual edits', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.debug = true;
+    settings.extraction.targetTurnsPerChunk = 3;
+    const automatic = memory();
+    const manual = {
+      ...memory(),
+      id: 'manual-memory',
+      status: 'invalid' as const,
+      vectorHash: 456,
+      retrievalHash: 'manual-hash',
+      manuallyEdited: true,
+      event: '用户手动保留的元数据',
+    };
+    const state = chatState([automatic, manual]);
+    state.indexedThroughMessageId = 5;
+    state.indexedThroughHash = 'old-chunk';
+    state.indexedPrefixHash = 'old-prefix';
+    const generateRaw = vi.fn(async (_options: unknown) => '{"memories":[]}');
+    const context = {
+      chat: Array.from({ length: 3 }, (_, index) => [
+        { is_user: true, mes: `第${index + 1}轮用户剧情` },
+        { is_user: false, mes: `第${index + 1}轮AI剧情` },
+      ]).flat(),
+      chatId: 'chat-id',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'chat-id',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => (
+      new Response('OK', { status: 200 })
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await new ExtractionService().rebuildThrough(5);
+
+    expect(result?.indexedThroughMessageId).toBe(5);
+    expect(result?.memories.map((item) => item.id)).toEqual(['manual-memory']);
+    expect(result?.debugTraces.some((trace) => trace.message.includes('重建自动剧情元数据')))
+      .toBe(true);
+    expect(generateRaw).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/vector/purge');
+  });
+
   it('may close an oversized chunk early but never splits its user and assistant pair', async () => {
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.extraction.targetTurnsPerChunk = 5;

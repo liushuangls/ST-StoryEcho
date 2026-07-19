@@ -98,6 +98,23 @@ export class ExtractionService {
     });
   }
 
+  /**
+   * Re-extract all currently eligible history after prompt/model changes while
+   * preserving memories the user explicitly edited in the metadata manager.
+   */
+  rebuildThrough(
+    targetEndMessageId: number,
+    onProgress?: (progress: ExtractionProgress) => void,
+  ): Promise<StoryEchoChatState | null> {
+    const requestedChatId = getCurrentChatId();
+    const operation = this.queue.then(
+      () => this.rebuildThroughNow(targetEndMessageId, requestedChatId, onProgress),
+      () => this.rebuildThroughNow(targetEndMessageId, requestedChatId, onProgress),
+    );
+    this.queue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   private enqueue(
     targetEndMessageId: number,
     options: ExtractionRunOptions,
@@ -109,6 +126,53 @@ export class ExtractionService {
     );
     this.queue = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  private async rebuildThroughNow(
+    targetEndMessageId: number,
+    requestedChatId: string | null,
+    onProgress?: (progress: ExtractionProgress) => void,
+  ): Promise<StoryEchoChatState | null> {
+    if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+      throw new Error('等待重建期间聊天发生切换，已取消任务。');
+    }
+    const state = await this.memoryRepository.getOrCreate();
+    if (!state) {
+      return null;
+    }
+    assertChatOwner(state);
+
+    const settings = this.settingsRepository.get();
+    const fingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
+    // Purge first. If configuration validation or the server request fails,
+    // keep the authoritative chat metadata untouched instead of leaving a
+    // half-reset memory state.
+    await this.vectorStore.purge(state.vectorCollectionId);
+    const preserved = state.memories.filter((memory) => memory.manuallyEdited);
+    const removedAutomaticMemories = state.memories.length - preserved.length;
+    state.memories = preserved;
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    state.indexedPrefixHash = '';
+    state.pendingRanges = [];
+    state.pendingVectorHashes = preserved
+      .filter((memory) => memory.status !== 'invalid' && memory.status !== 'superseded')
+      .map((memory) => memory.vectorHash);
+    state.pendingVectorDeleteHashes = [];
+    state.vectorFingerprint = fingerprint;
+    delete state.lastInspection;
+    recordDebugTrace(state, settings.debug, 'extraction', '用户要求重建自动剧情元数据。', {
+      removedAutomaticMemories,
+      preservedManualMemories: preserved.length,
+      targetEndMessageId,
+    });
+    await this.memoryRepository.save(state);
+
+    return this.processThroughNow(targetEndMessageId, requestedChatId, {
+      maxChunks: Number.MAX_SAFE_INTEGER,
+      reconcileHistory: false,
+      ...(onProgress ? { onProgress } : {}),
+    });
   }
 
   /**

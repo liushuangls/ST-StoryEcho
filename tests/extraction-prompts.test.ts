@@ -28,6 +28,10 @@ describe('buildExtractionPrompt', () => {
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('同一个完整标识');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('sourceMessageIds');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('reference_context没有messageId');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('我叫刘爽');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('稳定状态');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('统一使用稳定主体entity="用户"');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('AI对用户身份的猜测不是稳定事实');
   });
 
   it('places controlled reference context before the evidence messages', () => {

@@ -1,10 +1,14 @@
 import { CHAT_STATE_VERSION, MODULE_ID, VECTOR_COLLECTION_PREFIX } from '../core/constants';
+import { allocateVectorHash, sha256 } from '../core/hash';
 import type {
   EvidenceRole,
+  MemoryStatus,
+  MemoryType,
   StageSummaryEntry,
   StoryEchoChatState,
   StoryMemory,
   TavernChatMessage,
+  TruthStatus,
 } from '../core/types';
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
@@ -14,6 +18,113 @@ import { classifyEvidenceRole } from '../extraction/evidence';
 
 function createCollectionId(chatUuid: string): string {
   return `${VECTOR_COLLECTION_PREFIX}_${chatUuid}_v${CHAT_STATE_VERSION}`;
+}
+
+const MEMORY_TYPES = new Set<MemoryType>([
+  'event',
+  'state_change',
+  'relationship_change',
+  'commitment',
+  'revelation',
+  'clue',
+  'conflict',
+]);
+const MEMORY_STATUSES = new Set<MemoryStatus>(['active', 'resolved', 'superseded', 'invalid']);
+const TRUTH_STATUSES = new Set<TruthStatus>(['confirmed', 'claimed', 'inferred', 'uncertain']);
+
+export interface StoryMemoryEdit {
+  type: MemoryType;
+  status: MemoryStatus;
+  truthStatus: TruthStatus;
+  importance: number;
+  event: string;
+  cause: string;
+  consequence: string;
+  scene: {
+    location: string;
+    time: string;
+    participants: string[];
+  };
+  entities: string[];
+  aliases: string[];
+  stateChanges: Array<{
+    entity: string;
+    attribute: string;
+    before?: string;
+    after: string;
+  }>;
+  unresolvedThreads: string[];
+  knownBy: string[];
+  retrievalText: string;
+  injectionText: string;
+  pinned: boolean;
+  excluded: boolean;
+}
+
+function editableText(value: string, field: string, maxLength: number, required = false): string {
+  const normalized = String(value ?? '').trim().slice(0, maxLength);
+  if (required && !normalized) {
+    throw new Error(`${field}不能为空。`);
+  }
+  return normalized;
+}
+
+function editableList(values: readonly string[], maxItems = 50): string[] {
+  return [...new Set(values
+    .slice(0, maxItems)
+    .map((value) => String(value ?? '').trim().slice(0, 200))
+    .filter(Boolean))];
+}
+
+function normalizeMemoryEdit(edit: StoryMemoryEdit): StoryMemoryEdit {
+  if (!MEMORY_TYPES.has(edit.type)) {
+    throw new Error('记忆类型无效。');
+  }
+  if (!MEMORY_STATUSES.has(edit.status)) {
+    throw new Error('记忆状态无效。');
+  }
+  if (!TRUTH_STATUSES.has(edit.truthStatus)) {
+    throw new Error('事实可信度无效。');
+  }
+  const importance = Number(edit.importance);
+  if (!Number.isFinite(importance)) {
+    throw new Error('重要度必须是数字。');
+  }
+  const stateChanges = edit.stateChanges.slice(0, 30).map((change) => {
+    const entity = editableText(change.entity, '状态主体', 200, true);
+    const attribute = editableText(change.attribute, '状态属性', 200, true);
+    const before = editableText(change.before ?? '', '变更前状态', 500);
+    const after = editableText(change.after, '变更后状态', 500, true);
+    return {
+      entity,
+      attribute,
+      ...(before ? { before } : {}),
+      after,
+    };
+  });
+  return {
+    type: edit.type,
+    status: edit.status,
+    truthStatus: edit.truthStatus,
+    importance: Math.min(1, Math.max(0, importance)),
+    event: editableText(edit.event, '事件', 2_000, true),
+    cause: editableText(edit.cause, '原因', 2_000),
+    consequence: editableText(edit.consequence, '结果', 2_000),
+    scene: {
+      location: editableText(edit.scene.location, '地点', 300),
+      time: editableText(edit.scene.time, '时间', 300),
+      participants: editableList(edit.scene.participants),
+    },
+    entities: editableList(edit.entities),
+    aliases: editableList(edit.aliases),
+    stateChanges,
+    unresolvedThreads: editableList(edit.unresolvedThreads),
+    knownBy: editableList(edit.knownBy),
+    retrievalText: editableText(edit.retrievalText, '检索文本', 4_000, true),
+    injectionText: editableText(edit.injectionText, '注入文本', 2_000, true),
+    pinned: Boolean(edit.pinned),
+    excluded: Boolean(edit.excluded),
+  };
 }
 
 function createState(ownerChatId: string): StoryEchoChatState {
@@ -394,6 +505,104 @@ export class MemoryRepository {
       byId.set(memory.id, memory);
     }
     state.memories = [...byId.values()];
+    state.pendingVectorHashes = [...new Set(state.pendingVectorHashes)];
+    state.pendingVectorDeleteHashes = [...new Set(state.pendingVectorDeleteHashes)];
+    await this.save(state);
+    return state;
+  }
+
+  async updateMemory(memoryId: string, edit: StoryMemoryEdit): Promise<StoryEchoChatState> {
+    const state = await this.getOrCreate();
+    if (!state) {
+      throw new Error('当前没有可用聊天。');
+    }
+    const index = state.memories.findIndex((memory) => memory.id === memoryId);
+    const existing = index >= 0 ? state.memories[index] : undefined;
+    if (!existing) {
+      throw new Error('要修改的剧情记忆不存在，可能已在其他页面删除。');
+    }
+
+    const normalized = normalizeMemoryEdit(edit);
+    const retrievalChanged = normalized.retrievalText !== existing.retrievalText;
+    const retrievalHash = retrievalChanged
+      ? await sha256(normalized.retrievalText)
+      : existing.retrievalHash;
+    const occupied = new Set(state.memories
+      .filter((memory) => memory.id !== memoryId)
+      .map((memory) => memory.vectorHash));
+    const vectorHash = retrievalChanged
+      ? allocateVectorHash(`${existing.id}:${retrievalHash}`, occupied)
+      : existing.vectorHash;
+    const updatedAt = new Date().toISOString();
+    const replacement: StoryMemory = {
+      ...existing,
+      type: normalized.type,
+      status: normalized.status,
+      truthStatus: normalized.truthStatus,
+      importance: normalized.importance,
+      event: normalized.event,
+      scene: {
+        ...(normalized.scene.location ? { location: normalized.scene.location } : {}),
+        ...(normalized.scene.time ? { time: normalized.scene.time } : {}),
+        participants: normalized.scene.participants,
+      },
+      entities: normalized.entities,
+      aliases: normalized.aliases,
+      stateChanges: normalized.stateChanges,
+      unresolvedThreads: normalized.status === 'resolved' ? [] : normalized.unresolvedThreads,
+      knownBy: normalized.knownBy,
+      retrievalText: normalized.retrievalText,
+      injectionText: normalized.injectionText,
+      retrievalHash,
+      vectorHash,
+      pinned: normalized.pinned,
+      excluded: normalized.excluded,
+      manuallyEdited: true,
+      lastOperation: 'UPDATE',
+      updatedAt,
+    };
+    if (normalized.cause) {
+      replacement.cause = normalized.cause;
+    } else {
+      delete replacement.cause;
+    }
+    if (normalized.consequence) {
+      replacement.consequence = normalized.consequence;
+    } else {
+      delete replacement.consequence;
+    }
+    if (normalized.status !== 'superseded') {
+      delete replacement.replacedByMemoryId;
+    }
+    replacement.logicalKey = deriveLogicalKey(replacement);
+
+    state.memories[index] = replacement;
+    const existingVectorEligible = existing.status !== 'invalid' && existing.status !== 'superseded';
+    const vectorEligible = replacement.status !== 'invalid' && replacement.status !== 'superseded';
+    if (existing.vectorHash !== replacement.vectorHash) {
+      state.pendingVectorHashes = state.pendingVectorHashes.filter(
+        (hash) => hash !== existing.vectorHash,
+      );
+      state.pendingVectorDeleteHashes.push(existing.vectorHash);
+      if (vectorEligible) {
+        state.pendingVectorHashes.push(replacement.vectorHash);
+      }
+    } else if (existingVectorEligible && !vectorEligible) {
+      state.pendingVectorHashes = state.pendingVectorHashes.filter(
+        (hash) => hash !== existing.vectorHash,
+      );
+      state.pendingVectorDeleteHashes.push(replacement.vectorHash);
+    } else if (!existingVectorEligible && vectorEligible) {
+      state.pendingVectorHashes.push(replacement.vectorHash);
+      state.pendingVectorDeleteHashes = state.pendingVectorDeleteHashes.filter(
+        (hash) => hash !== replacement.vectorHash,
+      );
+    }
+    if (vectorEligible) {
+      state.pendingVectorDeleteHashes = state.pendingVectorDeleteHashes.filter(
+        (hash) => hash !== replacement.vectorHash,
+      );
+    }
     state.pendingVectorHashes = [...new Set(state.pendingVectorHashes)];
     state.pendingVectorDeleteHashes = [...new Set(state.pendingVectorDeleteHashes)];
     await this.save(state);

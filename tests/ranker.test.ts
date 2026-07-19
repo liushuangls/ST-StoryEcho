@@ -50,7 +50,7 @@ describe('rankMemories', () => {
     expect(result).toEqual([]);
   });
 
-  it('gives the user-intent vector channel more weight for a concrete input', () => {
+  it('ignores an unrelated scene vector channel for a self-contained concrete input', () => {
     const intentMemory = memory({ id: 'intent', vectorHash: 1, entities: [], aliases: [] });
     const sceneMemory = memory({ id: 'scene', vectorHash: 2, entities: [], aliases: [] });
     const plan = buildRetrievalQueryPlan([
@@ -62,7 +62,8 @@ describe('rankMemories', () => {
       scene: [{ hash: 2, text: '', index: 1, rank: 0 }],
     });
 
-    expect(result.map((item) => item.id)).toEqual(['intent', 'scene']);
+    expect(plan.sceneWeight).toBe(0);
+    expect(result.map((item) => item.id)).toEqual(['intent']);
   });
 
   it('gives the scene vector channel more weight for a weak input', () => {

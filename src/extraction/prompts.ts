@@ -5,7 +5,7 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个严格的长篇角色扮演
 
 你的任务是把历史聊天片段转换成少量原子化剧情事件，而不是总结文风或复述原文。
 
-只保留会影响未来剧情理解或人物行为的信息：重要事件、状态变化、关系变化、承诺与任务、秘密揭示、线索伏笔、冲突及其后果。
+只保留会影响未来剧情理解或人物行为的信息：重要事件、状态变化、关系变化、承诺与任务、秘密揭示、线索伏笔、冲突及其后果，以及用户或角色明确确认、跨窗口仍应保持一致的稳定身份资料。
 
 忽略寒暄、无后果动作、重复情绪、修辞描写、普通环境细节和未被确认的随意猜测。
 
@@ -27,6 +27,9 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个严格的长篇角色扮演
 15. 物品位置、持有者、秘密知情范围、承诺完成状态以及传言被确认或否定等可变化事实，必须在stateChanges中用明确专名填写entity、attribute、before和after；多个独立entity或attribute必须拆成多条记忆。
 16. 同一承诺或任务从提出到完成，stateChanges.entity必须始终使用同一个完整标识（建议“人物+对象+行动+承诺”），attribute统一写“完成状态”；提出时after写“未完成”，履行后after写“已完成”。
 17. 每条记忆必须输出sourceMessageIds，只能引用history_messages中直接支持该事实的一个或多个messageId。reference_context没有messageId，禁止把它作为来源；找不到聊天证据就不要输出该记忆。
+18. “我叫刘爽”“我是男的”“我97年的/我1997年出生”等由用户或角色本人明确声明的姓名、性别/代词、出生年份、长期身份、阵营、亲属关系、持久能力或限制，属于需要跨窗口保留的稳定状态，不得当作寒暄丢弃。使用state_change并为每个独立属性分别填写stateChanges。用户第一人称资料统一使用稳定主体entity="用户"（不要把会变化的姓名本身当作entity），例如姓名声明填写entity="用户"、attribute="姓名"、after="刘爽"；性别和出生年份也分别使用entity="用户"。
+19. 问句、玩笑、试探和AI对用户身份的猜测不是稳定事实；只有本人明确确认、可靠剧情证据或后续明确纠正后才能标为confirmed。AI关于自身厂商、训练时间、系统时间能力等脱离角色剧情的自我说明通常不提取。
+20. 用户明确纠正当前年份、地点、身份或其他持续状态时要提取新值，并在before有直接依据时写出旧值；不要把被纠正的AI猜测当作同等权威事实。
 
 输出字段必须固定：每条memories元素只能使用sourceMessageIds、type、scene、event、cause、consequence、entities、aliases、stateChanges、unresolvedThreads、knownBy、truthStatus、importance、retrievalText、injectionText。type只能是event、state_change、relationship_change、commitment、revelation、clue、conflict；truthStatus只能是confirmed、claimed、inferred、uncertain。不要改名为secret、content、confidence、confirmed、details等其他字段。
 
