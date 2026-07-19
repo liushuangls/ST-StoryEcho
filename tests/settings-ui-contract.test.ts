@@ -49,6 +49,16 @@ const EDITABLE_CONTROLS: Readonly<Record<string, 'input' | 'change'>> = {
 };
 
 describe('settings panel editable-control contract', () => {
+  it('places the memory metadata manager above the action and status blocks', () => {
+    const manager = source.indexOf('${memoryManagerTemplate()}');
+    const actions = source.indexOf('<div class="story-echo-actions story-echo-actions-primary"');
+    const status = source.indexOf('<div id="story-echo-status"');
+
+    expect(manager).toBeGreaterThan(0);
+    expect(manager).toBeLessThan(actions);
+    expect(actions).toBeLessThan(status);
+  });
+
   it('uses each field default while a numeric input is temporarily empty', () => {
     const numberValueSource = source.slice(
       source.indexOf('function numberValue('),

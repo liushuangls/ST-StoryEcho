@@ -416,6 +416,8 @@ function panelTemplate(): HTMLElement {
           </div>
         </details>
 
+        ${memoryManagerTemplate()}
+
         <div class="story-echo-actions story-echo-actions-primary" role="group" aria-label="主要操作">
           <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-plug" aria-hidden="true"></i><span>测试LLM连接</span>
@@ -437,7 +439,6 @@ function panelTemplate(): HTMLElement {
         </div>
 
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
-        ${memoryManagerTemplate()}
         <details class="story-echo-diagnostics">
           <summary>当前阶段总结</summary>
           <pre id="story-echo-summary">尚无阶段总结。</pre>

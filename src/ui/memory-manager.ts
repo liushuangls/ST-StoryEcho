@@ -277,6 +277,10 @@ function sourceText(memory: StoryMemory): string {
   }, null, 2);
 }
 
+export function toggleMemorySelection(currentMemoryId: string, clickedMemoryId: string): string {
+  return currentMemoryId === clickedMemoryId ? '' : clickedMemoryId;
+}
+
 export class MemoryMetadataManager {
   private selectedMemoryId = '';
   private populatedMemoryId = '';
@@ -340,14 +344,17 @@ export class MemoryMetadataManager {
       if (!button?.dataset.memoryId) {
         return;
       }
+      const nextMemoryId = toggleMemorySelection(
+        this.selectedMemoryId,
+        button.dataset.memoryId,
+      );
       if (
-        button.dataset.memoryId !== this.selectedMemoryId &&
         this.editorDirty &&
-        !globalThis.confirm('当前元数据有尚未保存的修改，确定放弃并切换到另一条记忆吗？')
+        !globalThis.confirm('当前元数据有尚未保存的修改，确定放弃并关闭或切换吗？')
       ) {
         return;
       }
-      this.selectedMemoryId = button.dataset.memoryId;
+      this.selectedMemoryId = nextMemoryId;
       this.editorDirty = false;
       this.populatedMemoryId = '';
       this.render(panel, this.repository.getExisting());
@@ -459,6 +466,8 @@ export class MemoryMetadataManager {
       button.className = 'menu_button story-echo-memory-row';
       button.dataset.memoryId = memory.id;
       button.classList.toggle('story-echo-memory-row-selected', memory.id === this.selectedMemoryId);
+      button.setAttribute('aria-expanded', String(memory.id === this.selectedMemoryId));
+      button.setAttribute('aria-controls', 'story-echo-memory-editor');
       const title = document.createElement('span');
       title.className = 'story-echo-memory-row-title';
       title.textContent = memory.event;

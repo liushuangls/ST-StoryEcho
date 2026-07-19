@@ -1880,7 +1880,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 6;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.12.0";
+var EXTENSION_VERSION = "0.12.1";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -6480,6 +6480,9 @@ function sourceText(memory) {
     updatedAt: memory.updatedAt
   }, null, 2);
 }
+function toggleMemorySelection(currentMemoryId, clickedMemoryId) {
+  return currentMemoryId === clickedMemoryId ? "" : clickedMemoryId;
+}
 var MemoryMetadataManager = class {
   constructor(repository, syncVectors, rebuildAutomaticMemories) {
     this.repository = repository;
@@ -6543,10 +6546,14 @@ var MemoryMetadataManager = class {
       if (!button?.dataset.memoryId) {
         return;
       }
-      if (button.dataset.memoryId !== this.selectedMemoryId && this.editorDirty && !globalThis.confirm("\u5F53\u524D\u5143\u6570\u636E\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u5207\u6362\u5230\u53E6\u4E00\u6761\u8BB0\u5FC6\u5417\uFF1F")) {
+      const nextMemoryId = toggleMemorySelection(
+        this.selectedMemoryId,
+        button.dataset.memoryId
+      );
+      if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u5143\u6570\u636E\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u5173\u95ED\u6216\u5207\u6362\u5417\uFF1F")) {
         return;
       }
-      this.selectedMemoryId = button.dataset.memoryId;
+      this.selectedMemoryId = nextMemoryId;
       this.editorDirty = false;
       this.populatedMemoryId = "";
       this.render(panel, this.repository.getExisting());
@@ -6652,6 +6659,8 @@ ${current.event}`)) {
       button.className = "menu_button story-echo-memory-row";
       button.dataset.memoryId = memory.id;
       button.classList.toggle("story-echo-memory-row-selected", memory.id === this.selectedMemoryId);
+      button.setAttribute("aria-expanded", String(memory.id === this.selectedMemoryId));
+      button.setAttribute("aria-controls", "story-echo-memory-editor");
       const title = document.createElement("span");
       title.className = "story-echo-memory-row-title";
       title.textContent = memory.event;
@@ -7125,6 +7134,8 @@ function panelTemplate() {
           </div>
         </details>
 
+        ${memoryManagerTemplate()}
+
         <div class="story-echo-actions story-echo-actions-primary" role="group" aria-label="\u4E3B\u8981\u64CD\u4F5C">
           <button id="story-echo-test-llm" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-plug" aria-hidden="true"></i><span>\u6D4B\u8BD5LLM\u8FDE\u63A5</span>
@@ -7146,7 +7157,6 @@ function panelTemplate() {
         </div>
 
         <div id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u2026\u2026</div>
-        ${memoryManagerTemplate()}
         <details class="story-echo-diagnostics">
           <summary>\u5F53\u524D\u9636\u6BB5\u603B\u7ED3</summary>
           <pre id="story-echo-summary">\u5C1A\u65E0\u9636\u6BB5\u603B\u7ED3\u3002</pre>
