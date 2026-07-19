@@ -23,4 +23,31 @@ describe('hasSourceOutsideWindow', () => {
 
     expect(hasSourceOutsideWindow(recent, 8)).toBe(false);
   });
+
+  it('treats superseded ancestry as history rather than effective old evidence', () => {
+    const replacement = memory({
+      source: { startMessageId: 8, endMessageId: 9, sourceHash: 'replacement' },
+      sourceHistory: [
+        { startMessageId: 1, endMessageId: 2, sourceHash: 'old-state' },
+        { startMessageId: 8, endMessageId: 9, sourceHash: 'replacement' },
+      ],
+      lastOperation: 'SUPERSEDE',
+    });
+
+    expect(hasSourceOutsideWindow(replacement, 8)).toBe(false);
+  });
+
+  it('uses exact cited floors when a replacement batch straddles the window boundary', () => {
+    const replacement = memory({
+      source: { startMessageId: 8, endMessageId: 13, sourceHash: 'replacement-batch' },
+      sourceMessageIds: [9],
+      sourceHistory: [
+        { startMessageId: 1, endMessageId: 2, sourceHash: 'old' },
+        { startMessageId: 8, endMessageId: 13, sourceHash: 'replacement-batch' },
+      ],
+      lastOperation: 'SUPERSEDE',
+    });
+
+    expect(hasSourceOutsideWindow(replacement, 10)).toBe(true);
+  });
 });

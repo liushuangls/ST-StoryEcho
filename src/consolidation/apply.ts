@@ -6,6 +6,7 @@ import type {
 } from '../core/types';
 import { incrementAction } from '../debug/metrics';
 import { createStoryMemory } from '../extraction/memory-factory';
+import { protectedByHigherAuthority } from './authority';
 import { deriveResidualCandidate } from './residual';
 import { relatedMemoryTargets } from './identity';
 import type { ConsolidationDecision } from './types';
@@ -70,6 +71,9 @@ async function supersedeAdditionalTarget(
     target.status === 'invalid' ||
     target.status === 'superseded'
   ) {
+    return false;
+  }
+  if (protectedByHigherAuthority(result, target, 'SUPERSEDE')) {
     return false;
   }
 
@@ -168,6 +172,10 @@ export async function applyConsolidationDecisions(
       targetIndex = -1;
     }
 
+    if (target && protectedByHigherAuthority(decision.result, target, operation)) {
+      operation = 'IGNORE';
+    }
+
     if (operation === 'IGNORE') {
       incrementAction(state.metrics, 'IGNORE');
       applied.push(actualDecision(decision, 'IGNORE', decision.reason));
@@ -214,7 +222,6 @@ export async function applyConsolidationDecisions(
         sourceHistory: uniqueSources([...target.sourceHistory, source]),
         supersedesMemoryIds: [...new Set([...target.supersedesMemoryIds, target.id])],
         lastOperation: 'SUPERSEDE',
-        logicalKey: target.logicalKey,
       });
       replacement.pinned = target.pinned;
       replacement.excluded = target.excluded;

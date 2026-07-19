@@ -17,6 +17,7 @@ import {
   withRewrittenRetrievalQuery,
 } from '../retrieval/query-builder';
 import { hasSourceOutsideWindow } from '../retrieval/eligibility';
+import { isShadowedByRecentUserFact } from '../retrieval/recent-shadow';
 import { queryRewriteService } from '../retrieval/query-rewriter';
 import { rankMemories, type RetrievalVectorResults } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
@@ -25,9 +26,11 @@ import type { VectorQueryResult } from '../vector/adapter';
 import { resolveVectorConfig } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import {
+  buildEntityDisambiguationConstraints,
   estimateMessageTokens,
   estimateMemoryTokens,
   estimateTokens,
+  renderCurrentStateCoordinationBlock,
   renderMemoryBlock,
   renderStageSummaryBlock,
   selectWithinBudget,
@@ -106,7 +109,7 @@ function safeSourceRetainedStart(
 
 function requestSystemMessage(
   mes: string,
-  kind: 'summary' | 'recall',
+  kind: 'summary' | 'state' | 'recall',
 ): TavernChatMessage {
   return {
     is_user: false,
@@ -265,17 +268,34 @@ export async function storyEchoGenerateInterceptor(
       logger.warn('同步待处理向量失败。', error);
     }
 
-    const eligibleMemories = state.memories.filter(
+    const windowExternalMemories = state.memories.filter(
       (memory) =>
         !memory.excluded &&
         memory.status !== 'invalid' &&
         memory.status !== 'superseded' &&
         hasSourceOutsideWindow(memory, retainedSourceStart),
     );
+    const shadowedMemories = windowExternalMemories.filter((memory) => (
+      isShadowedByRecentUserFact(
+        memory,
+        sourceChat,
+        retainedSourceStart,
+        minimumSourceWindow.currentInputIndex,
+      )
+    ));
+    const shadowedIds = new Set(shadowedMemories.map((memory) => memory.id));
+    const eligibleMemories = windowExternalMemories.filter((memory) => !shadowedIds.has(memory.id));
+    const recallEnabled = settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
+    if (shadowedMemories.length > 0) {
+      recordDebugTrace(state, settings.debug, 'retrieval', '近期用户事实已遮蔽冲突的较早记忆。', {
+        memoryIds: shadowedMemories.map((memory) => memory.id).join(','),
+        count: shadowedMemories.length,
+      });
+    }
     let queryPlan = buildRetrievalQueryPlan(chat, window.currentInputIndex);
     if (
       settings.recall.queryMode === 'llm' &&
-      settings.recall.maxEvents > 0 &&
+      recallEnabled &&
       eligibleMemories.length > 0
     ) {
       state.metrics.queryRewriteRequests += 1;
@@ -322,11 +342,11 @@ export async function storyEchoGenerateInterceptor(
     const vectorResults: RetrievalVectorResults = { intent: [], scene: [] };
     if (
       eligibleMemories.length > 0 &&
-      settings.recall.maxEvents > 0 &&
+      recallEnabled &&
       (queryPlan.intentQuery || queryPlan.sceneQuery)
     ) {
       const queryStartedAt = performance.now();
-      const topK = Math.max(settings.recall.maxEvents * 3, settings.recall.maxEvents);
+      const topK = Math.max(settings.recall.maxEvents * 3, 24);
       const vectorConfig = resolveVectorConfig(settings);
       const queryVectorChannel = async (
         channel: string,
@@ -358,17 +378,31 @@ export async function storyEchoGenerateInterceptor(
       state.metrics.totalRetrievalMs += Math.round(performance.now() - queryStartedAt);
     }
 
-    const ranked = rankMemories(queryPlan, eligibleMemories, vectorResults);
+    const ranked = recallEnabled
+      ? rankMemories(queryPlan, eligibleMemories, vectorResults)
+      : [];
     const uniqueVectorResultCount = new Set([
       ...vectorResults.intent.map((result) => result.hash),
       ...vectorResults.scene.map((result) => result.hash),
     ]).size;
+    const currentInput = chat[window.currentInputIndex];
     const selected = selectWithinBudget(
       ranked,
       settings.recall.maxEvents,
       settings.recall.maxTokens,
+      `${queryPlan.intentQuery}\n${currentInput?.mes ?? ''}`,
     );
-    const recallBlock = selected.length > 0 ? renderMemoryBlock(selected) : '';
+    const entityConstraints = recallEnabled
+      ? buildEntityDisambiguationConstraints(
+        state.memories.filter((memory) => (
+          !memory.excluded && memory.status !== 'invalid' && memory.status !== 'superseded'
+        )),
+        currentInput?.mes ?? '',
+      )
+      : [];
+    const recallBlock = selected.length > 0 || entityConstraints.length > 0
+      ? renderMemoryBlock(selected, entityConstraints)
+      : '';
     const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
     const summaryEntries = settings.summary.enabled
       ? state.stageSummary.entries.slice(-summaryWindowSize)
@@ -378,17 +412,19 @@ export async function storyEchoGenerateInterceptor(
       entry.sourceStartMessageId,
       entry.sourceEndMessageId,
     ));
+    const currentStateBlock = summaryBlocks.length > 0
+      ? renderCurrentStateCoordinationBlock(state.memories)
+      : '';
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
     const estimatedSummaryTokens = summaryBlocks.reduce(
       (total, block) => total + estimateTokens(block),
       0,
-    );
+    ) + (currentStateBlock ? estimateTokens(currentStateBlock) : 0);
     const estimatedInjectedTokens = estimatedSummaryTokens + (
       recallBlock ? estimateTokens(recallBlock) : 0
     );
 
     const retainedAnchor = chat[window.retainedStartIndex];
-    const currentInput = chat[window.currentInputIndex];
     removeMessagesAtIndices(chat, window.removableIndices);
 
     if (summaryBlocks.length > 0) {
@@ -397,6 +433,7 @@ export async function storyEchoGenerateInterceptor(
         Math.max(0, anchorIndex),
         0,
         ...summaryBlocks.map((block) => requestSystemMessage(block, 'summary')),
+        ...(currentStateBlock ? [requestSystemMessage(currentStateBlock, 'state')] : []),
       );
     }
     if (recallBlock && currentInput) {

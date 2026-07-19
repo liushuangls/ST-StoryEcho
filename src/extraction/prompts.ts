@@ -1,4 +1,5 @@
 import type { TavernChatMessage } from '../core/types';
+import { storyContent } from '../content/story-content';
 
 export const EXTRACTION_SYSTEM_PROMPT = `你是一个严格的长篇角色扮演剧情记忆提取器。
 
@@ -46,8 +47,9 @@ export function buildExtractionPrompt(
       messageId,
       role: message.is_user ? 'user' : 'assistant',
       name: message.name || '',
-      content: message.mes,
-    }));
+      content: storyContent(message),
+    }))
+    .filter(({ content }) => content.length > 0);
   const sourceEndMessageId = sourceStartMessageId + Math.max(0, endMessageId - startMessageId);
 
   return [

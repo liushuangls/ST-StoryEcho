@@ -32,6 +32,117 @@ describe('event consolidation', () => {
     expect(decisions[0]).toMatchObject({ operation: 'SUPERSEDE', targetMemoryId: 'mem-1' });
   });
 
+  it('does not let a bare Assistant-only contradiction supersede an explicit User fact', () => {
+    const explicit = memory({ evidenceRole: 'user' });
+    const hallucination = candidate({
+      evidenceRole: 'assistant',
+      sourceMessageIds: [10],
+      event: '银色钥匙当前在陌生人手中。',
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '', after: '陌生人' }],
+      retrievalText: '银色钥匙当前由陌生人持有。',
+      injectionText: '银色钥匙现在由陌生人持有。',
+    });
+
+    expect(fallbackConsolidationDecisions([hallucination], [explicit])[0]).toMatchObject({
+      operation: 'IGNORE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
+  it('lets a later Assistant-authored transition advance an explicit User state', () => {
+    const explicit = memory({ evidenceRole: 'user' });
+    const transition = candidate({
+      evidenceRole: 'assistant',
+      sourceMessageIds: [10],
+      event: '陌生人从林雨手中偷走了银色钥匙。',
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '陌生人' }],
+      retrievalText: '陌生人后来从林雨手中偷走银色钥匙。',
+      injectionText: '银色钥匙已被陌生人偷走。',
+    });
+
+    expect(fallbackConsolidationDecisions([transition], [explicit])[0]).toMatchObject({
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
+  it('enforces User authority again when applying a model-provided decision', async () => {
+    const state = chatState([memory({ evidenceRole: 'user' })]);
+    const hallucination = candidate({
+      evidenceRole: 'assistant',
+      sourceMessageIds: [10],
+      event: '银色钥匙当前在陌生人手中。',
+      cause: '',
+      consequence: '',
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '', after: '陌生人' }],
+      retrievalText: '银色钥匙当前由陌生人持有。',
+      injectionText: '银色钥匙现在由陌生人持有。',
+    });
+    const result = await applyConsolidationDecisions(state, [{
+      candidateIndex: 0,
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+      reason: '模型误判。',
+      result: hallucination,
+    }], { startMessageId: 10, endMessageId: 11, sourceHash: 'assistant-output' });
+
+    expect(result.decisions[0]?.operation).toBe('IGNORE');
+    expect(state.memories).toHaveLength(1);
+    expect(state.memories[0]?.status).toBe('active');
+  });
+
+  it('does not re-block an explicit later Assistant transition while applying it', async () => {
+    const state = chatState([memory({ evidenceRole: 'user' })]);
+    const transition = candidate({
+      evidenceRole: 'assistant',
+      sourceMessageIds: [10],
+      event: '陌生人从林雨手中夺走银色钥匙。',
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '陌生人' }],
+      retrievalText: '陌生人后来夺走银色钥匙。',
+    });
+    const result = await applyConsolidationDecisions(state, [{
+      candidateIndex: 0,
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+      reason: '明确发生了后续转移。',
+      result: transition,
+    }], { startMessageId: 10, endMessageId: 10, sourceHash: 'assistant-transition' });
+
+    expect(result.decisions[0]?.operation).toBe('SUPERSEDE');
+    expect(state.memories.find((item) => item.id === 'mem-1')?.status).toBe('superseded');
+    expect(state.memories.find((item) => item.status === 'active')?.stateChanges[0]?.after)
+      .toBe('陌生人');
+  });
+
+  it('lets a later explicit User fact supersede an Assistant-authored state', () => {
+    const narration = memory({ evidenceRole: 'assistant' });
+    const correction = candidate({
+      evidenceRole: 'user',
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '用户' }],
+      retrievalText: '银色钥匙实际由用户持有。',
+      injectionText: '用户确认银色钥匙由自己持有。',
+    });
+
+    expect(fallbackConsolidationDecisions([correction], [narration])[0]).toMatchObject({
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
+  it('does not freeze a legacy fact whose evidence role is unknown', () => {
+    const legacy = memory({ evidenceRole: 'unknown' });
+    const narration = candidate({
+      evidenceRole: 'assistant',
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '顾青' }],
+      retrievalText: '银色钥匙现在由顾青持有。',
+    });
+
+    expect(fallbackConsolidationDecisions([narration], [legacy])[0]).toMatchObject({
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
   it.each([
     ['位置', '存放地点'],
     ['持有者', '保管人'],
@@ -213,6 +324,34 @@ describe('event consolidation', () => {
     expect(state.pendingVectorDeleteHashes).toEqual([123]);
     expect(state.pendingVectorHashes).toEqual([result.created[0]?.vectorHash]);
     expect(state.metrics.actions.SUPERSEDE).toBe(1);
+  });
+
+  it('re-derives a replacement logical key instead of inheriting an unrelated commitment key', async () => {
+    const old = memory({
+      logicalKey: 'commitment:刘爽虞汐玄纹玉简保密承诺',
+      type: 'commitment',
+      stateChanges: [
+        { entity: '刘爽虞汐玄纹玉简保密承诺', attribute: '完成状态', after: '未完成' },
+        { entity: '玄纹玉简', attribute: '保管者', after: '虞汐' },
+      ],
+    });
+    const state = chatState([old]);
+    const replacement = candidate({
+      entities: ['玄纹玉简', '刘爽'],
+      aliases: [],
+      stateChanges: [{ entity: '玄纹玉简', attribute: '持有者', before: '虞汐', after: '刘爽' }],
+      retrievalText: '玄纹玉简当前由刘爽持有。',
+    });
+
+    const result = await applyConsolidationDecisions(state, [{
+      candidateIndex: 0,
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+      reason: '持有者变化。',
+      result: replacement,
+    }], { startMessageId: 10, endMessageId: 11, sourceHash: 'replacement' });
+
+    expect(result.created[0]?.logicalKey).toBe('holder:玄纹玉简');
   });
 
   it('preserves an unrelated fact from a legacy composite memory during partial supersede', async () => {

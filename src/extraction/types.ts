@@ -1,6 +1,8 @@
-import type { MemoryType, TruthStatus } from '../core/types';
+import type { EvidenceRole, MemoryType, TruthStatus } from '../core/types';
 
 export interface ExtractedMemoryCandidate {
+  /** Added locally after parsing; it is not requested from the extraction LLM. */
+  evidenceRole?: EvidenceRole;
   sourceMessageIds: number[];
   type: MemoryType;
   scene: {

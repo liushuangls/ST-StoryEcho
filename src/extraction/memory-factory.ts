@@ -36,6 +36,7 @@ export async function createStoryMemory(
     sourceMessageIds: [...new Set(candidate.sourceMessageIds)]
       .filter((messageId) => Number.isInteger(messageId) && messageId >= 0)
       .sort((left, right) => left - right),
+    evidenceRole: candidate.evidenceRole ?? 'unknown',
     sourceHistory: options.sourceHistory ?? [source],
     scene: {
       ...(location ? { location } : {}),

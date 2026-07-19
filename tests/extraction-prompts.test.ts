@@ -43,4 +43,15 @@ describe('buildExtractionPrompt', () => {
       prompt.indexOf('<history_messages>'),
     );
   });
+
+  it('sends displayed assistant narrative instead of hidden preset reasoning', () => {
+    const prompt = buildExtractionPrompt([{
+      is_user: false,
+      mes: '<thinking>规划下一幕</thinking><正文>银钥匙被交给顾青。</正文><status>变量面板</status>',
+    }], 0, 0, 3);
+
+    expect(prompt).toContain('银钥匙被交给顾青');
+    expect(prompt).not.toContain('规划下一幕');
+    expect(prompt).not.toContain('变量面板');
+  });
 });

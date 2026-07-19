@@ -1,4 +1,5 @@
 import type { TavernChatMessage } from '../core/types';
+import { storyContent } from '../content/story-content';
 
 const DEFAULT_SCENE_TAIL_CHARACTERS = 500;
 const MAX_INTENT_CHARACTERS = 2_000;
@@ -57,7 +58,7 @@ export function buildRetrievalQueryPlan(
     : '';
   const sceneTailLimit = Math.max(0, Math.floor(sceneTailCharacters));
   const assistant = previousAssistantMessage(messages, currentInputIndex);
-  const scene = assistant?.mes.trim() ?? '';
+  const scene = assistant ? storyContent(assistant) : '';
   const sceneQuery = sceneTailLimit > 0 ? scene.slice(-sceneTailLimit) : '';
   const weakIntent = isWeakRetrievalIntent(intentQuery);
 

@@ -1,6 +1,8 @@
 import type { ConsolidationOperation, StoryMemory } from '../core/types';
 import type { ExtractedMemoryCandidate } from '../extraction/types';
 import { normalizedFact } from './shortlist';
+import { combineEvidenceRoles } from '../extraction/evidence';
+import { protectedByHigherAuthority } from './authority';
 import {
   canonicalStateSlot,
   commitmentsMatch,
@@ -76,6 +78,7 @@ function mergeWithMemory(
     changes.set(canonicalStateSlot(change.entity, change.attribute, candidate.type), change);
   }
   return {
+    evidenceRole: combineEvidenceRoles(memory.evidenceRole, candidate.evidenceRole),
     sourceMessageIds: [...new Set([
       ...memory.sourceMessageIds,
       ...candidate.sourceMessageIds,
@@ -98,6 +101,20 @@ function mergeWithMemory(
     importance: Math.max(memory.importance, candidate.importance),
     retrievalText: combinedText(memory.retrievalText, candidate.retrievalText, 4_000),
     injectionText: combinedText(memory.injectionText, candidate.injectionText),
+  };
+}
+
+function protectedDecision(
+  candidateIndex: number,
+  candidate: ExtractedMemoryCandidate,
+  memory: StoryMemory,
+): ConsolidationDecision {
+  return {
+    candidateIndex,
+    operation: 'IGNORE',
+    targetMemoryId: memory.id,
+    reason: 'AI续写与更高权威的用户事实冲突，等待用户确认后再更新。',
+    result: candidate,
   };
 }
 
@@ -236,6 +253,9 @@ export function fallbackConsolidationDecisions(
       (memory) => normalizedFact(memory.retrievalText) === normalizedFact(candidate.retrievalText),
     );
     if (exact) {
+      if (protectedByHigherAuthority(candidate, exact, 'MERGE')) {
+        return protectedDecision(candidateIndex, candidate, exact);
+      }
       const addsDetail = candidateAddsDetail(exact, candidate);
       return {
         candidateIndex,
@@ -269,9 +289,13 @@ export function fallbackConsolidationDecisions(
       .sort((left, right) => right.memory.updatedAt.localeCompare(left.memory.updatedAt))[0];
     if (sameSlot) {
       const sameValue = sameSlot.match.left.after === sameSlot.match.right.after;
+      const operation = sameValue ? 'MERGE' : 'SUPERSEDE';
+      if (protectedByHigherAuthority(candidate, sameSlot.memory, operation)) {
+        return protectedDecision(candidateIndex, candidate, sameSlot.memory);
+      }
       return {
         candidateIndex,
-        operation: sameValue ? 'MERGE' : 'SUPERSEDE',
+        operation,
         targetMemoryId: sameSlot.memory.id,
         reason: sameValue ? '同一状态槽且当前值相同。' : '同一状态槽出现了新值。',
         result: sameValue ? mergeWithMemory(sameSlot.memory, candidate) : candidate,
@@ -281,9 +305,13 @@ export function fallbackConsolidationDecisions(
     const related = relatedMemory(candidate, memories);
     if (related) {
       const supersedes = related.candidateReplaces && !related.memoryReplaces;
+      const operation = supersedes ? 'SUPERSEDE' : 'MERGE';
+      if (protectedByHigherAuthority(candidate, related.memory, operation)) {
+        return protectedDecision(candidateIndex, candidate, related.memory);
+      }
       return {
         candidateIndex,
-        operation: supersedes ? 'SUPERSEDE' : 'MERGE',
+        operation,
         targetMemoryId: related.memory.id,
         reason: supersedes
           ? '同一核心实体出现明确搬移或旧状态失效。'
@@ -352,6 +380,9 @@ export function parseConsolidationResponse(
     const result = target && ['MERGE', 'UPDATE', 'RESOLVE'].includes(operation)
       ? mergeWithMemory(target, candidate)
       : candidate;
+    if (target && protectedByHigherAuthority(candidate, target, operation)) {
+      continue;
+    }
     if (operation === 'RESOLVE') {
       // A resolved candidate is the current authority for remaining open
       // threads. Unioning the old pending question back into the memory makes

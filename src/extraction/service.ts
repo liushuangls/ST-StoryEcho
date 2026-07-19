@@ -1,6 +1,7 @@
 import { logger } from '../core/logger';
 import { sha256 } from '../core/hash';
 import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
+import { storyMessages } from '../content/story-content';
 import { applyConsolidationDecisions } from '../consolidation/apply';
 import { decideConsolidation } from '../consolidation/service';
 import { shortlistMemories } from '../consolidation/shortlist';
@@ -14,6 +15,7 @@ import { resolveVectorConfig, vectorConfigFingerprint } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { countCompletedTurns, planNextChunk } from './chunk-planner';
 import { atomicizeMemoryCandidates } from './atomicize';
+import { classifyEvidenceRole } from './evidence';
 import { parseExtractionResponse } from './parser';
 import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from './prompts';
 import { assessMemoryCandidates } from './quality';
@@ -29,6 +31,7 @@ export interface ExtractionProgress {
 
 interface ExtractionRunOptions {
   maxChunks: number;
+  reconcileHistory: boolean;
   onProgress?: (progress: ExtractionProgress) => void;
 }
 
@@ -67,6 +70,7 @@ export class ExtractionService {
   ): Promise<StoryEchoChatState | null> {
     return this.enqueue(targetEndMessageId, {
       maxChunks: Number.MAX_SAFE_INTEGER,
+      reconcileHistory: true,
       ...(onProgress ? { onProgress } : {}),
     });
   }
@@ -77,6 +81,19 @@ export class ExtractionService {
   ): Promise<StoryEchoChatState | null> {
     return this.enqueue(targetEndMessageId, {
       maxChunks: 1,
+      reconcileHistory: true,
+      ...(onProgress ? { onProgress } : {}),
+    });
+  }
+
+  /** Use only after the caller has verified that the indexed prefix is unchanged. */
+  processNextThroughVerifiedHistory(
+    targetEndMessageId: number,
+    onProgress?: (progress: ExtractionProgress) => void,
+  ): Promise<StoryEchoChatState | null> {
+    return this.enqueue(targetEndMessageId, {
+      maxChunks: 1,
+      reconcileHistory: false,
       ...(onProgress ? { onProgress } : {}),
     });
   }
@@ -253,9 +270,11 @@ export class ExtractionService {
     if (!state) {
       return null;
     }
-    state = await this.reconcileHistory(state);
-    if (!state) {
-      return null;
+    if (options.reconcileHistory) {
+      state = await this.reconcileHistory(state);
+      if (!state) {
+        return null;
+      }
     }
 
     const maximumEnd = Math.min(Math.floor(targetEndMessageId), context.chat.length - 1);
@@ -291,6 +310,7 @@ export class ExtractionService {
             ...(message.name ? { name: message.name } : {}),
             mes: message.mes,
           }));
+        const promptSnapshot = storyMessages(snapshot);
         const fullTurnBatch = countCompletedTurns(snapshot) >=
           Math.max(1, Math.floor(settings.extraction.targetTurnsPerChunk));
         // A normal tail waits until the configured number of complete
@@ -312,7 +332,7 @@ export class ExtractionService {
         let referenceContext = '';
         try {
           const reference = await buildExtractionReferenceContext(
-            snapshot,
+            promptSnapshot,
             settings.extraction.reference,
             context,
           );
@@ -346,7 +366,7 @@ export class ExtractionService {
         const raw = await completeWithConfiguredProvider(settings, {
           system: EXTRACTION_SYSTEM_PROMPT,
           prompt: buildExtractionPrompt(
-            snapshot,
+            promptSnapshot,
             0,
             snapshot.length - 1,
             chunk.startMessageId,
@@ -372,12 +392,19 @@ export class ExtractionService {
         const atomicCandidates = atomicizeMemoryCandidates(parsedCandidates);
         const assessment = assessMemoryCandidates(
           atomicCandidates,
-          snapshot.map((message) => message.mes).join('\n'),
+          promptSnapshot.map((message) => message.mes).join('\n'),
           snapshot.flatMap((message, offset) => (
             message.is_system ? [] : [chunk.startMessageId + offset]
           )),
         );
-        const candidates = assessment.accepted;
+        const candidates = assessment.accepted.map((candidate) => ({
+          ...candidate,
+          evidenceRole: classifyEvidenceRole(
+            candidate.sourceMessageIds,
+            snapshot,
+            chunk.startMessageId,
+          ),
+        }));
         recordDebugTrace(state, settings.debug, 'extraction', '剧情候选抽取完成。', {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           candidates: candidates.length,

@@ -30,6 +30,7 @@ function compactMemory(memory: StoryMemory): object {
     logicalKey: memory.logicalKey,
     type: memory.type,
     status: memory.status,
+    evidenceRole: memory.evidenceRole,
     scene: memory.scene,
     event: memory.event,
     cause: memory.cause ?? '',

@@ -16,6 +16,7 @@ import { createLlmProvider } from '../llm/provider-factory';
 import { normalizeChatCompletionsBaseUrl } from '../llm/url';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../prompt/render';
 import { selectRecentWindow } from '../prompt/window';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
@@ -24,7 +25,6 @@ import { resolveEmbeddingClient } from '../vector/embedding-providers';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { normalizeEmbeddingsUrl, normalizeVolcengineMultimodalEmbeddingsUrl } from '../vector/url';
 import { notify } from './notifications';
-import { renderMemoryEntry } from '../prompt/render';
 
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
@@ -100,7 +100,7 @@ function panelTemplate(): HTMLElement {
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">自动补充历史索引</span>
-              <span class="story-echo-switch-description">窗口外累计满配置轮数后抽取一批；不足一批的原文继续保留</span>
+              <span class="story-echo-switch-description">窗口外满配置轮数后，AI回复后后台抽取一批；生成前仍会安全补齐</span>
             </div>
             <div class="story-echo-toggle">
               <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
@@ -139,7 +139,7 @@ function panelTemplate(): HTMLElement {
           </div>
           <p class="story-echo-hint story-echo-field-wide">
             LLM改写会在每次需要召回时先生成一句检索查询；失败时自动回退本地双路查询。
-            “最多召回事件”只是上限；低分或与最佳结果差距明显的候选会被提前过滤。
+            “最多召回事件”是普通问题的上限，设为0会跳过查询与召回；明确要求分别核对多个实体时，会在Token预算内按实体覆盖并临时扩展到最多8条。低分候选仍会提前过滤。
             抽取参考默认最多 3000 Token，只读取角色描述、性格、场景、Persona 与该历史批次直接命中的世界书；不会传入预设、system、jailbreak、示例对话或欢迎语。
           </p>
           </div>
@@ -169,8 +169,8 @@ function panelTemplate(): HTMLElement {
             </div>
             <div class="story-echo-switch-row story-echo-field-wide">
               <div class="story-echo-switch-copy">
-                <span class="story-echo-switch-title">自动更新阶段总结</span>
-                <span class="story-echo-switch-description">达到一批后在生成前最多更新一次；失败时保留未总结原文</span>
+              <span class="story-echo-switch-title">自动更新阶段总结</span>
+              <span class="story-echo-switch-description">达到一批后在AI回复后后台更新；生成前仍会补一批，失败则保留原文</span>
               </div>
               <div class="story-echo-toggle">
                 <input id="story-echo-summary-automatic" class="story-echo-toggle-input" type="checkbox">
@@ -190,7 +190,7 @@ function panelTemplate(): HTMLElement {
               <input id="story-echo-summary-max-tokens" class="text_pole" type="number" min="128" max="8192" step="128">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文；每次请求只带最近 S 条总结。总结位于近期原文前，动态召回位于当前 User 前，均不写入聊天记录。
+              最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文；每次请求只带最近 S 条总结。变更过的跨阶段状态会形成有界校正块；总结和校正位于近期原文前，动态召回位于当前 User 前，均不写入聊天记录。
             </p>
           </div>
         </details>
@@ -1023,7 +1023,7 @@ function inspectionText(state: NonNullable<ReturnType<MemoryRepository['getExist
   const selected = new Set(inspection.selectedMemoryIds);
   const selectedLines = state.memories
     .filter((memory) => selected.has(memory.id))
-    .map((memory) => `[${memory.lastOperation}/${memory.status}]\n${renderMemoryEntry(memory)}`);
+    .map((memory) => `[${memory.lastOperation}/${memory.status}/${memory.evidenceRole}]\n${renderMemoryEntry(memory)}`);
   return [
     `时间：${inspection.createdAt}`,
     `耗时：${inspection.durationMs}ms`,
@@ -1102,6 +1102,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     ].join('｜');
     const summaryWindowSize = Math.max(1, Math.floor(settingsRepository.get().summary.windowSize));
     const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);
+    const currentStateCorrection = renderCurrentStateCoordinationBlock(state.memories);
     stageSummaryTarget.textContent = visibleSummaries.length > 0
       ? [
           `已保存 ${state.stageSummary.entries.length} 条；正常请求携带最近 ${visibleSummaries.length} 条。`,
@@ -1109,6 +1110,9 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
             `#${state.stageSummary.entries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
             entry.text,
           ].join('\n')),
+          ...(currentStateCorrection
+            ? [`请求还会在总结后附加以下当前状态校正：\n${currentStateCorrection}`]
+            : []),
         ].join('\n\n')
       : '尚无阶段总结。';
     stats.textContent = statsText(state);

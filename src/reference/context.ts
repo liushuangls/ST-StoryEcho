@@ -3,6 +3,7 @@ import type {
   StoryEchoSettings,
   TavernChatMessage,
 } from '../core/types';
+import { storyContent } from '../content/story-content';
 import {
   getContext,
   type SillyTavernContext,
@@ -347,7 +348,7 @@ export async function buildExtractionReferenceContext(
     try {
       const historyText = messages
         .filter((message) => !message.is_system)
-        .map((message) => [clean(message.name), message.mes].filter(Boolean).join(': '))
+        .map((message) => [clean(message.name), storyContent(message)].filter(Boolean).join(': '))
         .reverse()
         .join('\n');
       const entries = await sortedWorldInfoEntries(context);

@@ -46,7 +46,7 @@ export function normalizeIdentityText(value: string): string {
     .replace(/[\s\p{P}\p{S}]+/gu, '');
 }
 
-function canonicalSubject(value: string): string {
+export function canonicalSubject(value: string): string {
   return normalizeIdentityText(value)
     .replace(SUBJECT_SUFFIX, '')
     .replace(/的$/u, '')

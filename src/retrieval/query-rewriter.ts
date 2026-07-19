@@ -1,5 +1,6 @@
 import { sha256 } from '../core/hash';
 import type { LlmRequest, StoryEchoSettings, TavernChatMessage } from '../core/types';
+import { storyContent } from '../content/story-content';
 import { completeWithConfiguredProvider } from '../llm/complete';
 
 const MAX_CONTEXT_MESSAGES = 3;
@@ -61,12 +62,12 @@ export function buildQueryRewriteInput(
   const current = messages[currentInputIndex];
   const recentContext = messages
     .slice(0, Math.max(0, currentInputIndex))
-    .filter((message) => !message.is_system && message.mes.trim())
+    .filter((message) => !message.is_system && storyContent(message))
     .slice(-MAX_CONTEXT_MESSAGES)
     .map((message) => ({
       role: message.is_user ? 'user' as const : 'assistant' as const,
       name: message.name?.trim() || (message.is_user ? '用户' : '角色'),
-      content: boundedTail(message.mes, MAX_CONTEXT_CHARACTERS),
+      content: boundedTail(storyContent(message), MAX_CONTEXT_CHARACTERS),
     }));
 
   return {

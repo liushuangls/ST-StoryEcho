@@ -10,6 +10,7 @@ function memory(overrides: Partial<StoryMemory>): StoryMemory {
     type: 'event',
     source: { startMessageId: 1, endMessageId: 2, sourceHash: 'source' },
     sourceMessageIds: [1, 2],
+    evidenceRole: 'user',
     sourceHistory: [{ startMessageId: 1, endMessageId: 2, sourceHash: 'source' }],
     scene: { participants: [] },
     event: '林雨获得银色钥匙',

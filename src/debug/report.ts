@@ -1,6 +1,6 @@
 import { EXTENSION_VERSION } from '../core/constants';
 import type { StoryEchoChatState, StoryEchoSettings } from '../core/types';
-import { renderMemoryEntry } from '../prompt/render';
+import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../prompt/render';
 
 export function buildDebugReport(
   state: StoryEchoChatState,
@@ -28,6 +28,7 @@ export function buildDebugReport(
         updatedAt: state.stageSummary.updatedAt ?? null,
         entryCount: state.stageSummary.entries.length,
         entries: state.stageSummary.entries,
+        currentStateCoordination: renderCurrentStateCoordinationBlock(state.memories) || null,
       },
       memoryStatus,
       vectorCount,
@@ -51,7 +52,9 @@ export function buildDebugReport(
       .filter((memory) => selected.has(memory.id))
       .map((memory) => ({
         id: memory.id,
+        logicalKey: memory.logicalKey,
         status: memory.status,
+        evidenceRole: memory.evidenceRole,
         lastOperation: memory.lastOperation,
         source: memory.source,
         sourceMessageIds: memory.sourceMessageIds,
@@ -63,14 +66,18 @@ export function buildDebugReport(
       .slice(0, 100)
       .map((memory) => ({
         id: memory.id,
+        logicalKey: memory.logicalKey,
         type: memory.type,
         status: memory.status,
+        evidenceRole: memory.evidenceRole,
         lastOperation: memory.lastOperation,
         source: memory.source,
         sourceMessageIds: memory.sourceMessageIds,
         supersedesMemoryIds: memory.supersedesMemoryIds,
         replacedByMemoryId: memory.replacedByMemoryId ?? null,
         event: memory.event,
+        stateChanges: memory.stateChanges,
+        knownBy: memory.knownBy,
         injectionText: memory.injectionText,
       })),
     recentDebugTraces: state.debugTraces,

@@ -10,6 +10,7 @@ export function candidate(
 ): ExtractedMemoryCandidate {
   return {
     sourceMessageIds: [1, 2],
+    evidenceRole: 'user',
     type: 'state_change',
     scene: { location: '', time: '', participants: ['林雨'] },
     event: '林雨获得银色钥匙',
@@ -35,6 +36,7 @@ export function memory(overrides: Partial<StoryMemory> = {}): StoryMemory {
     type: 'state_change',
     source,
     sourceMessageIds: [1, 2],
+    evidenceRole: 'user',
     sourceHistory: [source],
     scene: { participants: ['林雨'] },
     event: '林雨获得银色钥匙',

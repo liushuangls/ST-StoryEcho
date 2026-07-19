@@ -112,6 +112,48 @@ describe('StoryEcho request ordering', () => {
     expect(context.chat).toEqual(sourceChat);
   });
 
+  it('places evolved current-state corrections after summaries and before recent raw', async () => {
+    const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
+    const stored = context.chatMetadata[MODULE_ID];
+    const current = stored.memories[0]!;
+    current.sourceHistory = [
+      { startMessageId: 0, endMessageId: 0, sourceHash: 'older-state' },
+      current.source,
+    ];
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(promptChat.map((message) => message.extra?.['story_echo_injection_kind'] ?? message.mes))
+      .toEqual([
+        'summary',
+        'state',
+        '我们去院中喝水。',
+        '院中很安静。',
+        'recall',
+        '银色钥匙现在由谁保管？',
+      ]);
+    expect(promptChat[1]?.mes).toContain('<story_echo_current_state>');
+    expect(context.chat).toEqual(sourceChat);
+  });
+
+  it('skips query rewrite and recall injection when the recall limit is zero', async () => {
+    const { context, settings } = await installContext({
+      withMemory: true,
+      summaryCoveredThrough: 2,
+    });
+    settings.recall.maxEvents = 0;
+    settings.recall.queryMode = 'llm';
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(context.generateRaw).not.toHaveBeenCalled();
+    expect(promptChat.some(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'recall',
+    )).toBe(false);
+  });
+
   it('keeps every unsummarized message when the summary cursor is behind', async () => {
     const { context } = await installContext({ withMemory: false, summaryCoveredThrough: -1 });
     const promptChat = structuredClone(sourceChat);

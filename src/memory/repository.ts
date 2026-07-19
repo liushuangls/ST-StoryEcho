@@ -1,13 +1,16 @@
 import { CHAT_STATE_VERSION, MODULE_ID, VECTOR_COLLECTION_PREFIX } from '../core/constants';
 import type {
+  EvidenceRole,
   StageSummaryEntry,
   StoryEchoChatState,
   StoryMemory,
+  TavernChatMessage,
 } from '../core/types';
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { createUuid } from '../core/uuid';
 import { deriveLogicalKey } from '../consolidation/identity';
+import { classifyEvidenceRole } from '../extraction/evidence';
 
 function createCollectionId(chatUuid: string): string {
   return `${VECTOR_COLLECTION_PREFIX}_${chatUuid}_v${CHAT_STATE_VERSION}`;
@@ -40,10 +43,20 @@ function createState(ownerChatId: string): StoryEchoChatState {
 
 type StoredMemory = Omit<
   StoryMemory,
-  'logicalKey' | 'sourceMessageIds' | 'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'
+  | 'logicalKey'
+  | 'sourceMessageIds'
+  | 'evidenceRole'
+  | 'sourceHistory'
+  | 'supersedesMemoryIds'
+  | 'lastOperation'
 > & Partial<Pick<
   StoryMemory,
-  'logicalKey' | 'sourceMessageIds' | 'sourceHistory' | 'supersedesMemoryIds' | 'lastOperation'
+  | 'logicalKey'
+  | 'sourceMessageIds'
+  | 'evidenceRole'
+  | 'sourceHistory'
+  | 'supersedesMemoryIds'
+  | 'lastOperation'
 >>;
 
 interface StoredStageSummary {
@@ -79,6 +92,17 @@ const LEGACY_SUMMARY_UPDATED_AT = '1970-01-01T00:00:00.000Z';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeEvidenceRole(
+  value: unknown,
+  sourceMessageIds: number[],
+  chat: readonly TavernChatMessage[],
+): EvidenceRole {
+  if (value === 'user' || value === 'assistant' || value === 'mixed' || value === 'unknown') {
+    return value;
+  }
+  return classifyEvidenceRole(sourceMessageIds, chat);
 }
 
 function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
@@ -182,7 +206,10 @@ function isStateBase(value: unknown): value is StoredState {
   );
 }
 
-function normalizeState(stored: StoredState): StoryEchoChatState {
+function normalizeState(
+  stored: StoredState,
+  chat: readonly TavernChatMessage[] = [],
+): StoryEchoChatState {
   const lastInspection = stored.lastInspection
     ? {
         ...stored.lastInspection,
@@ -213,29 +240,33 @@ function normalizeState(stored: StoredState): StoryEchoChatState {
     : undefined;
   return {
     ...stored,
-    memories: stored.memories.map((memory) => ({
-      ...memory,
-      logicalKey: typeof memory.logicalKey === 'string' && memory.logicalKey.trim()
-        ? memory.logicalKey.trim()
-        : deriveLogicalKey(memory),
-      sourceMessageIds: Array.isArray(memory.sourceMessageIds) && memory.sourceMessageIds.length > 0
+    memories: stored.memories.map((memory) => {
+      const sourceMessageIds = Array.isArray(memory.sourceMessageIds) && memory.sourceMessageIds.length > 0
         ? [...new Set(memory.sourceMessageIds
           .map((messageId) => Number(messageId))
           .filter((messageId) => Number.isInteger(messageId) && messageId >= 0))]
         : memory.source.startMessageId === memory.source.endMessageId
           ? [memory.source.startMessageId]
-          : [memory.source.startMessageId, memory.source.endMessageId],
-      unresolvedThreads: memory.status === 'resolved'
-        ? []
-        : Array.isArray(memory.unresolvedThreads) ? memory.unresolvedThreads : [],
-      sourceHistory: Array.isArray(memory.sourceHistory) && memory.sourceHistory.length > 0
-        ? memory.sourceHistory
-        : [memory.source],
-      supersedesMemoryIds: Array.isArray(memory.supersedesMemoryIds)
-        ? memory.supersedesMemoryIds
-        : [],
-      lastOperation: memory.lastOperation ?? 'CREATE',
-    })),
+          : [memory.source.startMessageId, memory.source.endMessageId];
+      return {
+        ...memory,
+        logicalKey: typeof memory.logicalKey === 'string' && memory.logicalKey.trim()
+          ? memory.logicalKey.trim()
+          : deriveLogicalKey(memory),
+        sourceMessageIds,
+        evidenceRole: normalizeEvidenceRole(memory.evidenceRole, sourceMessageIds, chat),
+        unresolvedThreads: memory.status === 'resolved'
+          ? []
+          : Array.isArray(memory.unresolvedThreads) ? memory.unresolvedThreads : [],
+        sourceHistory: Array.isArray(memory.sourceHistory) && memory.sourceHistory.length > 0
+          ? memory.sourceHistory
+          : [memory.source],
+        supersedesMemoryIds: Array.isArray(memory.supersedesMemoryIds)
+          ? memory.supersedesMemoryIds
+          : [],
+        lastOperation: memory.lastOperation ?? 'CREATE',
+      };
+    }),
     pendingVectorHashes: Array.isArray(stored.pendingVectorHashes) ? stored.pendingVectorHashes : [],
     pendingVectorDeleteHashes: Array.isArray(stored.pendingVectorDeleteHashes)
       ? stored.pendingVectorDeleteHashes
@@ -256,7 +287,7 @@ export class MemoryRepository {
     if (!isStateBase(stored) || stored.ownerChatId !== getCurrentChatId(context)) {
       return null;
     }
-    return normalizeState(stored);
+    return normalizeState(stored, context.chat);
   }
 
   async getOrCreate(): Promise<StoryEchoChatState | null> {
@@ -274,7 +305,7 @@ export class MemoryRepository {
       return state;
     }
 
-    const state = normalizeState(stored);
+    const state = normalizeState(stored, context.chat);
     if (
       !Array.isArray(stored.pendingVectorHashes) ||
       !Array.isArray(stored.pendingVectorDeleteHashes) ||
@@ -299,6 +330,7 @@ export class MemoryRepository {
           !memory.logicalKey.trim() ||
           !Array.isArray(memory.sourceMessageIds) ||
           memory.sourceMessageIds.length === 0 ||
+          !['user', 'assistant', 'mixed', 'unknown'].includes(String(memory.evidenceRole ?? '')) ||
           !Array.isArray(memory.supersedesMemoryIds) ||
           !Array.isArray(memory.unresolvedThreads) ||
           !memory.lastOperation ||

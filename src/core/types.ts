@@ -13,6 +13,7 @@ export type MemoryType =
   | 'conflict';
 export type TruthStatus = 'confirmed' | 'claimed' | 'inferred' | 'uncertain';
 export type MemoryStatus = 'active' | 'resolved' | 'superseded' | 'invalid';
+export type EvidenceRole = 'user' | 'assistant' | 'mixed' | 'unknown';
 export type ConsolidationOperation =
   | 'CREATE'
   | 'MERGE'
@@ -101,6 +102,8 @@ export interface StoryMemory {
   source: StoryMemorySource;
   /** Exact chat floors cited by the extraction model as evidence. */
   sourceMessageIds: number[];
+  /** Which chat role directly supports this memory. Explicit User facts win conflicts. */
+  evidenceRole: EvidenceRole;
   sourceHistory: StoryMemorySource[];
   scene: {
     location?: string;

@@ -1,3 +1,4 @@
+import { backgroundProcessingScheduler } from './background/scheduler';
 import { logger } from './core/logger';
 import type { TavernChatMessage } from './core/types';
 import { storyEchoGenerateInterceptor as intercept } from './prompt/interceptor';
@@ -23,6 +24,7 @@ export function onActivate(): Promise<void> {
     return activationPromise;
   }
   logger.info('扩展已加载。');
+  backgroundProcessingScheduler.register();
   activationPromise = registerSettingsPanel().catch((error) => {
     logger.error('初始化设置面板失败。', error);
   });
