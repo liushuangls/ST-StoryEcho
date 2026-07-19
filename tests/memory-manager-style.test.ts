@@ -32,4 +32,12 @@ describe('memory manager list layout', () => {
     expect(metadataRule).toContain('text-overflow: ellipsis;');
     expect(metadataRule).toContain('white-space: nowrap;');
   });
+
+  it('keeps pagination controls outside the scrollable memory list', () => {
+    const paginationRule = rule('#story-echo-settings .story-echo-memory-pagination {');
+    const hiddenRule = rule('#story-echo-settings .story-echo-memory-pagination[hidden] {');
+
+    expect(paginationRule).toContain('grid-template-columns:');
+    expect(hiddenRule).toContain('display: none;');
+  });
 });

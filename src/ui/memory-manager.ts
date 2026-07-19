@@ -34,6 +34,37 @@ const TRUTH_LABELS: Readonly<Record<TruthStatus, string>> = {
   uncertain: '不确定',
 };
 
+export const MEMORY_PAGE_SIZE = 10;
+
+export interface PaginationSlice<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+}
+
+export function paginateItems<T>(
+  items: readonly T[],
+  requestedPage: number,
+  pageSize = MEMORY_PAGE_SIZE,
+): PaginationSlice<T> {
+  const safePageSize = Number.isFinite(pageSize) && pageSize > 0
+    ? Math.max(1, Math.floor(pageSize))
+    : MEMORY_PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(items.length / safePageSize));
+  const safeRequestedPage = Number.isFinite(requestedPage) ? Math.floor(requestedPage) : 1;
+  const page = Math.min(totalPages, Math.max(1, safeRequestedPage));
+  const start = (page - 1) * safePageSize;
+  return {
+    items: items.slice(start, start + safePageSize),
+    page,
+    pageSize: safePageSize,
+    totalItems: items.length,
+    totalPages,
+  };
+}
+
 export function memoryManagerTemplate(): string {
   return `
     <details id="story-echo-memory-manager" class="story-echo-section story-echo-collapsible">
@@ -72,6 +103,15 @@ export function memoryManagerTemplate(): string {
         </div>
         <div id="story-echo-memory-count" class="story-echo-memory-count">尚无剧情记忆。</div>
         <div id="story-echo-memory-list" class="story-echo-memory-list"></div>
+        <nav id="story-echo-memory-pagination" class="story-echo-memory-pagination" aria-label="剧情记忆分页" hidden>
+          <button id="story-echo-memory-previous" class="menu_button" type="button">
+            <i class="fa-solid fa-chevron-left" aria-hidden="true"></i><span>上一页</span>
+          </button>
+          <span id="story-echo-memory-page" class="story-echo-memory-page" aria-live="polite">第 1 / 1 页</span>
+          <button id="story-echo-memory-next" class="menu_button" type="button">
+            <span>下一页</span><i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
+          </button>
+        </nav>
 
         <div id="story-echo-memory-editor" class="story-echo-memory-editor" hidden>
           <div class="story-echo-memory-editor-heading">
@@ -289,6 +329,8 @@ export class MemoryMetadataManager {
   private populatedUpdatedAt = '';
   private editorDirty = false;
   private editorRevision = 0;
+  private currentPage = 1;
+  private renderedChatUuid = '';
 
   constructor(
     private readonly repository: MemoryRepository,
@@ -309,13 +351,22 @@ export class MemoryMetadataManager {
       control.addEventListener('change', markDirty);
     }
     element<HTMLInputElement>(panel, '#story-echo-memory-search').addEventListener('input', () => {
+      this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
     element<HTMLSelectElement>(panel, '#story-echo-memory-filter').addEventListener('change', () => {
+      this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
     element<HTMLButtonElement>(panel, '#story-echo-memory-reload').addEventListener('click', () => {
+      this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
+    });
+    element<HTMLButtonElement>(panel, '#story-echo-memory-previous').addEventListener('click', () => {
+      this.changePage(panel, this.currentPage - 1);
+    });
+    element<HTMLButtonElement>(panel, '#story-echo-memory-next').addEventListener('click', () => {
+      this.changePage(panel, this.currentPage + 1);
     });
     element<HTMLButtonElement>(panel, '#story-echo-memory-rebuild').addEventListener('click', async (event) => {
       if (!globalThis.confirm(
@@ -331,6 +382,7 @@ export class MemoryMetadataManager {
         this.editorDirty = false;
         this.populatedMemoryId = '';
         this.populatedUpdatedAt = '';
+        this.currentPage = 1;
         await onChanged();
         notify.success('自动剧情元数据已重建。');
       } catch (error) {
@@ -391,6 +443,10 @@ export class MemoryMetadataManager {
         );
         if (this.selectedMemoryId === memoryId && this.editorRevision === submittedRevision) {
           this.editorDirty = false;
+          // Saving refreshes updatedAt and normally moves the row to the front
+          // of the sorted list. Return to the first page so the saved row does
+          // not appear to vanish from a later page.
+          this.currentPage = 1;
         }
         if (syncError) {
           notify.info(`修改已保存；向量同步将在稍后重试：${syncError instanceof Error ? syncError.message : String(syncError)}`);
@@ -463,6 +519,19 @@ export class MemoryMetadataManager {
     const list = element<HTMLElement>(panel, '#story-echo-memory-list');
     const count = element<HTMLElement>(panel, '#story-echo-memory-count');
     const editor = element<HTMLElement>(panel, '#story-echo-memory-editor');
+    const pagination = element<HTMLElement>(panel, '#story-echo-memory-pagination');
+    const previous = element<HTMLButtonElement>(panel, '#story-echo-memory-previous');
+    const next = element<HTMLButtonElement>(panel, '#story-echo-memory-next');
+    const pageLabel = element<HTMLElement>(panel, '#story-echo-memory-page');
+    const chatUuid = state?.chatUuid ?? '';
+    if (chatUuid !== this.renderedChatUuid) {
+      this.renderedChatUuid = chatUuid;
+      this.currentPage = 1;
+      this.selectedMemoryId = '';
+      this.editorDirty = false;
+      this.populatedMemoryId = '';
+      this.populatedUpdatedAt = '';
+    }
     const memories = state?.memories ?? [];
     const selected = memories.find((memory) => memory.id === this.selectedMemoryId);
     if (this.selectedMemoryId && !selected) {
@@ -483,18 +552,32 @@ export class MemoryMetadataManager {
         }
         return right.updatedAt.localeCompare(left.updatedAt);
       });
+    const page = paginateItems(filtered, this.currentPage);
+    this.currentPage = page.page;
 
     list.replaceChildren();
-    count.textContent = memories.length === 0
-      ? '当前聊天尚无剧情记忆。'
-      : `共 ${memories.length} 条，当前显示 ${filtered.length} 条。`;
+    const hasActiveFilter = status !== 'all' || Boolean(search);
+    const pageDescription = `第 ${page.page} / ${page.totalPages} 页，本页加载 ${page.items.length} 条。`;
+    if (memories.length === 0) {
+      count.textContent = '当前聊天尚无剧情记忆。';
+    } else if (filtered.length === 0) {
+      count.textContent = `共 ${memories.length} 条，筛选后 0 条。`;
+    } else if (hasActiveFilter) {
+      count.textContent = `共 ${memories.length} 条，筛选后 ${filtered.length} 条；${pageDescription}`;
+    } else {
+      count.textContent = `共 ${memories.length} 条；${pageDescription}`;
+    }
+    pagination.hidden = filtered.length <= page.pageSize;
+    previous.disabled = page.page <= 1;
+    next.disabled = page.page >= page.totalPages;
+    pageLabel.textContent = `第 ${page.page} / ${page.totalPages} 页`;
     if (filtered.length === 0 && memories.length > 0) {
       const empty = document.createElement('div');
       empty.className = 'story-echo-memory-empty';
       empty.textContent = '没有符合筛选条件的记忆。';
       list.append(empty);
     }
-    for (const memory of filtered) {
+    for (const memory of page.items) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'menu_button story-echo-memory-row';
@@ -519,6 +602,16 @@ export class MemoryMetadataManager {
       list.append(button);
     }
 
+    if (
+      this.selectedMemoryId &&
+      !page.items.some((memory) => memory.id === this.selectedMemoryId) &&
+      !this.editorDirty
+    ) {
+      this.selectedMemoryId = '';
+      this.populatedMemoryId = '';
+      this.populatedUpdatedAt = '';
+    }
+
     const current = memories.find((memory) => memory.id === this.selectedMemoryId);
     editor.hidden = !current;
     if (
@@ -531,6 +624,24 @@ export class MemoryMetadataManager {
       this.populatedUpdatedAt = current.updatedAt;
       this.editorDirty = false;
     }
+  }
+
+  private changePage(panel: HTMLElement, requestedPage: number): void {
+    if (requestedPage === this.currentPage) {
+      return;
+    }
+    if (
+      this.editorDirty &&
+      !globalThis.confirm('当前元数据有尚未保存的修改，确定放弃并翻页吗？')
+    ) {
+      return;
+    }
+    this.currentPage = requestedPage;
+    this.selectedMemoryId = '';
+    this.editorDirty = false;
+    this.populatedMemoryId = '';
+    this.populatedUpdatedAt = '';
+    this.render(panel, this.repository.getExisting());
   }
 
   private populateEditor(panel: HTMLElement, memory: StoryMemory): void {

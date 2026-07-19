@@ -2224,7 +2224,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 6;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.13.0";
+var EXTENSION_VERSION = "0.13.1";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -7341,6 +7341,21 @@ var TRUTH_LABELS = {
   inferred: "\u63A8\u65AD",
   uncertain: "\u4E0D\u786E\u5B9A"
 };
+var MEMORY_PAGE_SIZE = 10;
+function paginateItems(items, requestedPage, pageSize = MEMORY_PAGE_SIZE) {
+  const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.max(1, Math.floor(pageSize)) : MEMORY_PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(items.length / safePageSize));
+  const safeRequestedPage = Number.isFinite(requestedPage) ? Math.floor(requestedPage) : 1;
+  const page = Math.min(totalPages, Math.max(1, safeRequestedPage));
+  const start = (page - 1) * safePageSize;
+  return {
+    items: items.slice(start, start + safePageSize),
+    page,
+    pageSize: safePageSize,
+    totalItems: items.length,
+    totalPages
+  };
+}
 function memoryManagerTemplate() {
   return `
     <details id="story-echo-memory-manager" class="story-echo-section story-echo-collapsible">
@@ -7379,6 +7394,15 @@ function memoryManagerTemplate() {
         </div>
         <div id="story-echo-memory-count" class="story-echo-memory-count">\u5C1A\u65E0\u5267\u60C5\u8BB0\u5FC6\u3002</div>
         <div id="story-echo-memory-list" class="story-echo-memory-list"></div>
+        <nav id="story-echo-memory-pagination" class="story-echo-memory-pagination" aria-label="\u5267\u60C5\u8BB0\u5FC6\u5206\u9875" hidden>
+          <button id="story-echo-memory-previous" class="menu_button" type="button">
+            <i class="fa-solid fa-chevron-left" aria-hidden="true"></i><span>\u4E0A\u4E00\u9875</span>
+          </button>
+          <span id="story-echo-memory-page" class="story-echo-memory-page" aria-live="polite">\u7B2C 1 / 1 \u9875</span>
+          <button id="story-echo-memory-next" class="menu_button" type="button">
+            <span>\u4E0B\u4E00\u9875</span><i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
+          </button>
+        </nav>
 
         <div id="story-echo-memory-editor" class="story-echo-memory-editor" hidden>
           <div class="story-echo-memory-editor-heading">
@@ -7589,6 +7613,8 @@ var MemoryMetadataManager = class {
   populatedUpdatedAt = "";
   editorDirty = false;
   editorRevision = 0;
+  currentPage = 1;
+  renderedChatUuid = "";
   bind(panel, onChanged) {
     const editor = element(panel, "#story-echo-memory-editor");
     for (const control of editor.querySelectorAll(
@@ -7602,13 +7628,22 @@ var MemoryMetadataManager = class {
       control.addEventListener("change", markDirty);
     }
     element(panel, "#story-echo-memory-search").addEventListener("input", () => {
+      this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
     element(panel, "#story-echo-memory-filter").addEventListener("change", () => {
+      this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
     element(panel, "#story-echo-memory-reload").addEventListener("click", () => {
+      this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
+    });
+    element(panel, "#story-echo-memory-previous").addEventListener("click", () => {
+      this.changePage(panel, this.currentPage - 1);
+    });
+    element(panel, "#story-echo-memory-next").addEventListener("click", () => {
+      this.changePage(panel, this.currentPage + 1);
     });
     element(panel, "#story-echo-memory-rebuild").addEventListener("click", async (event) => {
       if (!globalThis.confirm(
@@ -7626,6 +7661,7 @@ var MemoryMetadataManager = class {
         this.editorDirty = false;
         this.populatedMemoryId = "";
         this.populatedUpdatedAt = "";
+        this.currentPage = 1;
         await onChanged();
         notify.success("\u81EA\u52A8\u5267\u60C5\u5143\u6570\u636E\u5DF2\u91CD\u5EFA\u3002");
       } catch (error) {
@@ -7683,6 +7719,7 @@ var MemoryMetadataManager = class {
         );
         if (this.selectedMemoryId === memoryId && this.editorRevision === submittedRevision) {
           this.editorDirty = false;
+          this.currentPage = 1;
         }
         if (syncError) {
           notify.info(`\u4FEE\u6539\u5DF2\u4FDD\u5B58\uFF1B\u5411\u91CF\u540C\u6B65\u5C06\u5728\u7A0D\u540E\u91CD\u8BD5\uFF1A${syncError instanceof Error ? syncError.message : String(syncError)}`);
@@ -7756,6 +7793,19 @@ ${current.event}`)) {
     const list = element(panel, "#story-echo-memory-list");
     const count = element(panel, "#story-echo-memory-count");
     const editor = element(panel, "#story-echo-memory-editor");
+    const pagination = element(panel, "#story-echo-memory-pagination");
+    const previous = element(panel, "#story-echo-memory-previous");
+    const next = element(panel, "#story-echo-memory-next");
+    const pageLabel = element(panel, "#story-echo-memory-page");
+    const chatUuid = state?.chatUuid ?? "";
+    if (chatUuid !== this.renderedChatUuid) {
+      this.renderedChatUuid = chatUuid;
+      this.currentPage = 1;
+      this.selectedMemoryId = "";
+      this.editorDirty = false;
+      this.populatedMemoryId = "";
+      this.populatedUpdatedAt = "";
+    }
     const memories = state?.memories ?? [];
     const selected = memories.find((memory) => memory.id === this.selectedMemoryId);
     if (this.selectedMemoryId && !selected) {
@@ -7772,15 +7822,22 @@ ${current.event}`)) {
       }
       return right.updatedAt.localeCompare(left.updatedAt);
     });
+    const page = paginateItems(filtered, this.currentPage);
+    this.currentPage = page.page;
     list.replaceChildren();
-    count.textContent = memories.length === 0 ? "\u5F53\u524D\u804A\u5929\u5C1A\u65E0\u5267\u60C5\u8BB0\u5FC6\u3002" : `\u5171 ${memories.length} \u6761\uFF0C\u5F53\u524D\u663E\u793A ${filtered.length} \u6761\u3002`;
+    const hasActiveFilter = status !== "all" || Boolean(search);
+    count.textContent = memories.length === 0 ? "\u5F53\u524D\u804A\u5929\u5C1A\u65E0\u5267\u60C5\u8BB0\u5FC6\u3002" : filtered.length === 0 ? `\u5171 ${memories.length} \u6761\uFF0C\u7B5B\u9009\u540E 0 \u6761\u3002` : hasActiveFilter ? `\u5171 ${memories.length} \u6761\uFF0C\u7B5B\u9009\u540E ${filtered.length} \u6761\uFF1B\u7B2C ${page.page} / ${page.totalPages} \u9875\uFF0C\u672C\u9875\u52A0\u8F7D ${page.items.length} \u6761\u3002` : `\u5171 ${memories.length} \u6761\uFF1B\u7B2C ${page.page} / ${page.totalPages} \u9875\uFF0C\u672C\u9875\u52A0\u8F7D ${page.items.length} \u6761\u3002`;
+    pagination.hidden = filtered.length <= page.pageSize;
+    previous.disabled = page.page <= 1;
+    next.disabled = page.page >= page.totalPages;
+    pageLabel.textContent = `\u7B2C ${page.page} / ${page.totalPages} \u9875`;
     if (filtered.length === 0 && memories.length > 0) {
       const empty = document.createElement("div");
       empty.className = "story-echo-memory-empty";
       empty.textContent = "\u6CA1\u6709\u7B26\u5408\u7B5B\u9009\u6761\u4EF6\u7684\u8BB0\u5FC6\u3002";
       list.append(empty);
     }
-    for (const memory of filtered) {
+    for (const memory of page.items) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "menu_button story-echo-memory-row";
@@ -7804,6 +7861,11 @@ ${current.event}`)) {
       button.append(title, metadata);
       list.append(button);
     }
+    if (this.selectedMemoryId && !page.items.some((memory) => memory.id === this.selectedMemoryId) && !this.editorDirty) {
+      this.selectedMemoryId = "";
+      this.populatedMemoryId = "";
+      this.populatedUpdatedAt = "";
+    }
     const current = memories.find((memory) => memory.id === this.selectedMemoryId);
     editor.hidden = !current;
     if (current && (current.id !== this.populatedMemoryId || !this.editorDirty && current.updatedAt !== this.populatedUpdatedAt)) {
@@ -7812,6 +7874,20 @@ ${current.event}`)) {
       this.populatedUpdatedAt = current.updatedAt;
       this.editorDirty = false;
     }
+  }
+  changePage(panel, requestedPage) {
+    if (requestedPage === this.currentPage) {
+      return;
+    }
+    if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u5143\u6570\u636E\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u7FFB\u9875\u5417\uFF1F")) {
+      return;
+    }
+    this.currentPage = requestedPage;
+    this.selectedMemoryId = "";
+    this.editorDirty = false;
+    this.populatedMemoryId = "";
+    this.populatedUpdatedAt = "";
+    this.render(panel, this.repository.getExisting());
   }
   populateEditor(panel, memory) {
     element(panel, "#story-echo-memory-editor-id").textContent = memory.id;

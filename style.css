@@ -439,6 +439,36 @@
   opacity: 0.76;
 }
 
+#story-echo-settings .story-echo-memory-pagination {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: center;
+}
+
+#story-echo-settings .story-echo-memory-pagination[hidden] {
+  display: none;
+}
+
+#story-echo-settings .story-echo-memory-pagination .menu_button {
+  box-sizing: border-box;
+  display: inline-flex;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0.4rem 0.65rem;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-memory-page {
+  min-width: 5.6rem;
+  font-size: 0.84em;
+  text-align: center;
+  white-space: nowrap;
+}
+
 #story-echo-settings .story-echo-memory-list {
   display: flex;
   flex-direction: column;
