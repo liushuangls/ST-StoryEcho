@@ -164,6 +164,44 @@ describe('ExtractionService vector synchronization', () => {
     expect(prompt).not.toContain('第4轮用户剧情');
   });
 
+  it('extracts a stopped partial assistant reply when the user continues on the same branch', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.extraction.targetTurnsPerChunk = 2;
+    const state = chatState([]);
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    const generateRaw = vi.fn(async (_options: unknown) => '{"memories":[]}');
+    const context = {
+      chat: [
+        { is_user: true, mes: '我推开档案室的门。' },
+        { is_user: false, mes: '门后传来脚步声，我刚握住灯柄——' },
+        { is_user: true, mes: '沿着当前剧情继续。' },
+        { is_user: false, mes: '我没有回退，提灯走进了档案室。' },
+      ],
+      chatId: 'chat-id',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'chat-id',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    state.vectorFingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
+
+    const result = await new ExtractionService().processThrough(3);
+
+    expect(result?.indexedThroughMessageId).toBe(3);
+    expect(generateRaw).toHaveBeenCalledOnce();
+    const prompt = String((generateRaw.mock.calls[0]?.[0] as { prompt?: string })?.prompt ?? '');
+    expect(prompt).toContain('门后传来脚步声，我刚握住灯柄——');
+    expect(prompt).toContain('我没有回退，提灯走进了档案室');
+  });
+
   it('persists stable user profile facts as editable structured metadata', async () => {
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.extraction.targetTurnsPerChunk = 3;
@@ -438,5 +476,83 @@ describe('ExtractionService vector synchronization', () => {
     expect(reconciled?.memories).toEqual([]);
     expect(reconciled?.stageSummary.entries).toEqual([]);
     expect(reconciled?.vectorCollectionId).not.toBe(inherited.vectorCollectionId);
+  });
+
+  it('drops a stopped partial reply and all of its derived data when a branch replaces that reply', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.extraction.targetTurnsPerChunk = 1;
+    const stoppedPartialReply = '门后传来脚步声，我刚握住灯柄——';
+    const stoppedSource = {
+      startMessageId: 0,
+      endMessageId: 1,
+      sourceHash: 'parent-including-stopped-reply',
+    };
+    const inherited = chatState([memory({
+      id: 'mem-from-stopped-reply',
+      logicalKey: 'episode:stopped-reply',
+      source: stoppedSource,
+      sourceHistory: [stoppedSource],
+      sourceMessageIds: [1],
+      event: stoppedPartialReply,
+      retrievalText: stoppedPartialReply,
+      injectionText: stoppedPartialReply,
+    })]);
+    inherited.ownerChatId = 'parent-chat';
+    inherited.indexedThroughMessageId = 1;
+    inherited.indexedPrefixHash = 'parent-including-stopped-reply';
+    inherited.stageSummary = {
+      entries: [{
+        text: `旧分支阶段总结：${stoppedPartialReply}`,
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 1,
+        sourceHash: 'parent-including-stopped-reply',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      }],
+      coveredThroughMessageId: 1,
+      coveredThroughHash: 'parent-including-stopped-reply',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const generateRaw = vi.fn(async (_options: unknown) => '{"memories":[]}');
+    const context = {
+      chat: [
+        { is_user: true, mes: '我推开档案室的门。' },
+        { is_user: false, mes: '新分支中我立刻关门离开，没有进入档案室。' },
+      ],
+      chatId: 'branch-chat',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: inherited },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'branch-chat',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('OK', { status: 200 })));
+
+    const branchState = await new MemoryRepository().getOrCreate();
+    expect(branchState?.ownerChatId).toBe('branch-chat');
+    expect(branchState?.memories).toHaveLength(1);
+    expect(branchState?.memories[0]?.injectionText).toContain(stoppedPartialReply);
+
+    const service = new ExtractionService();
+    const reconciled = await service.reconcileHistory(branchState!);
+
+    expect(reconciled?.memories).toEqual([]);
+    expect(reconciled?.stageSummary.entries).toEqual([]);
+    expect(reconciled?.indexedThroughMessageId).toBe(-1);
+
+    const result = await service.processThrough(1);
+
+    expect(result?.ownerChatId).toBe('branch-chat');
+    expect(result?.indexedThroughMessageId).toBe(1);
+    expect(generateRaw).toHaveBeenCalledOnce();
+    const prompt = String((generateRaw.mock.calls[0]?.[0] as { prompt?: string })?.prompt ?? '');
+    expect(prompt).toContain('新分支中我立刻关门离开');
+    expect(prompt).not.toContain(stoppedPartialReply);
+    expect(prompt).not.toContain('旧分支阶段总结');
   });
 });

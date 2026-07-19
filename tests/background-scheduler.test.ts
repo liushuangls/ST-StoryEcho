@@ -10,6 +10,7 @@ import {
   resetStructuredOutputDiagnostics,
   structuredOutputDiagnosticsSnapshot,
 } from '../src/llm/structured-diagnostics';
+import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { stageSummaryService } from '../src/summary/service';
 import { chatState } from './fixtures';
@@ -251,6 +252,75 @@ describe('backgroundTargetMessageId', () => {
     scheduler.unregister();
 
     expect(reconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a stopped reply on the current branch and only dirties history after a branch change', async () => {
+    const chat = [
+      ...turn('u1', 'a1'),
+      ...turn('u2', 'a2'),
+    ];
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.enabled = true;
+    settings.recentWindow = { size: 1, unit: 'turns' };
+    settings.extraction.automatic = true;
+    settings.summary.enabled = false;
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.indexedThroughMessageId = -1;
+    const handlers = new Map<string, (...args: unknown[]) => void | Promise<void>>();
+    const context = {
+      chat,
+      chatId: 'chat-id',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: { [MODULE_ID]: state },
+      event_types: {
+        MESSAGE_RECEIVED: 'message-received',
+        CHAT_CHANGED: 'chat-changed',
+        GENERATION_STOPPED: 'generation-stopped',
+      },
+      eventSource: {
+        on: vi.fn((event: string, handler: (...args: unknown[]) => void | Promise<void>) => {
+          handlers.set(event, handler);
+        }),
+        off: vi.fn(),
+      },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'chat-id',
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const releaseLease = vi.spyOn(storyEchoTaskCoordinator, 'releaseForegroundLease');
+    const reconcile = vi.spyOn(extractionService, 'reconcileHistory').mockResolvedValue(state);
+    vi.spyOn(extractionService, 'processNextThroughVerifiedHistory')
+      .mockImplementation(async (target) => {
+        state.indexedThroughMessageId = target;
+        return state;
+      });
+    const scheduler = new BackgroundProcessingScheduler();
+    const schedule = vi.spyOn(scheduler, 'schedule').mockImplementation(() => undefined);
+    scheduler.register();
+
+    await scheduler.runNow();
+    expect(reconcile).toHaveBeenCalledOnce();
+
+    chat.push({ is_user: true, mes: 'u3' });
+    handlers.get('generation-stopped')?.();
+    chat.push({ is_user: false, mes: '被用户停止但保留在当前分支的半截回复' });
+    handlers.get('message-received')?.();
+    await scheduler.runNow();
+
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(reconcile).toHaveBeenCalledOnce();
+    expect(releaseLease).toHaveBeenCalledWith('generation-stopped');
+    expect(releaseLease).toHaveBeenCalledWith('assistant-message-received');
+
+    handlers.get('chat-changed')?.();
+    await scheduler.runNow();
+    scheduler.unregister();
+
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(releaseLease).toHaveBeenCalledWith('chat-changed');
   });
 
   it('forces reconciliation when history mutates during background extraction', async () => {
