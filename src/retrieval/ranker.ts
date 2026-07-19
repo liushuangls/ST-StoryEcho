@@ -1,4 +1,6 @@
 import type { StoryMemory } from '../core/types';
+import { canonicalStateSlot, normalizeIdentityText } from '../consolidation/identity';
+import { evidenceRoleRank } from '../extraction/evidence';
 import type { VectorQueryResult } from '../vector/adapter';
 import type { RetrievalQueryPlan } from './query-builder';
 
@@ -15,6 +17,76 @@ export interface RankedMemory {
   score: number;
   hasVectorResult: boolean;
   exactMatches: number;
+}
+
+function stateTransitionAdvances(newer: StoryMemory, older: StoryMemory): boolean {
+  if (
+    newer.truthStatus !== 'confirmed' ||
+    newer.source.endMessageId <= older.source.endMessageId ||
+    newer.stateChanges.length !== 1 ||
+    older.stateChanges.length !== 1
+  ) {
+    return false;
+  }
+  const before = normalizeIdentityText(newer.stateChanges[0]?.before ?? '');
+  const previous = normalizeIdentityText(older.stateChanges[0]?.after ?? '');
+  return before.length >= 2 && previous.length >= 2 && (
+    before === previous || before.includes(previous) || previous.includes(before)
+  );
+}
+
+function preferredStateMemory(left: StoryMemory, right: StoryMemory): StoryMemory {
+  if (left.manuallyEdited !== right.manuallyEdited) {
+    return left.manuallyEdited ? left : right;
+  }
+  if (stateTransitionAdvances(left, right)) {
+    return left;
+  }
+  if (stateTransitionAdvances(right, left)) {
+    return right;
+  }
+  const truthRank = (memory: StoryMemory): number => {
+    switch (memory.truthStatus) {
+      case 'confirmed': return 4;
+      case 'claimed': return 3;
+      case 'inferred': return 2;
+      case 'uncertain': return 1;
+    }
+  };
+  const truthDifference = truthRank(left) - truthRank(right);
+  if (truthDifference !== 0) {
+    return truthDifference > 0 ? left : right;
+  }
+  const authority = evidenceRoleRank(left.evidenceRole) - evidenceRoleRank(right.evidenceRole);
+  if (authority !== 0) {
+    return authority > 0 ? left : right;
+  }
+  return left.source.endMessageId !== right.source.endMessageId
+    ? left.source.endMessageId > right.source.endMessageId ? left : right
+    : left.importance >= right.importance ? left : right;
+}
+
+/**
+ * Old plugin versions may have left two one-slot state memories active. Hide
+ * the stale duplicate at read time so users get the current fact immediately,
+ * even before choosing “rebuild automatic metadata”. Composite legacy memories
+ * are left untouched because dropping one could discard unrelated facts.
+ */
+export function suppressStaleAtomicStates(memories: StoryMemory[]): StoryMemory[] {
+  const preferredBySlot = new Map<string, StoryMemory>();
+  for (const memory of memories) {
+    if (memory.stateChanges.length !== 1) {
+      continue;
+    }
+    const change = memory.stateChanges[0]!;
+    const slot = canonicalStateSlot(change.entity, change.attribute, memory.type);
+    const existing = preferredBySlot.get(slot);
+    preferredBySlot.set(slot, existing ? preferredStateMemory(existing, memory) : memory);
+  }
+  const preferredIds = new Set([...preferredBySlot.values()].map((memory) => memory.id));
+  return memories.filter((memory) => (
+    memory.stateChanges.length !== 1 || preferredIds.has(memory.id)
+  ));
 }
 
 function exactEntityMatches(query: string, memory: StoryMemory): number {

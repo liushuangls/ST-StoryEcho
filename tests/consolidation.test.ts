@@ -146,6 +146,7 @@ describe('event consolidation', () => {
   it.each([
     ['位置', '存放地点'],
     ['持有者', '保管人'],
+    ['持有者', '保管状态'],
     ['知情者', '知情范围'],
     ['传言状态', '核验结果'],
   ])('normalizes %s and %s into the same state category', (oldAttribute, newAttribute) => {
@@ -186,6 +187,151 @@ describe('event consolidation', () => {
       targetMemoryId: 'mem-1',
       reason: '同一把钥匙的互补事实。',
     });
+  });
+
+  it('normalizes a descriptive name and its stable code into the same state subject', () => {
+    const old = memory({
+      stateChanges: [{ entity: '真月桂铜印R-1', attribute: '保管人', after: '苏格兰场S9证物柜' }],
+    });
+    const next = candidate({
+      event: 'R-1已经移交给哈丽雅特·莫斯保管。',
+      stateChanges: [{
+        entity: 'R-1',
+        attribute: '持有者',
+        before: '苏格兰场S9证物柜',
+        after: '哈丽雅特·莫斯',
+      }],
+      retrievalText: 'R-1当前由哈丽雅特·莫斯保管。',
+    });
+
+    expect(fallbackConsolidationDecisions([next], [old])[0]).toMatchObject({
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
+  it('keeps stable-code identity when an ordinary object name contains a connective character', () => {
+    const old = memory({
+      stateChanges: [{ entity: '和氏璧R-1', attribute: '持有者', after: '雷斯垂德' }],
+    });
+    const next = candidate({
+      stateChanges: [{ entity: 'R-1', attribute: '保管人', before: '雷斯垂德', after: '哈丽雅特·莫斯' }],
+      retrievalText: 'R-1当前由哈丽雅特·莫斯保管。',
+    });
+
+    expect(fallbackConsolidationDecisions([next], [old])[0]).toMatchObject({
+      operation: 'SUPERSEDE',
+      targetMemoryId: 'mem-1',
+    });
+  });
+
+  it('does not collapse different relationship pairs merely because both mention the same code', () => {
+    const old = memory({
+      type: 'relationship_change',
+      entities: ['陌白', '真月桂铜印R-1'],
+      stateChanges: [{
+        entity: '陌白与真月桂铜印R-1',
+        attribute: '信任关系',
+        after: '陌白信任R-1的鉴定结果',
+      }],
+    });
+    const next = candidate({
+      type: 'relationship_change',
+      event: '福尔摩斯仍怀疑R-1的鉴定结果。',
+      entities: ['福尔摩斯', 'R-1'],
+      stateChanges: [{
+        entity: '福尔摩斯与R-1',
+        attribute: '信任关系',
+        before: '',
+        after: '福尔摩斯怀疑R-1的鉴定结果',
+      }],
+      retrievalText: '福尔摩斯仍怀疑R-1的鉴定结果。',
+    });
+
+    expect(fallbackConsolidationDecisions([next], [old])[0]?.operation).toBe('CREATE');
+  });
+
+  it('rejects an LLM merge across independent plot episodes that deterministic matching keeps separate', () => {
+    const old = memory({
+      type: 'event',
+      event: '陌白和福尔摩斯在泰晤士河下水渠追捕灰帽男人。',
+      scene: { location: '泰晤士河下水渠', time: '', participants: ['陌白', '福尔摩斯', '华生'] },
+      entities: ['陌白', '福尔摩斯', '华生', '灰帽男人', '泰晤士河下水渠'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '陌白和福尔摩斯在下水渠追捕灰帽男人。',
+      injectionText: '两人在泰晤士河下水渠追捕灰帽男人。',
+    });
+    const separate = candidate({
+      type: 'event',
+      event: '陌白和福尔摩斯在博物馆核验真月桂铜印R-1。',
+      scene: { location: '大英博物馆', time: '', participants: ['陌白', '福尔摩斯', '华生'] },
+      entities: ['陌白', '福尔摩斯', '华生', '真月桂铜印R-1', '大英博物馆'],
+      aliases: ['R-1'],
+      stateChanges: [],
+      retrievalText: '陌白和福尔摩斯在博物馆确认R-1为真品。',
+      injectionText: '两人在大英博物馆确认R-1为真品。',
+    });
+    const raw = JSON.stringify({
+      actions: [{
+        candidateIndex: 0,
+        operation: 'MERGE',
+        targetMemoryId: 'mem-1',
+        reason: '参与者相同，合并为一条主线。',
+      }],
+    });
+
+    expect(fallbackConsolidationDecisions([separate], [old])[0]?.operation).toBe('CREATE');
+    expect(parseConsolidationResponse(raw, [separate], [old])[0]).toMatchObject({
+      operation: 'CREATE',
+      reason: '没有可确定关联的旧记忆。',
+    });
+  });
+
+  it('keeps different-location episodes separate even when a model omits participant metadata', () => {
+    const old = memory({
+      type: 'event',
+      scene: { location: '泰晤士河下水渠', time: '', participants: [] },
+      event: '陌白和福尔摩斯在泰晤士河下水渠追捕灰帽男人。',
+      entities: ['陌白', '福尔摩斯', '灰帽男人', '泰晤士河下水渠'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '陌白和福尔摩斯在下水渠追捕灰帽男人。',
+    });
+    const next = candidate({
+      type: 'event',
+      scene: { location: '大英博物馆', time: '', participants: [] },
+      event: '陌白和福尔摩斯在大英博物馆核验一枚古币。',
+      entities: ['陌白', '福尔摩斯', '古币', '大英博物馆'],
+      aliases: [],
+      stateChanges: [],
+      retrievalText: '陌白和福尔摩斯在博物馆核验古币。',
+    });
+
+    expect(fallbackConsolidationDecisions([next], [old])[0]?.operation).toBe('CREATE');
+  });
+
+  it('does not let consolidation silently discard an accepted independent candidate', () => {
+    const independent = candidate({
+      type: 'clue',
+      event: '陌白发现G17证物袋封口有一道新划痕。',
+      entities: ['陌白', 'G17证物袋'],
+      aliases: ['G17'],
+      stateChanges: [],
+      retrievalText: 'G17证物袋封口存在一道新划痕。',
+      injectionText: '陌白发现G17证物袋封口有一道新划痕。',
+    });
+    const raw = JSON.stringify({
+      actions: [{
+        candidateIndex: 0,
+        operation: 'IGNORE',
+        targetMemoryId: '',
+        reason: '模型误判为不重要。',
+      }],
+    });
+
+    expect(fallbackConsolidationDecisions([independent], [memory()])[0]?.operation).toBe('CREATE');
+    expect(parseConsolidationResponse(raw, [independent], [memory()])[0]?.operation).toBe('CREATE');
   });
 
   it('rejects incomplete or malformed LLM actions so the structured layer can retry', () => {

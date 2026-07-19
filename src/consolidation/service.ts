@@ -26,7 +26,9 @@ export async function decideConsolidation(
     return exact || stableIdentity ? [candidateIndex] : [];
   }));
   const ambiguous = candidates.flatMap((candidate, candidateIndex) => (
-    deterministicIndices.has(candidateIndex) ? [] : [{ candidate, candidateIndex }]
+    deterministicIndices.has(candidateIndex) || fallback[candidateIndex]?.operation !== 'MERGE'
+      ? []
+      : [{ candidate, candidateIndex }]
   ));
   if (ambiguous.length === 0) {
     return { decisions: fallback, usedLlm: false, durationMs: 0 };

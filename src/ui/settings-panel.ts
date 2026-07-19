@@ -66,6 +66,19 @@ const memoryMetadataManager = new MemoryMetadataManager(
 );
 let cachedVectorCollectionId = '';
 let cachedVectorCountText = '未读取';
+let cachedVectorRevision = '';
+
+function vectorRevision(state: NonNullable<ReturnType<MemoryRepository['getExisting']>>): string {
+  return [
+    state.vectorCollectionId,
+    state.vectorFingerprint,
+    state.pendingVectorHashes.length,
+    state.pendingVectorDeleteHashes.length,
+    state.metrics.vectorItemsInserted,
+    state.metrics.vectorItemsDeleted,
+    state.metrics.vectorRebuilds,
+  ].join(':');
+}
 
 function panelTemplate(): HTMLElement {
   const panel = document.createElement('div');
@@ -1179,6 +1192,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     if (!state) {
       cachedVectorCollectionId = '';
       cachedVectorCountText = '未读取';
+      cachedVectorRevision = '';
       target.textContent = [
         getCurrentChatId()
           ? '当前聊天尚未初始化StoryEcho数据。'
@@ -1196,8 +1210,13 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     if (cachedVectorCollectionId !== state.vectorCollectionId) {
       cachedVectorCollectionId = state.vectorCollectionId;
       cachedVectorCountText = '未读取';
+      cachedVectorRevision = '';
     }
-    if (refreshVectorCount) {
+    const currentVectorRevision = vectorRevision(state);
+    if (refreshVectorCount || cachedVectorRevision !== currentVectorRevision) {
+      // Mark before awaiting so the many diagnostics events emitted by one
+      // background batch do not start duplicate collection-list requests.
+      cachedVectorRevision = currentVectorRevision;
       try {
         const hashes = await vectorStore.list(
           state.vectorCollectionId,

@@ -24,12 +24,13 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个严格的长篇角色扮演
 12. 所有事实字段使用第三人称和输入中的确切专名，不得用“我、我们、你、他”等脱离原片段后指代不清的代词。
 13. 明确参与事件、共同执行动作或直接确认事实的人也属于knownBy；但原文若明确给出“只有/恰好”某些知情者或“没有第三人”，该封闭名单优先，不得仅因消息发送者讲述了事实就把发送者自动加入knownBy。
 14. unresolvedThreads只记录原片段明确提出的疑问、未解状态、待办目标或伏笔；不得把原文没有交代的信息自行改写成“去向不明”“内容未知”等悬念。
-15. 物品位置、持有者、秘密知情范围、事实真伪等可变化事实放入stateFacts，用明确专名填写entity、attribute、before和after；每个独立entity+attribute必须单独一项。
+15. 物品位置、持有者、秘密知情范围、事实真伪等可变化事实放入stateFacts，用明确专名填写entity、attribute、before和after；每个独立entity+attribute必须单独一项。位置和持有/保管人永远是两个不同槽：例如“R-1存放于C4保险柜，由莫斯保管”必须分别输出attribute="位置"、after="C4保险柜"和attribute="持有者"、after="莫斯"，禁止合成“保管状态”。
 16. 同一承诺或任务从提出到完成放入commitments，actor、beneficiary、action和object必须保持一致；status只能是pending、completed、cancelled或failed。
 17. 每条记忆必须输出sourceMessageIds，只能引用history_messages中直接支持该事实的一个或多个messageId。reference_context没有messageId，禁止把它作为来源；找不到聊天证据就不要输出该记忆。
 18. “我叫刘爽”“我是男的”“我97年的/我1997年出生”等由用户或角色本人明确声明的姓名、性别/代词、出生年份、长期身份、阵营、亲属关系、持久能力或限制，属于需要跨窗口保留的稳定状态，不得当作寒暄丢弃。放入stateFacts并为每个独立属性单列一项。用户第一人称资料统一使用稳定主体entity="用户"（不要把会变化的姓名本身当作entity），例如姓名声明填写entity="用户"、attribute="姓名"、after="刘爽"。
 19. 问句、玩笑、试探和AI对用户身份的猜测不是稳定事实；只有本人明确确认、可靠剧情证据或后续明确纠正后才能标为confirmed。AI关于自身厂商、训练时间、系统时间能力等脱离角色剧情的自我说明通常不提取。
 20. 用户明确纠正当前年份、地点、身份或其他持续状态时要提取新值，并在before有直接依据时写出旧值；不要把被纠正的AI猜测当作同等权威事实。
+21. history_messages中的name只是SillyTavern界面说话者标签，不是剧情身份的证据。除非消息正文明确自我介绍或剧情直接确认，不得把界面用户名写进人物身份、knownBy或稳定状态。
 
 根对象必须且只能包含episodes、stateFacts、relationships、commitments、revelations、clues六个数组：剧情/冲突放episodes；独立状态槽放stateFacts；人物关系边放relationships；承诺任务生命周期放commitments；完整秘密命题放revelations；证物及其直接含义放clues。truthStatus只能是confirmed、claimed、inferred、uncertain。
 

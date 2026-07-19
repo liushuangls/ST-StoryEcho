@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { atomicizeMemoryCandidate } from '../src/extraction/atomicize';
+import {
+  atomicizeMemoryCandidate,
+  normalizeCandidatesByType,
+} from '../src/extraction/atomicize';
 import { candidate } from './fixtures';
 
 describe('extraction candidate atomicization', () => {
@@ -114,5 +117,119 @@ describe('extraction candidate atomicization', () => {
       stateChanges: [],
     });
     expect(result.slice(1).map((item) => item.stateChanges[0]?.entity)).toEqual(['罗盘', '胶片']);
+  });
+
+  it('splits a compound custody state into independent location and holder slots', () => {
+    const result = atomicizeMemoryCandidate(candidate({
+      type: 'state_change',
+      event: '真月桂铜印R-1转入C4保险柜并由哈丽雅特·莫斯保管。',
+      entities: ['真月桂铜印R-1', 'C4保险柜', '哈丽雅特·莫斯'],
+      aliases: ['R-1'],
+      stateChanges: [{
+        entity: '真月桂铜印R-1',
+        attribute: '保管状态',
+        before: '位于S9证物柜，由雷斯垂德保管',
+        after: '存放于C4保险柜，由哈丽雅特·莫斯保管',
+      }],
+      retrievalText: 'R-1现存放于C4保险柜，由哈丽雅特·莫斯保管。',
+      injectionText: 'R-1已经转入C4保险柜并交由哈丽雅特·莫斯保管。',
+    }));
+
+    expect(result.map((item) => item.stateChanges[0])).toEqual([
+      {
+        entity: '真月桂铜印R-1',
+        attribute: '位置',
+        before: 'S9证物柜',
+        after: 'C4保险柜',
+      },
+      {
+        entity: '真月桂铜印R-1',
+        attribute: '持有者',
+        before: '雷斯垂德',
+        after: '哈丽雅特·莫斯',
+      },
+    ]);
+  });
+
+  it('also splits compact parenthesized custody output from a less compliant model', () => {
+    const result = atomicizeMemoryCandidate(candidate({
+      stateChanges: [{
+        entity: 'R-1',
+        attribute: '位置及保管情况',
+        before: 'S9证物柜（雷斯垂德保管）',
+        after: 'C4保险柜（哈丽雅特·莫斯保管）',
+      }],
+    }));
+
+    expect(result.map((item) => item.stateChanges[0])).toEqual([
+      { entity: 'R-1', attribute: '位置', before: 'S9证物柜', after: 'C4保险柜' },
+      { entity: 'R-1', attribute: '持有者', before: '雷斯垂德', after: '哈丽雅特·莫斯' },
+    ]);
+  });
+
+  it('keeps high-value state facts when a dense batch exceeds the candidate limit', () => {
+    const routineEvents = Array.from({ length: 9 }, (_, index) => candidate({
+      type: 'event',
+      sourceMessageIds: [index * 2, index * 2 + 1],
+      event: `支线事件${index}`,
+      entities: [`支线实体${index}`],
+      aliases: [],
+      stateChanges: [],
+      importance: 0.6,
+      retrievalText: `支线事件${index}发生。`,
+      injectionText: `支线事件${index}发生。`,
+    }));
+    const holder = candidate({
+      type: 'state_change',
+      evidenceRole: 'assistant',
+      sourceMessageIds: [18, 19],
+      event: 'R-1移交给哈丽雅特·莫斯。',
+      entities: ['R-1', '哈丽雅特·莫斯'],
+      aliases: [],
+      stateChanges: [{ entity: 'R-1', attribute: '持有者', before: '雷斯垂德', after: '哈丽雅特·莫斯' }],
+      importance: 0.9,
+      retrievalText: 'R-1当前由哈丽雅特·莫斯保管。',
+      injectionText: 'R-1当前由哈丽雅特·莫斯保管。',
+    });
+
+    const result = normalizeCandidatesByType([...routineEvents, holder], 9);
+
+    expect(result).toHaveLength(9);
+    expect(result.some((item) => item.stateChanges[0]?.after === '哈丽雅特·莫斯')).toBe(true);
+  });
+
+  it('preserves a causal episode alongside many accepted atomic state facts', () => {
+    const states = Array.from({ length: 20 }, (_, index) => candidate({
+      type: 'state_change',
+      event: `证物${index}的封存状态发生变化。`,
+      entities: [`证物${index}`],
+      aliases: [],
+      stateChanges: [{
+        entity: `证物${index}`,
+        attribute: '封存状态',
+        before: '待封存',
+        after: '已封存',
+      }],
+      importance: 0.8,
+      retrievalText: `证物${index}已经封存。`,
+      injectionText: `证物${index}已经封存。`,
+    }));
+    const episode = candidate({
+      type: 'conflict',
+      event: '陌白阻止灰帽男人焚毁证物，并触发全部证物紧急封存。',
+      cause: '灰帽男人试图焚毁证物。',
+      consequence: '证物获救并进入紧急封存流程。',
+      entities: ['陌白', '灰帽男人', '证物'],
+      aliases: [],
+      stateChanges: [],
+      importance: 0.95,
+      retrievalText: '陌白阻止灰帽男人焚毁证物。',
+      injectionText: '陌白阻止灰帽男人焚毁证物，证物随后全部封存。',
+    });
+
+    const result = normalizeCandidatesByType([...states, episode], 20);
+
+    expect(result).toHaveLength(20);
+    expect(result.some((item) => item.type === 'conflict')).toBe(true);
   });
 });

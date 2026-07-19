@@ -19,7 +19,11 @@ import {
 import { hasSourceOutsideWindow } from '../retrieval/eligibility';
 import { isShadowedByRecentUserFact } from '../retrieval/recent-shadow';
 import { queryRewriteService } from '../retrieval/query-rewriter';
-import { rankMemories, type RetrievalVectorResults } from '../retrieval/ranker';
+import {
+  rankMemories,
+  suppressStaleAtomicStates,
+  type RetrievalVectorResults,
+} from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
@@ -269,13 +273,13 @@ async function prepareStoryEchoPrompt(
       logger.warn('同步待处理向量失败。', error);
     }
 
-    const windowExternalMemories = state.memories.filter(
+    const windowExternalMemories = suppressStaleAtomicStates(state.memories.filter(
       (memory) =>
         !memory.excluded &&
         memory.status !== 'invalid' &&
         memory.status !== 'superseded' &&
         hasSourceOutsideWindow(memory, retainedSourceStart),
-    );
+    ));
     const shadowedMemories = windowExternalMemories.filter((memory) => (
       isShadowedByRecentUserFact(
         memory,
@@ -392,6 +396,7 @@ async function prepareStoryEchoPrompt(
       settings.recall.maxEvents,
       settings.recall.maxTokens,
       `${queryPlan.intentQuery}\n${currentInput?.mes ?? ''}`,
+      eligibleMemories,
     );
     const entityConstraints = recallEnabled
       ? buildEntityDisambiguationConstraints(
@@ -491,6 +496,10 @@ async function prepareStoryEchoPrompt(
         .map((result) => `${result.hash}@${result.rank}`)
         .join(','),
       selectedMemoryIds: selected.map((memory) => memory.id).join(','),
+      exactEntityRescues: selected
+        .filter((memory) => !ranked.some((rankedMemory) => rankedMemory.id === memory.id))
+        .map((memory) => memory.id)
+        .join(','),
       estimatedRemovedTokens,
       estimatedSummaryTokens,
       estimatedInjectedTokens,

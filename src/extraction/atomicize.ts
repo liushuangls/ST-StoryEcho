@@ -1,5 +1,6 @@
 import type { ExtractedMemoryCandidate } from './types';
 import { canonicalStateKind, canonicalSubject } from '../consolidation/identity';
+import { evidenceRoleRank } from './evidence';
 
 const CLAUSE_SEPARATOR = /[；;。.!！?？\n]+/u;
 
@@ -76,6 +77,65 @@ interface AtomicClause {
   entities: string[];
 }
 
+interface CustodyParts {
+  location: string;
+  holder: string;
+}
+
+function parseCustodyParts(value: string): CustodyParts {
+  const normalizedValue = value.trim();
+  let location = normalizedValue.match(
+    /(?:存放|放置|安置|位于|藏于|藏在|转入|移入)(?:在|于)?\s*([^，,；;]+?)(?=\s*(?:[，,；;]|并?由|$))/u,
+  )?.[1]?.trim() ?? '';
+  let holder = normalizedValue.match(
+    /(?:^|[，,；;]|并)\s*(?:交?由)\s*([^，,；;]+?)(?:负责)?(?:保管|持有|看管)(?:[。.]|$)/u,
+  )?.[1]?.trim() ?? normalizedValue.match(
+    /(?:保管人|保管者|持有人|持有者)\s*[:：为是]\s*([^，,；;（）()]+)/u,
+  )?.[1]?.trim() ?? normalizedValue.match(
+    /[（(]\s*([^（）()]+?)(?:负责)?(?:保管|持有|看管)\s*[）)]/u,
+  )?.[1]?.trim() ?? '';
+  if (!location && holder) {
+    const markerIndex = normalizedValue.search(
+      /[（(]|(?:[，,；;]\s*)?(?:交?由|保管人|保管者|持有人|持有者)/u,
+    );
+    location = (markerIndex >= 0 ? normalizedValue.slice(0, markerIndex) : normalizedValue)
+      .replace(/^(?:当前|现在|现已|现|仍)?(?:存放|放置|安置|位于|藏于|藏在|转入|移入)?(?:在|于)?\s*/u, '')
+      .trim();
+  }
+  location = location.replace(/[（(]+$/u, '').trim();
+  holder = holder.replace(/[）)]+$/u, '').trim();
+  return { location, holder };
+}
+
+function expandedStateChanges(
+  candidate: ExtractedMemoryCandidate,
+): ExtractedMemoryCandidate['stateChanges'] {
+  return candidate.stateChanges.flatMap((change) => {
+    if (!/(?:位置|地点|存放|保管|持有)/u.test(change.attribute)) {
+      return [change];
+    }
+    const after = parseCustodyParts(change.after);
+    if (!after.location || !after.holder) {
+      return [change];
+    }
+    const before = parseCustodyParts(change.before ?? '');
+    return [
+      {
+        entity: change.entity,
+        attribute: '位置',
+        before: before.location,
+        after: after.location,
+      },
+      {
+        entity: change.entity,
+        attribute: '持有者',
+        before: before.holder,
+        after: after.holder,
+      },
+    ];
+  });
+}
+
 function typeForStateChange(
   candidate: ExtractedMemoryCandidate,
   attribute: string,
@@ -97,7 +157,8 @@ function atomicizeStateChanges(
     return null;
   }
 
-  const uniqueChanges = candidate.stateChanges.filter((change, index, changes) => {
+  const expandedChanges = expandedStateChanges(candidate);
+  const uniqueChanges = expandedChanges.filter((change, index, changes) => {
     const key = `${normalized(change.entity)}\u0000${normalized(change.attribute)}`;
     return !changes.slice(index + 1).some((other) => (
       `${normalized(other.entity)}\u0000${normalized(other.attribute)}` === key
@@ -108,7 +169,11 @@ function atomicizeStateChanges(
     const stateText = change.before
       ? `${change.entity}的${change.attribute}由${change.before}变为${change.after}`
       : `${change.entity}的${change.attribute}当前为${change.after}`;
-    const canonicalEntity = canonicalSubject(change.entity);
+    const kind = canonicalStateKind(change.attribute, candidate.type);
+    const canonicalEntity = canonicalSubject(
+      change.entity,
+      kind !== 'relationship' && kind !== 'commitment',
+    );
     const contextualEntities = distinctMentionedTerms(
       `${change.before ?? ''}\n${change.after}`,
       candidate.entities,
@@ -143,8 +208,6 @@ function atomicizeStateChanges(
     const participants = candidate.scene.participants.filter((participant) => (
       grouped.has(normalized(participant)) || matchedParticipants.has(normalized(participant))
     ));
-    const kind = canonicalStateKind(change.attribute, candidate.type);
-
     return {
       ...candidate,
       type: typeForStateChange(candidate, change.attribute),
@@ -289,7 +352,65 @@ export function normalizeCandidatesByType(
   candidates: ExtractedMemoryCandidate[],
   maximumCandidates = 30,
 ): ExtractedMemoryCandidate[] {
-  return candidates
+  const typePriority: Record<ExtractedMemoryCandidate['type'], number> = {
+    state_change: 7,
+    commitment: 6,
+    revelation: 5,
+    relationship_change: 4,
+    clue: 3,
+    conflict: 2,
+    event: 1,
+  };
+  const sorted = candidates
     .flatMap(normalizeMemoryCandidateByType)
-    .slice(0, Math.max(0, maximumCandidates));
+    .map((candidate, index) => ({ candidate, index }))
+    .sort((left, right) => {
+      const priority = (candidate: ExtractedMemoryCandidate): number => {
+        const explicitTransition = candidate.truthStatus === 'confirmed' &&
+          candidate.stateChanges.some((change) => (
+            Boolean(change.before?.trim()) && normalized(change.before ?? '') !== normalized(change.after)
+          ));
+        const truthPriority = candidate.truthStatus === 'confirmed'
+          ? 3
+          : candidate.truthStatus === 'claimed'
+            ? 2
+            : candidate.truthStatus === 'inferred'
+              ? 1
+              : 0;
+        return (
+          (explicitTransition ? 10_000 : 0) +
+          typePriority[candidate.type] * 1_000 +
+          truthPriority * 200 +
+          candidate.importance * 100 +
+          evidenceRoleRank(candidate.evidenceRole) * 10
+        );
+      };
+      return priority(right.candidate) - priority(left.candidate) || left.index - right.index;
+    });
+  const limit = Math.max(0, Math.floor(maximumCandidates));
+  if (sorted.length <= limit) {
+    return sorted.map(({ candidate }) => candidate);
+  }
+
+  // Preserve at least one accepted memory from each represented semantic
+  // class before filling the remaining slots by priority. This prevents a
+  // dense list of atomic state facts from erasing the causal episode that
+  // explains why those states changed.
+  const selected = new Set<number>();
+  const selectedTypes = new Set<ExtractedMemoryCandidate['type']>();
+  for (const item of sorted) {
+    if (!selectedTypes.has(item.candidate.type) && selected.size < limit) {
+      selected.add(item.index);
+      selectedTypes.add(item.candidate.type);
+    }
+  }
+  for (const item of sorted) {
+    if (selected.size >= limit) {
+      break;
+    }
+    selected.add(item.index);
+  }
+  return sorted
+    .filter((item) => selected.has(item.index))
+    .map(({ candidate }) => candidate);
 }

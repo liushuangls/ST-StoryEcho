@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MODULE_ID } from '../src/core/constants';
 import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
-import { buildStageSummaryPrompt } from '../src/summary/prompts';
+import {
+  buildStageSummaryGrounding,
+  buildStageSummaryPrompt,
+} from '../src/summary/prompts';
 import { normalizeSummary, StageSummaryService } from '../src/summary/service';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
-import { chatState } from './fixtures';
+import { chatState, memory } from './fixtures';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -52,6 +55,144 @@ describe('independent stage summaries', () => {
     expect(prompt).toContain('"speaker":"user-character"');
     expect(prompt).not.toContain('"speaker":"刘爽"');
     expect(prompt).not.toContain('previous_summary');
+  });
+
+  it('grounds a correction batch with user-confirmed current facts instead of assistant speculation', () => {
+    const correction = memory({
+      id: 'drink-correction',
+      evidenceRole: 'user',
+      sourceMessageIds: [12],
+      source: { startMessageId: 12, endMessageId: 12, sourceHash: 'drink' },
+      sourceHistory: [{ startMessageId: 12, endMessageId: 12, sourceHash: 'drink' }],
+      stateChanges: [{
+        entity: '贝克街会客室饮品',
+        attribute: '供应状态',
+        before: '推测有酒',
+        after: '只有淡茶，没有酒',
+      }],
+      event: '用户明确纠正会客室里没有酒。',
+      retrievalText: '贝克街会客室只有淡茶，没有酒。',
+    });
+    const assistantGuess = memory({
+      id: 'assistant-guess',
+      evidenceRole: 'assistant',
+      sourceMessageIds: [11],
+      stateChanges: [],
+      event: '福尔摩斯猜测桌上也许有酒。',
+      retrievalText: '福尔摩斯猜测桌上也许有酒。',
+    });
+
+    const grounding = buildStageSummaryGrounding([assistantGuess, correction], 10, 13);
+    const prompt = buildStageSummaryPrompt(
+      [
+        { is_user: false, mes: '桌上也许有酒。' },
+        { is_user: true, mes: '纠正：这里只供应淡茶，没有酒。' },
+      ],
+      11,
+      { userUiPersona: '', assistantCharacter: '福尔摩斯' },
+      grounding,
+    );
+
+    expect(grounding).toContain('推测有酒 → 只有淡茶，没有酒');
+    expect(grounding).not.toContain('福尔摩斯猜测');
+    expect(prompt).toContain('<authoritative_facts>');
+    expect(prompt).toContain('用户明确事实优先于冲突的Assistant推测');
+  });
+
+  it('keeps an explicit Assistant-authored before-to-after plot transition in the grounding ledger', () => {
+    const transition = memory({
+      id: 'stolen-key',
+      evidenceRole: 'assistant',
+      sourceMessageIds: [21],
+      source: { startMessageId: 21, endMessageId: 21, sourceHash: 'stolen' },
+      stateChanges: [{
+        entity: '银色钥匙',
+        attribute: '持有者',
+        before: '林雨',
+        after: '灰帽男人',
+      }],
+      event: '灰帽男人从林雨手中夺走银色钥匙。',
+      retrievalText: '灰帽男人夺走银色钥匙。',
+    });
+
+    expect(buildStageSummaryGrounding([transition], 20, 22)).toContain(
+      'Assistant明确剧情推进｜状态：银色钥匙 · 持有者：林雨 → 灰帽男人',
+    );
+  });
+
+  it('does not leak a later merged state backwards into an earlier summary batch', () => {
+    const updated = memory({
+      id: 'updated-holder',
+      evidenceRole: 'mixed',
+      sourceMessageIds: [12, 30],
+      source: { startMessageId: 28, endMessageId: 31, sourceHash: 'latest-version' },
+      sourceHistory: [
+        { startMessageId: 10, endMessageId: 13, sourceHash: 'old-version' },
+        { startMessageId: 28, endMessageId: 31, sourceHash: 'latest-version' },
+      ],
+      stateChanges: [{
+        entity: '真月桂铜印R-1',
+        attribute: '持有者',
+        before: '雷斯垂德',
+        after: '哈丽雅特·莫斯',
+      }],
+    });
+
+    expect(buildStageSummaryGrounding([updated], 10, 13)).toBe('');
+    expect(buildStageSummaryGrounding([updated], 28, 31)).toContain(
+      '#30｜User参与确认事实｜状态：真月桂铜印R-1 · 持有者：雷斯垂德 → 哈丽雅特·莫斯',
+    );
+  });
+
+  it('keeps a later explicit transition when a dense grounding ledger reaches its budget', () => {
+    const earlier = memory({
+      id: 'earlier-state',
+      evidenceRole: 'user',
+      sourceMessageIds: [10],
+      source: { startMessageId: 10, endMessageId: 10, sourceHash: 'earlier' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', after: '林雨' }],
+    });
+    const correction = memory({
+      id: 'later-correction',
+      evidenceRole: 'user',
+      sourceMessageIds: [20],
+      source: { startMessageId: 20, endMessageId: 20, sourceHash: 'later' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '灰帽男人' }],
+    });
+    const correctionOnly = buildStageSummaryGrounding([correction], 0, 30);
+
+    const grounding = buildStageSummaryGrounding(
+      [earlier, correction],
+      0,
+      30,
+      correctionOnly.length,
+    );
+
+    expect(grounding).toBe(correctionOnly);
+    expect(grounding).toContain('林雨 → 灰帽男人');
+  });
+
+  it('omits superseded audit records from the authoritative grounding ledger', () => {
+    const stale = memory({
+      id: 'stale-holder',
+      status: 'superseded',
+      evidenceRole: 'user',
+      sourceMessageIds: [10],
+      source: { startMessageId: 10, endMessageId: 10, sourceHash: 'stale' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', after: '林雨' }],
+    });
+    const current = memory({
+      id: 'current-holder',
+      evidenceRole: 'user',
+      sourceMessageIds: [12],
+      source: { startMessageId: 12, endMessageId: 12, sourceHash: 'current' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '灰帽男人' }],
+    });
+
+    const grounding = buildStageSummaryGrounding([stale, current], 10, 13);
+
+    expect(grounding).toContain('林雨 → 灰帽男人');
+    expect(grounding).not.toContain('#10');
   });
 
   it('removes an unsupported UI persona name from a stage summary', () => {

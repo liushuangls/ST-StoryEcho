@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { StoryMemory } from '../src/core/types';
 import { buildRetrievalQueryPlan } from '../src/retrieval/query-builder';
-import { rankMemories } from '../src/retrieval/ranker';
+import { rankMemories, suppressStaleAtomicStates } from '../src/retrieval/ranker';
 
 function memory(overrides: Partial<StoryMemory>): StoryMemory {
   return {
@@ -38,6 +38,71 @@ function memory(overrides: Partial<StoryMemory>): StoryMemory {
 }
 
 describe('rankMemories', () => {
+  it('suppresses stale one-slot state duplicates left by older metadata', () => {
+    const old = memory({
+      id: 'old-r1',
+      type: 'state_change',
+      source: { startMessageId: 5, endMessageId: 5, sourceHash: 'old' },
+      sourceMessageIds: [5],
+      sourceHistory: [{ startMessageId: 5, endMessageId: 5, sourceHash: 'old' }],
+      entities: ['真月桂铜印R-1'],
+      aliases: ['R-1'],
+      stateChanges: [{ entity: '真月桂铜印R-1', attribute: '保管人', after: '雷斯垂德' }],
+    });
+    const current = memory({
+      id: 'current-r1',
+      type: 'state_change',
+      source: { startMessageId: 20, endMessageId: 20, sourceHash: 'new' },
+      sourceMessageIds: [20],
+      sourceHistory: [{ startMessageId: 20, endMessageId: 20, sourceHash: 'new' }],
+      entities: ['R-1'],
+      aliases: ['真月桂铜印R-1'],
+      stateChanges: [{ entity: 'R-1', attribute: '持有者', before: '雷斯垂德', after: '哈丽雅特·莫斯' }],
+    });
+
+    expect(suppressStaleAtomicStates([old, current]).map((item) => item.id))
+      .toEqual(['current-r1']);
+  });
+
+  it('allows a later confirmed Assistant transition to advance an older User state', () => {
+    const old = memory({
+      id: 'user-old',
+      type: 'state_change',
+      evidenceRole: 'user',
+      source: { startMessageId: 5, endMessageId: 5, sourceHash: 'old' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', after: '林雨' }],
+    });
+    const transition = memory({
+      id: 'assistant-transition',
+      type: 'state_change',
+      evidenceRole: 'assistant',
+      source: { startMessageId: 20, endMessageId: 20, sourceHash: 'new' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '灰帽男人' }],
+    });
+
+    expect(suppressStaleAtomicStates([old, transition]).map((item) => item.id))
+      .toEqual(['assistant-transition']);
+  });
+
+  it('does not treat recall pinning as a lock on an obsolete state value', () => {
+    const old = memory({
+      id: 'pinned-old',
+      pinned: true,
+      evidenceRole: 'user',
+      source: { startMessageId: 5, endMessageId: 5, sourceHash: 'old' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', after: '林雨' }],
+    });
+    const transition = memory({
+      id: 'current-transition',
+      evidenceRole: 'assistant',
+      source: { startMessageId: 20, endMessageId: 20, sourceHash: 'new' },
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', before: '林雨', after: '灰帽男人' }],
+    });
+
+    expect(suppressStaleAtomicStates([old, transition]).map((item) => item.id))
+      .toEqual(['current-transition']);
+  });
+
   it('can recall a Chinese entity match when vector search is unavailable', () => {
     const plan = buildRetrievalQueryPlan([{ is_user: true, mes: '我把钟楼钥匙交给了她' }], 0);
     const result = rankMemories(plan, [memory({})], { intent: [], scene: [] });

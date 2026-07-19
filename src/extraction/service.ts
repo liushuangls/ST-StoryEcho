@@ -537,19 +537,13 @@ export class ExtractionService {
           });
           throw error;
         }
-        const candidateLimit = Math.min(
-          12,
-          Math.max(6, countCompletedTurns(snapshot) * 3),
-        );
-        const atomicCandidates = normalizeCandidatesByType(parsedCandidates, candidateLimit);
-        const assessment = assessMemoryCandidates(
-          atomicCandidates,
-          promptSnapshot.map((message) => message.mes).join('\n'),
-          snapshot.flatMap((message, offset) => (
-            message.is_system ? [] : [chunk.startMessageId + offset]
-          )),
-        );
-        const candidates = assessment.accepted.map((candidate) => ({
+        // A dense three-turn batch can legitimately contain more than nine
+        // independent facts. Classify evidence before prioritization and use
+        // the consolidation schema's full safe capacity instead of dropping
+        // the tail solely because the user configured a smaller batch size.
+        const candidateLimit = 20;
+        const localAssessmentLimit = 60;
+        const classifiedCandidates = parsedCandidates.map((candidate) => ({
           ...candidate,
           evidenceRole: classifyEvidenceRole(
             candidate.sourceMessageIds,
@@ -557,11 +551,27 @@ export class ExtractionService {
             chunk.startMessageId,
           ),
         }));
+        const atomicCandidates = normalizeCandidatesByType(
+          classifiedCandidates,
+          localAssessmentLimit,
+        );
+        const assessment = assessMemoryCandidates(
+          atomicCandidates,
+          promptSnapshot.map((message) => message.mes).join('\n'),
+          snapshot.flatMap((message, offset) => (
+            message.is_system ? [] : [chunk.startMessageId + offset]
+          )),
+        );
+        // Apply the provider-facing limit only after rejecting unsupported or
+        // low-value candidates, otherwise a rejected high-priority item could
+        // consume a slot and silently drop a valid lower-ranked fact.
+        const candidates = normalizeCandidatesByType(assessment.accepted, candidateLimit);
         recordDebugTrace(state, settings.debug, 'extraction', '剧情候选抽取完成。', {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           candidates: candidates.length,
           parsedCandidates: parsedCandidates.length,
           atomicCandidates: atomicCandidates.length,
+          acceptedBeforeLimit: assessment.accepted.length,
           candidateLimit,
           rejectedCandidates: assessment.rejected.length,
           ...(assessment.rejected.length > 0

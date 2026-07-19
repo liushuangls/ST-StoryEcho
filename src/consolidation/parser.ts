@@ -139,6 +139,26 @@ function sharedEntityCount(
   return [...candidateEntities].filter((term) => memoryEntities.has(term)).length;
 }
 
+function coreEntityTerms(value: {
+  entities: string[];
+  aliases: string[];
+  scene: { participants: string[] };
+}): Set<string> {
+  const participants = new Set(value.scene.participants.map(normalizedFact));
+  return new Set([...value.entities, ...value.aliases]
+    .map(normalizedFact)
+    .filter((term) => term.length >= 2 && !participants.has(term)));
+}
+
+function sharedCoreEntityCount(
+  candidate: ExtractedMemoryCandidate,
+  memory: StoryMemory,
+): number {
+  const candidateCore = coreEntityTerms(candidate);
+  const memoryCore = coreEntityTerms(memory);
+  return [...candidateCore].filter((term) => memoryCore.has(term)).length;
+}
+
 function bigrams(value: string): Set<string> {
   const normalized = normalizedFact(value);
   if (normalized.length < 2) {
@@ -185,17 +205,32 @@ function relatedMemory(
     const memoryContent = memoryText(memory);
     const memoryReplaces = hasReplacementCue(memoryContent);
     const sharedEntities = sharedEntityCount(candidate, memory);
+    const sharedCoreEntities = sharedCoreEntityCount(candidate, memory);
     const similarity = textSimilarity(candidateContent, memoryContent);
+    const candidateLocation = normalizedFact(candidate.scene.location);
+    const memoryLocation = normalizedFact(memory.scene.location ?? '');
+    const conflictingLocations = (
+      candidateLocation.length >= 2 &&
+      memoryLocation.length >= 2 &&
+      candidateLocation !== memoryLocation &&
+      !candidateLocation.includes(memoryLocation) &&
+      !memoryLocation.includes(candidateLocation)
+    );
+    if (conflictingLocations && !candidateReplaces && !memoryReplaces) {
+      return [];
+    }
     const related =
-      (sharedEntities >= 1 && similarity >= 0.45) ||
-      (sharedEntities >= 3 && similarity >= 0.12) ||
-      (sharedEntities >= 2 && candidateReplaces && memoryReplaces);
+      (sharedEntities >= 1 && similarity >= 0.55) ||
+      (sharedCoreEntities >= 1 && similarity >= 0.38) ||
+      (sharedCoreEntities >= 2 && similarity >= 0.24) ||
+      (sharedCoreEntities >= 1 && candidateReplaces && similarity >= 0.12) ||
+      (sharedCoreEntities >= 1 && candidateReplaces && memoryReplaces);
     return related
       ? [{
           memory,
           candidateReplaces,
           memoryReplaces,
-          score: sharedEntities * 10 + similarity,
+          score: sharedCoreEntities * 20 + sharedEntities * 5 + similarity,
         }]
       : [];
   });
@@ -302,7 +337,12 @@ export function fallbackConsolidationDecisions(
       };
     }
 
-    const related = relatedMemory(candidate, memories);
+    // Structured state/relationship slots were already handled above. If no
+    // slot matches, sharing an object or protagonist is not evidence that the
+    // two changing facts are the same memory.
+    const related = candidate.stateChanges.length === 0
+      ? relatedMemory(candidate, memories)
+      : null;
     if (related) {
       const supersedes = related.candidateReplaces && !related.memoryReplaces;
       const operation = supersedes ? 'SUPERSEDE' : 'MERGE';
@@ -425,6 +465,10 @@ export function parseConsolidationResponse(
       decision.operation === 'IGNORE' ||
       decision.operation === 'RESOLVE' ||
       decision.operation === 'SUPERSEDE' ||
+      (
+        decision.operation === 'CREATE' &&
+        modelDecision.operation !== 'CREATE'
+      ) ||
       (decision.operation === 'MERGE' && modelDecision.operation === 'CREATE')
     ) {
       return decision;

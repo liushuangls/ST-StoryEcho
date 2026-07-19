@@ -33,6 +33,8 @@ describe('buildExtractionPrompt', () => {
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('稳定状态');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('统一使用稳定主体entity="用户"');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('AI对用户身份的猜测不是稳定事实');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('位置和持有/保管人永远是两个不同槽');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('name只是SillyTavern界面说话者标签');
   });
 
   it('places controlled reference context before the evidence messages', () => {

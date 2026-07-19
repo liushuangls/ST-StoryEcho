@@ -34,9 +34,10 @@ export interface StateIdentity {
   after: string;
 }
 
-const SUBJECT_SUFFIX = /(?:当前位置|当前地点|所在位置|所在地点|藏处|存放位置|存放地点|存放处|安置处|位置|地点|持有者|持有人|保管者|保管人|所有者|知情者|知情范围|完成状态|履行状态|承诺状态|任务状态)$/u;
+const SUBJECT_SUFFIX = /(?:当前位置|当前地点|所在位置|所在地点|藏处|存放位置|存放地点|存放处|安置处|位置|地点|持有者|持有人|保管者|保管人|保管状态|所有者|知情者|知情范围|完成状态|履行状态|承诺状态|任务状态)$/u;
 const COMMITMENT_CUE = /(承诺|约定|任务|义务|履行|兑现|按约|如约)/u;
 const COMPLETION_CUE = /(已(?:经)?完成|完成了|已履行|履行完|已兑现|兑现了|按约|如约|已送达|已经?交付|已经?归还|任务结束|承诺完成)/u;
+const STABLE_IDENTIFIER = /(?:^|[^a-z0-9])([a-z]{1,12})[\s._-]*(\d{1,12})(?=$|[^a-z0-9])/giu;
 
 export function normalizeIdentityText(value: string): string {
   return value
@@ -46,7 +47,19 @@ export function normalizeIdentityText(value: string): string {
     .replace(/[\s\p{P}\p{S}]+/gu, '');
 }
 
-export function canonicalSubject(value: string): string {
+export function canonicalSubject(value: string, allowStableIdentifier = true): string {
+  // A stable alphanumeric evidence code is a stronger identity than a
+  // descriptive prefix. This makes “R-1” and “真月桂铜印R-1” the same subject
+  // without collapsing ordinary same-prefix names such as 青石/青石台.
+  const identifiers = !allowStableIdentifier
+    ? []
+    : [...value.normalize('NFKC').matchAll(STABLE_IDENTIFIER)]
+    .map((match) => `${match[1] ?? ''}${match[2] ?? ''}`.toLocaleLowerCase())
+    .filter(Boolean);
+  const uniqueIdentifiers = [...new Set(identifiers)];
+  if (uniqueIdentifiers.length === 1) {
+    return uniqueIdentifiers[0]!;
+  }
   return normalizeIdentityText(value)
     .replace(SUBJECT_SUFFIX, '')
     .replace(/的$/u, '')
@@ -61,7 +74,7 @@ export function canonicalStateKind(
   if (/(知情|知晓|知道|秘密.*范围)/u.test(normalized)) {
     return 'knowledge';
   }
-  if (/(持有|保管者|保管人|所有者|归属|主人|携带者)/u.test(normalized)) {
+  if (/(持有|保管(?:者|人|状态|关系|归属)|所有者|归属|主人|携带者)/u.test(normalized)) {
     return 'holder';
   }
   if (/(位置|地点|所在|藏处|存放|安置|放置|藏匿|去向)/u.test(normalized)) {
@@ -87,14 +100,17 @@ export function canonicalStateSlot(
   attribute: string,
   type?: MemoryType,
 ): string {
-  return `${canonicalStateKind(attribute, type)}\u0000${canonicalSubject(entity)}`;
+  const kind = canonicalStateKind(attribute, type);
+  const allowStableIdentifier = kind !== 'relationship' && kind !== 'commitment';
+  return `${kind}\u0000${canonicalSubject(entity, allowStableIdentifier)}`;
 }
 
 export function stateIdentities(value: IdentityInput): StateIdentity[] {
   return value.stateChanges
     .map((change) => {
       const kind = canonicalStateKind(change.attribute, value.type);
-      const entity = canonicalSubject(change.entity);
+      const allowStableIdentifier = kind !== 'relationship' && kind !== 'commitment';
+      const entity = canonicalSubject(change.entity, allowStableIdentifier);
       return {
         key: `${kind}\u0000${entity}`,
         kind,
@@ -107,7 +123,7 @@ export function stateIdentities(value: IdentityInput): StateIdentity[] {
 
 function commitmentTerms(value: IdentityInput): Set<string> {
   return new Set([...value.entities, ...value.aliases]
-    .map(canonicalSubject)
+    .map((term) => canonicalSubject(term))
     .filter((term) => term.length >= 2));
 }
 

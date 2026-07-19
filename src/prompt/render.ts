@@ -158,7 +158,7 @@ export function estimateMemoryTokens(memory: StoryMemory): number {
   return estimateTokens(renderMemoryEntry(memory));
 }
 
-const MULTI_ENTITY_QUERY_CUE = /(?:分别|各自|逐一|每个|核对|列出|几条|[二两三四五六七八九十]\s*条)/u;
+const MULTI_ENTITY_QUERY_CUE = /(?:分别|各自|逐一|每个|核对|列出|分成|几(?:条|项|点|组|类)|[二两三四五六七八九十]\s*(?:条|项|点|组|类)|(?:^|[\s：:；;，,])\d{1,2}[.、)）])/u;
 
 function normalizedSearchText(value: string): string {
   return value.normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
@@ -213,12 +213,13 @@ export function selectWithinBudget(
   maxEvents: number,
   maxTokens: number,
   queryText = '',
+  coveragePool: StoryMemory[] = memories,
 ): StoryMemory[] {
   const selected: StoryMemory[] = [];
   let usedTokens = 0;
-  const effectiveMaxEvents = effectiveRecallLimit(maxEvents, queryText, memories);
+  const effectiveMaxEvents = effectiveRecallLimit(maxEvents, queryText, coveragePool);
   const coverageEntities = MULTI_ENTITY_QUERY_CUE.test(queryText)
-    ? explicitRecallEntities(queryText, memories)
+    ? explicitRecallEntities(queryText, coveragePool)
     : [];
 
   const trySelect = (memory: StoryMemory): boolean => {
@@ -247,8 +248,23 @@ export function selectWithinBudget(
     if (alreadyCovered) {
       continue;
     }
-    const match = memories.find((memory) => recallEntityTerms(memory)
-      .some((term) => normalizedSearchText(term) === normalizedEntity));
+    const rankedIds = new Map(memories.map((memory, index) => [memory.id, index]));
+    const match = coveragePool
+      .filter((memory) => recallEntityTerms(memory)
+        .some((term) => normalizedSearchText(term) === normalizedEntity))
+      .sort((left, right) => {
+        const leftRank = rankedIds.get(left.id);
+        const rightRank = rankedIds.get(right.id);
+        if (leftRank !== undefined || rightRank !== undefined) {
+          return (leftRank ?? Number.MAX_SAFE_INTEGER) - (rightRank ?? Number.MAX_SAFE_INTEGER);
+        }
+        return (
+          evidenceRoleRank(right.evidenceRole) - evidenceRoleRank(left.evidenceRole) ||
+          Number(right.type === 'state_change') - Number(left.type === 'state_change') ||
+          right.source.endMessageId - left.source.endMessageId ||
+          right.importance - left.importance
+        );
+      })[0];
     if (match) {
       trySelect(match);
     }
@@ -305,13 +321,34 @@ export function renderStageSummaryBlock(
 interface CurrentStateLine {
   slot: string;
   memory: StoryMemory;
+  before: string;
+  after: string;
   text: string;
 }
 
 function isEvolvedMemory(memory: StoryMemory): boolean {
-  return memory.sourceHistory.length > 1 ||
+  return memory.stateChanges.some((change) => (
+    Boolean(clean(change.before)) &&
+    normalizedSearchText(change.before ?? '') !== normalizedSearchText(change.after)
+  )) ||
+    memory.sourceHistory.length > 1 ||
     memory.supersedesMemoryIds.length > 0 ||
     ['UPDATE', 'RESOLVE', 'SUPERSEDE'].includes(memory.lastOperation);
+}
+
+function currentStateTransitionAdvances(
+  newer: CurrentStateLine,
+  older: CurrentStateLine,
+): boolean {
+  const before = normalizedSearchText(newer.before);
+  const previous = normalizedSearchText(older.after);
+  return (
+    newer.memory.truthStatus === 'confirmed' &&
+    newer.memory.source.endMessageId > older.memory.source.endMessageId &&
+    before.length >= 2 &&
+    previous.length >= 2 &&
+    (before === previous || before.includes(previous) || previous.includes(before))
+  );
 }
 
 /**
@@ -337,6 +374,8 @@ export function renderCurrentStateCoordinationBlock(
       return {
         slot: canonicalStateSlot(change.entity, change.attribute, memory.type),
         memory,
+        before: clean(change.before),
+        after: clean(change.after),
         text: `- ${clean(change.entity)} · ${clean(change.attribute)}：${clean(change.after)}${knownBy}${truth}`,
       };
     }));
@@ -344,6 +383,19 @@ export function renderCurrentStateCoordinationBlock(
   const bySlot = new Map<string, CurrentStateLine>();
   for (const candidate of candidates) {
     const existing = bySlot.get(candidate.slot);
+    if (existing && existing.memory.manuallyEdited !== candidate.memory.manuallyEdited) {
+      if (candidate.memory.manuallyEdited) {
+        bySlot.set(candidate.slot, candidate);
+      }
+      continue;
+    }
+    if (existing && currentStateTransitionAdvances(candidate, existing)) {
+      bySlot.set(candidate.slot, candidate);
+      continue;
+    }
+    if (existing && currentStateTransitionAdvances(existing, candidate)) {
+      continue;
+    }
     const authorityDifference = existing
       ? evidenceRoleRank(candidate.memory.evidenceRole) - evidenceRoleRank(existing.memory.evidenceRole)
       : 1;

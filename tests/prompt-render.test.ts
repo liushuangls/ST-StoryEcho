@@ -80,6 +80,24 @@ describe('renderMemoryBlock', () => {
     expect(block).toContain('覆盖较早阶段总结里的旧状态');
   });
 
+  it('treats an explicit before-to-after correction as evolved even when it was created directly', () => {
+    const correction = memory({
+      id: 'wine-correction',
+      lastOperation: 'CREATE',
+      sourceHistory: [{ startMessageId: 50, endMessageId: 51, sourceHash: 'correction' }],
+      stateChanges: [{
+        entity: '贝克街会客室饮品',
+        attribute: '供应状态',
+        before: '推测有酒',
+        after: '只有淡茶，没有酒',
+      }],
+    });
+
+    const block = renderCurrentStateCoordinationBlock([correction]);
+
+    expect(block).toContain('贝克街会客室饮品 · 供应状态：只有淡茶，没有酒');
+  });
+
   it('chooses explicit User evidence when duplicate active state slots survive migration', () => {
     const sources = [
       { startMessageId: 1, endMessageId: 2, sourceHash: 'old' },
@@ -105,6 +123,31 @@ describe('renderMemoryBlock', () => {
     expect(block).not.toContain('海棠旅社');
   });
 
+  it('lets a later confirmed Assistant transition advance an older User state in the correction block', () => {
+    const old = memory({
+      id: 'old-holder',
+      evidenceRole: 'user',
+      source: { startMessageId: 1, endMessageId: 1, sourceHash: 'old' },
+      sourceHistory: [
+        { startMessageId: 0, endMessageId: 0, sourceHash: 'older' },
+        { startMessageId: 1, endMessageId: 1, sourceHash: 'old' },
+      ],
+      stateChanges: [{ entity: '银色钥匙', attribute: '持有者', after: '林雨' }],
+    });
+    const transition = memory({
+      id: 'new-holder',
+      evidenceRole: 'assistant',
+      source: { startMessageId: 20, endMessageId: 20, sourceHash: 'new' },
+      sourceHistory: [{ startMessageId: 20, endMessageId: 20, sourceHash: 'new' }],
+      stateChanges: [{ entity: '银色钥匙', attribute: '保管人', before: '林雨', after: '灰帽男人' }],
+    });
+
+    const block = renderCurrentStateCoordinationBlock([old, transition]);
+
+    expect(block).toContain('灰帽男人');
+    expect(block).not.toContain('持有者：林雨');
+  });
+
   it('bounds token diagnostics for a large uniform removed prefix', () => {
     const messages = Array.from({ length: 1_000 }, () => ({ mes: '剧情'.repeat(100) }));
     const indices = messages.map((_, index) => index);
@@ -126,5 +169,23 @@ describe('renderMemoryBlock', () => {
     expect(effectiveRecallLimit(3, query, memories)).toBe(5);
     expect(selectWithinBudget(memories, 3, 10_000, query).map((item) => item.id).sort())
       .toEqual(['jade-old', 'key', 'liu', 'qingshi', 'snake'].sort());
+  });
+
+  it('expands a numbered multi-item request and rescues exact entities outside the rank cutoff', () => {
+    const all = [
+      memory({ id: 'r1', entities: ['真月桂铜印R-1'], aliases: ['R-1'], vectorHash: 1 }),
+      memory({ id: 'g17', entities: ['G17证物袋'], aliases: ['G17'], vectorHash: 2 }),
+      memory({ id: 'l23', entities: ['L23保险柜'], aliases: ['L23'], vectorHash: 3 }),
+      memory({ id: 's9', entities: ['S9封条'], aliases: ['S9'], vectorHash: 4 }),
+      memory({ id: 'c4', entities: ['C4保险柜'], aliases: ['C4'], vectorHash: 5 }),
+      memory({ id: 'do23', entities: ['DO23档案'], aliases: ['DO23'], vectorHash: 6 }),
+      memory({ id: 'moss', entities: ['哈丽雅特·莫斯'], aliases: ['Harriet Moss'], vectorHash: 7 }),
+    ];
+    const ranked = all.slice(0, 3);
+    const query = '把结论分成七项：1. R-1；2. G17；3. L23；4. S9；5. C4；6. DO23；7. Harriet Moss。';
+
+    expect(effectiveRecallLimit(5, query, all)).toBe(7);
+    expect(selectWithinBudget(ranked, 5, 10_000, query, all).map((item) => item.id).sort())
+      .toEqual(all.map((item) => item.id).sort());
   });
 });

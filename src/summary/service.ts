@@ -8,7 +8,11 @@ import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
 import { SettingsRepository } from '../settings/repository';
-import { buildStageSummaryPrompt, STAGE_SUMMARY_SYSTEM_PROMPT } from './prompts';
+import {
+  buildStageSummaryGrounding,
+  buildStageSummaryPrompt,
+  STAGE_SUMMARY_SYSTEM_PROMPT,
+} from './prompts';
 
 const MAX_SUMMARY_SOURCE_CHARACTERS = 32_000;
 const MAX_STORED_SUMMARY_CHARACTERS = 64_000;
@@ -189,12 +193,18 @@ export class StageSummaryService {
         const startedAt = performance.now();
         const snapshotHash = await sha256(sourcePayload(snapshot, chunk.startMessageId));
         const identity = summaryIdentity(context);
+        const authoritativeFacts = buildStageSummaryGrounding(
+          state.memories,
+          chunk.startMessageId,
+          chunk.endMessageId,
+        );
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
           prompt: buildStageSummaryPrompt(
             snapshot,
             chunk.startMessageId,
             identity,
+            authoritativeFacts,
           ),
           maxTokens: settings.summary.maxTokens,
         });
@@ -236,6 +246,7 @@ export class StageSummaryService {
           summaryCharacters: text.length,
           summaryEntries: state.stageSummary.entries.length,
           personaLabelSanitized: text !== normalizeSummary(raw, snapshot),
+          authoritativeFactCharacters: authoritativeFacts.length,
         });
         await this.memoryRepository.save(state);
         updatedChunks += 1;

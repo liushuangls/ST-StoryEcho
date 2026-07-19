@@ -393,13 +393,19 @@ function resetDiagnostics(state) {
 }
 
 // src/consolidation/identity.ts
-var SUBJECT_SUFFIX = /(?:当前位置|当前地点|所在位置|所在地点|藏处|存放位置|存放地点|存放处|安置处|位置|地点|持有者|持有人|保管者|保管人|所有者|知情者|知情范围|完成状态|履行状态|承诺状态|任务状态)$/u;
+var SUBJECT_SUFFIX = /(?:当前位置|当前地点|所在位置|所在地点|藏处|存放位置|存放地点|存放处|安置处|位置|地点|持有者|持有人|保管者|保管人|保管状态|所有者|知情者|知情范围|完成状态|履行状态|承诺状态|任务状态)$/u;
 var COMMITMENT_CUE = /(承诺|约定|任务|义务|履行|兑现|按约|如约)/u;
 var COMPLETION_CUE = /(已(?:经)?完成|完成了|已履行|履行完|已兑现|兑现了|按约|如约|已送达|已经?交付|已经?归还|任务结束|承诺完成)/u;
+var STABLE_IDENTIFIER = /(?:^|[^a-z0-9])([a-z]{1,12})[\s._-]*(\d{1,12})(?=$|[^a-z0-9])/giu;
 function normalizeIdentityText(value) {
   return value.normalize("NFKC").trim().toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
 }
-function canonicalSubject(value) {
+function canonicalSubject(value, allowStableIdentifier = true) {
+  const identifiers = !allowStableIdentifier ? [] : [...value.normalize("NFKC").matchAll(STABLE_IDENTIFIER)].map((match) => `${match[1] ?? ""}${match[2] ?? ""}`.toLocaleLowerCase()).filter(Boolean);
+  const uniqueIdentifiers = [...new Set(identifiers)];
+  if (uniqueIdentifiers.length === 1) {
+    return uniqueIdentifiers[0];
+  }
   return normalizeIdentityText(value).replace(SUBJECT_SUFFIX, "").replace(/的$/u, "").replace(/^关于/u, "");
 }
 function canonicalStateKind(attribute, type) {
@@ -407,7 +413,7 @@ function canonicalStateKind(attribute, type) {
   if (/(知情|知晓|知道|秘密.*范围)/u.test(normalized5)) {
     return "knowledge";
   }
-  if (/(持有|保管者|保管人|所有者|归属|主人|携带者)/u.test(normalized5)) {
+  if (/(持有|保管(?:者|人|状态|关系|归属)|所有者|归属|主人|携带者)/u.test(normalized5)) {
     return "holder";
   }
   if (/(位置|地点|所在|藏处|存放|安置|放置|藏匿|去向)/u.test(normalized5)) {
@@ -425,12 +431,15 @@ function canonicalStateKind(attribute, type) {
   return `custom:${normalized5}`;
 }
 function canonicalStateSlot(entity, attribute, type) {
-  return `${canonicalStateKind(attribute, type)}\0${canonicalSubject(entity)}`;
+  const kind = canonicalStateKind(attribute, type);
+  const allowStableIdentifier = kind !== "relationship" && kind !== "commitment";
+  return `${kind}\0${canonicalSubject(entity, allowStableIdentifier)}`;
 }
 function stateIdentities(value) {
   return value.stateChanges.map((change) => {
     const kind = canonicalStateKind(change.attribute, value.type);
-    const entity = canonicalSubject(change.entity);
+    const allowStableIdentifier = kind !== "relationship" && kind !== "commitment";
+    const entity = canonicalSubject(change.entity, allowStableIdentifier);
     return {
       key: `${kind}\0${entity}`,
       kind,
@@ -440,7 +449,7 @@ function stateIdentities(value) {
   }).filter((identity) => identity.entity.length >= 2);
 }
 function commitmentTerms(value) {
-  return new Set([...value.entities, ...value.aliases].map(canonicalSubject).filter((term) => term.length >= 2));
+  return new Set([...value.entities, ...value.aliases].map((term) => canonicalSubject(term)).filter((term) => term.length >= 2));
 }
 function isCommitmentLike(value) {
   return value.type === "commitment" || typeof value.logicalKey === "string" && value.logicalKey.startsWith("commitment:") || stateIdentities(value).some((identity) => identity.kind === "commitment") || COMMITMENT_CUE.test(`${value.event}
@@ -1868,6 +1877,15 @@ function sharedEntityCount(candidate, memory) {
   const memoryEntities = entityTerms(memory);
   return [...candidateEntities].filter((term) => memoryEntities.has(term)).length;
 }
+function coreEntityTerms(value) {
+  const participants = new Set(value.scene.participants.map(normalizedFact));
+  return new Set([...value.entities, ...value.aliases].map(normalizedFact).filter((term) => term.length >= 2 && !participants.has(term)));
+}
+function sharedCoreEntityCount(candidate, memory) {
+  const candidateCore = coreEntityTerms(candidate);
+  const memoryCore = coreEntityTerms(memory);
+  return [...candidateCore].filter((term) => memoryCore.has(term)).length;
+}
 function bigrams(value) {
   const normalized5 = normalizedFact(value);
   if (normalized5.length < 2) {
@@ -1909,13 +1927,20 @@ function relatedMemory(candidate, memories) {
     const memoryContent = memoryText(memory);
     const memoryReplaces = hasReplacementCue(memoryContent);
     const sharedEntities = sharedEntityCount(candidate, memory);
+    const sharedCoreEntities = sharedCoreEntityCount(candidate, memory);
     const similarity = textSimilarity(candidateContent, memoryContent);
-    const related = sharedEntities >= 1 && similarity >= 0.45 || sharedEntities >= 3 && similarity >= 0.12 || sharedEntities >= 2 && candidateReplaces && memoryReplaces;
+    const candidateLocation = normalizedFact(candidate.scene.location);
+    const memoryLocation = normalizedFact(memory.scene.location ?? "");
+    const conflictingLocations = candidateLocation.length >= 2 && memoryLocation.length >= 2 && candidateLocation !== memoryLocation && !candidateLocation.includes(memoryLocation) && !memoryLocation.includes(candidateLocation);
+    if (conflictingLocations && !candidateReplaces && !memoryReplaces) {
+      return [];
+    }
+    const related = sharedEntities >= 1 && similarity >= 0.55 || sharedCoreEntities >= 1 && similarity >= 0.38 || sharedCoreEntities >= 2 && similarity >= 0.24 || sharedCoreEntities >= 1 && candidateReplaces && similarity >= 0.12 || sharedCoreEntities >= 1 && candidateReplaces && memoryReplaces;
     return related ? [{
       memory,
       candidateReplaces,
       memoryReplaces,
-      score: sharedEntities * 10 + similarity
+      score: sharedCoreEntities * 20 + sharedEntities * 5 + similarity
     }] : [];
   });
   const best = matches.sort((left, right) => right.score - left.score)[0];
@@ -2003,7 +2028,7 @@ function fallbackConsolidationDecisions(candidates, memories) {
         result: sameValue ? mergeWithMemory(sameSlot.memory, candidate) : candidate
       };
     }
-    const related = relatedMemory(candidate, memories);
+    const related = candidate.stateChanges.length === 0 ? relatedMemory(candidate, memories) : null;
     if (related) {
       const supersedes = related.candidateReplaces && !related.memoryReplaces;
       const operation = supersedes ? "SUPERSEDE" : "MERGE";
@@ -2085,7 +2110,7 @@ function parseConsolidationResponse(raw, candidates, memories) {
     if (!modelDecision) {
       return decision;
     }
-    if (decision.operation === "IGNORE" || decision.operation === "RESOLVE" || decision.operation === "SUPERSEDE" || decision.operation === "MERGE" && modelDecision.operation === "CREATE") {
+    if (decision.operation === "IGNORE" || decision.operation === "RESOLVE" || decision.operation === "SUPERSEDE" || decision.operation === "CREATE" && modelDecision.operation !== "CREATE" || decision.operation === "MERGE" && modelDecision.operation === "CREATE") {
       return decision;
     }
     return modelDecision;
@@ -2186,7 +2211,7 @@ async function decideConsolidation(settings, candidates, memories) {
     const stableIdentity = stateIdentities(candidate).length > 0 || isCommitmentLike(candidate);
     return exact || stableIdentity ? [candidateIndex] : [];
   }));
-  const ambiguous = candidates.flatMap((candidate, candidateIndex) => deterministicIndices.has(candidateIndex) ? [] : [{ candidate, candidateIndex }]);
+  const ambiguous = candidates.flatMap((candidate, candidateIndex) => deterministicIndices.has(candidateIndex) || fallback[candidateIndex]?.operation !== "MERGE" ? [] : [{ candidate, candidateIndex }]);
   if (ambiguous.length === 0) {
     return { decisions: fallback, usedLlm: false, durationMs: 0 };
   }
@@ -2224,7 +2249,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 6;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.13.1";
+var EXTENSION_VERSION = "0.14.0";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -2757,7 +2782,7 @@ function renderMemoryEntry(memory) {
 function estimateMemoryTokens(memory) {
   return estimateTokens(renderMemoryEntry(memory));
 }
-var MULTI_ENTITY_QUERY_CUE = /(?:分别|各自|逐一|每个|核对|列出|几条|[二两三四五六七八九十]\s*条)/u;
+var MULTI_ENTITY_QUERY_CUE = /(?:分别|各自|逐一|每个|核对|列出|分成|几(?:条|项|点|组|类)|[二两三四五六七八九十]\s*(?:条|项|点|组|类)|(?:^|[\s：:；;，,])\d{1,2}[.、)）])/u;
 function normalizedSearchText(value) {
   return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
 }
@@ -2787,11 +2812,11 @@ function effectiveRecallLimit(configuredMaxEvents, queryText, memories) {
   }
   return Math.max(configured, Math.min(8, entities.length));
 }
-function selectWithinBudget(memories, maxEvents, maxTokens, queryText = "") {
+function selectWithinBudget(memories, maxEvents, maxTokens, queryText = "", coveragePool = memories) {
   const selected = [];
   let usedTokens = 0;
-  const effectiveMaxEvents = effectiveRecallLimit(maxEvents, queryText, memories);
-  const coverageEntities = MULTI_ENTITY_QUERY_CUE.test(queryText) ? explicitRecallEntities(queryText, memories) : [];
+  const effectiveMaxEvents = effectiveRecallLimit(maxEvents, queryText, coveragePool);
+  const coverageEntities = MULTI_ENTITY_QUERY_CUE.test(queryText) ? explicitRecallEntities(queryText, coveragePool) : [];
   const trySelect = (memory) => {
     if (selected.length >= effectiveMaxEvents || selected.some((item) => item.id === memory.id)) {
       return false;
@@ -2810,7 +2835,15 @@ function selectWithinBudget(memories, maxEvents, maxTokens, queryText = "") {
     if (alreadyCovered) {
       continue;
     }
-    const match = memories.find((memory) => recallEntityTerms(memory).some((term) => normalizedSearchText(term) === normalizedEntity));
+    const rankedIds = new Map(memories.map((memory, index) => [memory.id, index]));
+    const match = coveragePool.filter((memory) => recallEntityTerms(memory).some((term) => normalizedSearchText(term) === normalizedEntity)).sort((left, right) => {
+      const leftRank = rankedIds.get(left.id);
+      const rightRank = rankedIds.get(right.id);
+      if (leftRank !== void 0 || rightRank !== void 0) {
+        return (leftRank ?? Number.MAX_SAFE_INTEGER) - (rightRank ?? Number.MAX_SAFE_INTEGER);
+      }
+      return evidenceRoleRank(right.evidenceRole) - evidenceRoleRank(left.evidenceRole) || Number(right.type === "state_change") - Number(left.type === "state_change") || right.source.endMessageId - left.source.endMessageId || right.importance - left.importance;
+    })[0];
     if (match) {
       trySelect(match);
     }
@@ -2851,7 +2884,12 @@ function renderStageSummaryBlock(summary, sourceStartMessageId, sourceEndMessage
   ].filter(Boolean).join("\n");
 }
 function isEvolvedMemory(memory) {
-  return memory.sourceHistory.length > 1 || memory.supersedesMemoryIds.length > 0 || ["UPDATE", "RESOLVE", "SUPERSEDE"].includes(memory.lastOperation);
+  return memory.stateChanges.some((change) => Boolean(clean(change.before)) && normalizedSearchText(change.before ?? "") !== normalizedSearchText(change.after)) || memory.sourceHistory.length > 1 || memory.supersedesMemoryIds.length > 0 || ["UPDATE", "RESOLVE", "SUPERSEDE"].includes(memory.lastOperation);
+}
+function currentStateTransitionAdvances(newer, older) {
+  const before = normalizedSearchText(newer.before);
+  const previous = normalizedSearchText(older.after);
+  return newer.memory.truthStatus === "confirmed" && newer.memory.source.endMessageId > older.memory.source.endMessageId && before.length >= 2 && previous.length >= 2 && (before === previous || before.includes(previous) || previous.includes(before));
 }
 function renderCurrentStateCoordinationBlock(memories, maxTokens = 600) {
   const candidates = memories.filter((memory) => !memory.excluded && (memory.status === "active" || memory.status === "resolved") && isEvolvedMemory(memory)).flatMap((memory) => memory.stateChanges.map((change) => {
@@ -2860,12 +2898,27 @@ function renderCurrentStateCoordinationBlock(memories, maxTokens = 600) {
     return {
       slot: canonicalStateSlot(change.entity, change.attribute, memory.type),
       memory,
+      before: clean(change.before),
+      after: clean(change.after),
       text: `- ${clean(change.entity)} \xB7 ${clean(change.attribute)}\uFF1A${clean(change.after)}${knownBy}${truth}`
     };
   }));
   const bySlot = /* @__PURE__ */ new Map();
   for (const candidate of candidates) {
     const existing = bySlot.get(candidate.slot);
+    if (existing && existing.memory.manuallyEdited !== candidate.memory.manuallyEdited) {
+      if (candidate.memory.manuallyEdited) {
+        bySlot.set(candidate.slot, candidate);
+      }
+      continue;
+    }
+    if (existing && currentStateTransitionAdvances(candidate, existing)) {
+      bySlot.set(candidate.slot, candidate);
+      continue;
+    }
+    if (existing && currentStateTransitionAdvances(existing, candidate)) {
+      continue;
+    }
     const authorityDifference = existing ? evidenceRoleRank(candidate.memory.evidenceRole) - evidenceRoleRank(existing.memory.evidenceRole) : 1;
     if (!existing || authorityDifference > 0 || authorityDifference === 0 && (candidate.memory.source.endMessageId > existing.memory.source.endMessageId || candidate.memory.source.endMessageId === existing.memory.source.endMessageId && candidate.memory.importance > existing.memory.importance)) {
       bySlot.set(candidate.slot, candidate);
@@ -4232,6 +4285,54 @@ function safeContext(value, groupTerms, otherTerms) {
     return matched.some((term) => group.has(term)) && !matched.some((term) => other.has(term));
   }).join("\uFF1B");
 }
+function parseCustodyParts(value) {
+  const normalizedValue = value.trim();
+  let location = normalizedValue.match(
+    /(?:存放|放置|安置|位于|藏于|藏在|转入|移入)(?:在|于)?\s*([^，,；;]+?)(?=\s*(?:[，,；;]|并?由|$))/u
+  )?.[1]?.trim() ?? "";
+  let holder = normalizedValue.match(
+    /(?:^|[，,；;]|并)\s*(?:交?由)\s*([^，,；;]+?)(?:负责)?(?:保管|持有|看管)(?:[。.]|$)/u
+  )?.[1]?.trim() ?? normalizedValue.match(
+    /(?:保管人|保管者|持有人|持有者)\s*[:：为是]\s*([^，,；;（）()]+)/u
+  )?.[1]?.trim() ?? normalizedValue.match(
+    /[（(]\s*([^（）()]+?)(?:负责)?(?:保管|持有|看管)\s*[）)]/u
+  )?.[1]?.trim() ?? "";
+  if (!location && holder) {
+    const markerIndex = normalizedValue.search(
+      /[（(]|(?:[，,；;]\s*)?(?:交?由|保管人|保管者|持有人|持有者)/u
+    );
+    location = (markerIndex >= 0 ? normalizedValue.slice(0, markerIndex) : normalizedValue).replace(/^(?:当前|现在|现已|现|仍)?(?:存放|放置|安置|位于|藏于|藏在|转入|移入)?(?:在|于)?\s*/u, "").trim();
+  }
+  location = location.replace(/[（(]+$/u, "").trim();
+  holder = holder.replace(/[）)]+$/u, "").trim();
+  return { location, holder };
+}
+function expandedStateChanges(candidate) {
+  return candidate.stateChanges.flatMap((change) => {
+    if (!/(?:位置|地点|存放|保管|持有)/u.test(change.attribute)) {
+      return [change];
+    }
+    const after = parseCustodyParts(change.after);
+    if (!after.location || !after.holder) {
+      return [change];
+    }
+    const before = parseCustodyParts(change.before ?? "");
+    return [
+      {
+        entity: change.entity,
+        attribute: "\u4F4D\u7F6E",
+        before: before.location,
+        after: after.location
+      },
+      {
+        entity: change.entity,
+        attribute: "\u6301\u6709\u8005",
+        before: before.holder,
+        after: after.holder
+      }
+    ];
+  });
+}
 function typeForStateChange(candidate, attribute) {
   const kind = canonicalStateKind(attribute, candidate.type);
   if (kind === "commitment") {
@@ -4246,13 +4347,18 @@ function atomicizeStateChanges(candidate) {
   if (candidate.stateChanges.length === 0) {
     return null;
   }
-  const uniqueChanges = candidate.stateChanges.filter((change, index, changes) => {
+  const expandedChanges = expandedStateChanges(candidate);
+  const uniqueChanges = expandedChanges.filter((change, index, changes) => {
     const key = `${normalized4(change.entity)}\0${normalized4(change.attribute)}`;
     return !changes.slice(index + 1).some((other) => `${normalized4(other.entity)}\0${normalized4(other.attribute)}` === key);
   });
   return uniqueChanges.map((change) => {
     const stateText = change.before ? `${change.entity}\u7684${change.attribute}\u7531${change.before}\u53D8\u4E3A${change.after}` : `${change.entity}\u7684${change.attribute}\u5F53\u524D\u4E3A${change.after}`;
-    const canonicalEntity = canonicalSubject(change.entity);
+    const kind = canonicalStateKind(change.attribute, candidate.type);
+    const canonicalEntity = canonicalSubject(
+      change.entity,
+      kind !== "relationship" && kind !== "commitment"
+    );
     const contextualEntities = distinctMentionedTerms(
       `${change.before ?? ""}
 ${change.after}`,
@@ -4286,7 +4392,6 @@ ${retrievalText}`;
       [...candidate.scene.participants, ...groupTerms, ...otherTerms]
     ).map(normalized4));
     const participants = candidate.scene.participants.filter((participant) => grouped.has(normalized4(participant)) || matchedParticipants.has(normalized4(participant)));
-    const kind = canonicalStateKind(change.attribute, candidate.type);
     return {
       ...candidate,
       type: typeForStateChange(candidate, change.attribute),
@@ -4379,7 +4484,42 @@ function atomicizeMemoryCandidate(candidate) {
 }
 var normalizeMemoryCandidateByType = atomicizeMemoryCandidate;
 function normalizeCandidatesByType(candidates, maximumCandidates = 30) {
-  return candidates.flatMap(normalizeMemoryCandidateByType).slice(0, Math.max(0, maximumCandidates));
+  const typePriority = {
+    state_change: 7,
+    commitment: 6,
+    revelation: 5,
+    relationship_change: 4,
+    clue: 3,
+    conflict: 2,
+    event: 1
+  };
+  const sorted = candidates.flatMap(normalizeMemoryCandidateByType).map((candidate, index) => ({ candidate, index })).sort((left, right) => {
+    const priority = (candidate) => {
+      const explicitTransition = candidate.truthStatus === "confirmed" && candidate.stateChanges.some((change) => Boolean(change.before?.trim()) && normalized4(change.before ?? "") !== normalized4(change.after));
+      const truthPriority = candidate.truthStatus === "confirmed" ? 3 : candidate.truthStatus === "claimed" ? 2 : candidate.truthStatus === "inferred" ? 1 : 0;
+      return (explicitTransition ? 1e4 : 0) + typePriority[candidate.type] * 1e3 + truthPriority * 200 + candidate.importance * 100 + evidenceRoleRank(candidate.evidenceRole) * 10;
+    };
+    return priority(right.candidate) - priority(left.candidate) || left.index - right.index;
+  });
+  const limit = Math.max(0, Math.floor(maximumCandidates));
+  if (sorted.length <= limit) {
+    return sorted.map(({ candidate }) => candidate);
+  }
+  const selected = /* @__PURE__ */ new Set();
+  const selectedTypes = /* @__PURE__ */ new Set();
+  for (const item of sorted) {
+    if (!selectedTypes.has(item.candidate.type) && selected.size < limit) {
+      selected.add(item.index);
+      selectedTypes.add(item.candidate.type);
+    }
+  }
+  for (const item of sorted) {
+    if (selected.size >= limit) {
+      break;
+    }
+    selected.add(item.index);
+  }
+  return sorted.filter((item) => selected.has(item.index)).map(({ candidate }) => candidate);
 }
 
 // src/extraction/parser.ts
@@ -4826,12 +4966,13 @@ var EXTRACTION_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u4E2A\u4E25\u683C\u7684\u957F
 12. \u6240\u6709\u4E8B\u5B9E\u5B57\u6BB5\u4F7F\u7528\u7B2C\u4E09\u4EBA\u79F0\u548C\u8F93\u5165\u4E2D\u7684\u786E\u5207\u4E13\u540D\uFF0C\u4E0D\u5F97\u7528\u201C\u6211\u3001\u6211\u4EEC\u3001\u4F60\u3001\u4ED6\u201D\u7B49\u8131\u79BB\u539F\u7247\u6BB5\u540E\u6307\u4EE3\u4E0D\u6E05\u7684\u4EE3\u8BCD\u3002
 13. \u660E\u786E\u53C2\u4E0E\u4E8B\u4EF6\u3001\u5171\u540C\u6267\u884C\u52A8\u4F5C\u6216\u76F4\u63A5\u786E\u8BA4\u4E8B\u5B9E\u7684\u4EBA\u4E5F\u5C5E\u4E8EknownBy\uFF1B\u4F46\u539F\u6587\u82E5\u660E\u786E\u7ED9\u51FA\u201C\u53EA\u6709/\u6070\u597D\u201D\u67D0\u4E9B\u77E5\u60C5\u8005\u6216\u201C\u6CA1\u6709\u7B2C\u4E09\u4EBA\u201D\uFF0C\u8BE5\u5C01\u95ED\u540D\u5355\u4F18\u5148\uFF0C\u4E0D\u5F97\u4EC5\u56E0\u6D88\u606F\u53D1\u9001\u8005\u8BB2\u8FF0\u4E86\u4E8B\u5B9E\u5C31\u628A\u53D1\u9001\u8005\u81EA\u52A8\u52A0\u5165knownBy\u3002
 14. unresolvedThreads\u53EA\u8BB0\u5F55\u539F\u7247\u6BB5\u660E\u786E\u63D0\u51FA\u7684\u7591\u95EE\u3001\u672A\u89E3\u72B6\u6001\u3001\u5F85\u529E\u76EE\u6807\u6216\u4F0F\u7B14\uFF1B\u4E0D\u5F97\u628A\u539F\u6587\u6CA1\u6709\u4EA4\u4EE3\u7684\u4FE1\u606F\u81EA\u884C\u6539\u5199\u6210\u201C\u53BB\u5411\u4E0D\u660E\u201D\u201C\u5185\u5BB9\u672A\u77E5\u201D\u7B49\u60AC\u5FF5\u3002
-15. \u7269\u54C1\u4F4D\u7F6E\u3001\u6301\u6709\u8005\u3001\u79D8\u5BC6\u77E5\u60C5\u8303\u56F4\u3001\u4E8B\u5B9E\u771F\u4F2A\u7B49\u53EF\u53D8\u5316\u4E8B\u5B9E\u653E\u5165stateFacts\uFF0C\u7528\u660E\u786E\u4E13\u540D\u586B\u5199entity\u3001attribute\u3001before\u548Cafter\uFF1B\u6BCF\u4E2A\u72EC\u7ACBentity+attribute\u5FC5\u987B\u5355\u72EC\u4E00\u9879\u3002
+15. \u7269\u54C1\u4F4D\u7F6E\u3001\u6301\u6709\u8005\u3001\u79D8\u5BC6\u77E5\u60C5\u8303\u56F4\u3001\u4E8B\u5B9E\u771F\u4F2A\u7B49\u53EF\u53D8\u5316\u4E8B\u5B9E\u653E\u5165stateFacts\uFF0C\u7528\u660E\u786E\u4E13\u540D\u586B\u5199entity\u3001attribute\u3001before\u548Cafter\uFF1B\u6BCF\u4E2A\u72EC\u7ACBentity+attribute\u5FC5\u987B\u5355\u72EC\u4E00\u9879\u3002\u4F4D\u7F6E\u548C\u6301\u6709/\u4FDD\u7BA1\u4EBA\u6C38\u8FDC\u662F\u4E24\u4E2A\u4E0D\u540C\u69FD\uFF1A\u4F8B\u5982\u201CR-1\u5B58\u653E\u4E8EC4\u4FDD\u9669\u67DC\uFF0C\u7531\u83AB\u65AF\u4FDD\u7BA1\u201D\u5FC5\u987B\u5206\u522B\u8F93\u51FAattribute="\u4F4D\u7F6E"\u3001after="C4\u4FDD\u9669\u67DC"\u548Cattribute="\u6301\u6709\u8005"\u3001after="\u83AB\u65AF"\uFF0C\u7981\u6B62\u5408\u6210\u201C\u4FDD\u7BA1\u72B6\u6001\u201D\u3002
 16. \u540C\u4E00\u627F\u8BFA\u6216\u4EFB\u52A1\u4ECE\u63D0\u51FA\u5230\u5B8C\u6210\u653E\u5165commitments\uFF0Cactor\u3001beneficiary\u3001action\u548Cobject\u5FC5\u987B\u4FDD\u6301\u4E00\u81F4\uFF1Bstatus\u53EA\u80FD\u662Fpending\u3001completed\u3001cancelled\u6216failed\u3002
 17. \u6BCF\u6761\u8BB0\u5FC6\u5FC5\u987B\u8F93\u51FAsourceMessageIds\uFF0C\u53EA\u80FD\u5F15\u7528history_messages\u4E2D\u76F4\u63A5\u652F\u6301\u8BE5\u4E8B\u5B9E\u7684\u4E00\u4E2A\u6216\u591A\u4E2AmessageId\u3002reference_context\u6CA1\u6709messageId\uFF0C\u7981\u6B62\u628A\u5B83\u4F5C\u4E3A\u6765\u6E90\uFF1B\u627E\u4E0D\u5230\u804A\u5929\u8BC1\u636E\u5C31\u4E0D\u8981\u8F93\u51FA\u8BE5\u8BB0\u5FC6\u3002
 18. \u201C\u6211\u53EB\u5218\u723D\u201D\u201C\u6211\u662F\u7537\u7684\u201D\u201C\u621197\u5E74\u7684/\u62111997\u5E74\u51FA\u751F\u201D\u7B49\u7531\u7528\u6237\u6216\u89D2\u8272\u672C\u4EBA\u660E\u786E\u58F0\u660E\u7684\u59D3\u540D\u3001\u6027\u522B/\u4EE3\u8BCD\u3001\u51FA\u751F\u5E74\u4EFD\u3001\u957F\u671F\u8EAB\u4EFD\u3001\u9635\u8425\u3001\u4EB2\u5C5E\u5173\u7CFB\u3001\u6301\u4E45\u80FD\u529B\u6216\u9650\u5236\uFF0C\u5C5E\u4E8E\u9700\u8981\u8DE8\u7A97\u53E3\u4FDD\u7559\u7684\u7A33\u5B9A\u72B6\u6001\uFF0C\u4E0D\u5F97\u5F53\u4F5C\u5BD2\u6684\u4E22\u5F03\u3002\u653E\u5165stateFacts\u5E76\u4E3A\u6BCF\u4E2A\u72EC\u7ACB\u5C5E\u6027\u5355\u5217\u4E00\u9879\u3002\u7528\u6237\u7B2C\u4E00\u4EBA\u79F0\u8D44\u6599\u7EDF\u4E00\u4F7F\u7528\u7A33\u5B9A\u4E3B\u4F53entity="\u7528\u6237"\uFF08\u4E0D\u8981\u628A\u4F1A\u53D8\u5316\u7684\u59D3\u540D\u672C\u8EAB\u5F53\u4F5Centity\uFF09\uFF0C\u4F8B\u5982\u59D3\u540D\u58F0\u660E\u586B\u5199entity="\u7528\u6237"\u3001attribute="\u59D3\u540D"\u3001after="\u5218\u723D"\u3002
 19. \u95EE\u53E5\u3001\u73A9\u7B11\u3001\u8BD5\u63A2\u548CAI\u5BF9\u7528\u6237\u8EAB\u4EFD\u7684\u731C\u6D4B\u4E0D\u662F\u7A33\u5B9A\u4E8B\u5B9E\uFF1B\u53EA\u6709\u672C\u4EBA\u660E\u786E\u786E\u8BA4\u3001\u53EF\u9760\u5267\u60C5\u8BC1\u636E\u6216\u540E\u7EED\u660E\u786E\u7EA0\u6B63\u540E\u624D\u80FD\u6807\u4E3Aconfirmed\u3002AI\u5173\u4E8E\u81EA\u8EAB\u5382\u5546\u3001\u8BAD\u7EC3\u65F6\u95F4\u3001\u7CFB\u7EDF\u65F6\u95F4\u80FD\u529B\u7B49\u8131\u79BB\u89D2\u8272\u5267\u60C5\u7684\u81EA\u6211\u8BF4\u660E\u901A\u5E38\u4E0D\u63D0\u53D6\u3002
 20. \u7528\u6237\u660E\u786E\u7EA0\u6B63\u5F53\u524D\u5E74\u4EFD\u3001\u5730\u70B9\u3001\u8EAB\u4EFD\u6216\u5176\u4ED6\u6301\u7EED\u72B6\u6001\u65F6\u8981\u63D0\u53D6\u65B0\u503C\uFF0C\u5E76\u5728before\u6709\u76F4\u63A5\u4F9D\u636E\u65F6\u5199\u51FA\u65E7\u503C\uFF1B\u4E0D\u8981\u628A\u88AB\u7EA0\u6B63\u7684AI\u731C\u6D4B\u5F53\u4F5C\u540C\u7B49\u6743\u5A01\u4E8B\u5B9E\u3002
+21. history_messages\u4E2D\u7684name\u53EA\u662FSillyTavern\u754C\u9762\u8BF4\u8BDD\u8005\u6807\u7B7E\uFF0C\u4E0D\u662F\u5267\u60C5\u8EAB\u4EFD\u7684\u8BC1\u636E\u3002\u9664\u975E\u6D88\u606F\u6B63\u6587\u660E\u786E\u81EA\u6211\u4ECB\u7ECD\u6216\u5267\u60C5\u76F4\u63A5\u786E\u8BA4\uFF0C\u4E0D\u5F97\u628A\u754C\u9762\u7528\u6237\u540D\u5199\u8FDB\u4EBA\u7269\u8EAB\u4EFD\u3001knownBy\u6216\u7A33\u5B9A\u72B6\u6001\u3002
 
 \u6839\u5BF9\u8C61\u5FC5\u987B\u4E14\u53EA\u80FD\u5305\u542Bepisodes\u3001stateFacts\u3001relationships\u3001commitments\u3001revelations\u3001clues\u516D\u4E2A\u6570\u7EC4\uFF1A\u5267\u60C5/\u51B2\u7A81\u653Eepisodes\uFF1B\u72EC\u7ACB\u72B6\u6001\u69FD\u653EstateFacts\uFF1B\u4EBA\u7269\u5173\u7CFB\u8FB9\u653Erelationships\uFF1B\u627F\u8BFA\u4EFB\u52A1\u751F\u547D\u5468\u671F\u653Ecommitments\uFF1B\u5B8C\u6574\u79D8\u5BC6\u547D\u9898\u653Erevelations\uFF1B\u8BC1\u7269\u53CA\u5176\u76F4\u63A5\u542B\u4E49\u653Eclues\u3002truthStatus\u53EA\u80FD\u662Fconfirmed\u3001claimed\u3001inferred\u3001uncertain\u3002
 
@@ -5512,17 +5653,9 @@ var ExtractionService = class {
           });
           throw error;
         }
-        const candidateLimit = Math.min(
-          12,
-          Math.max(6, countCompletedTurns(snapshot) * 3)
-        );
-        const atomicCandidates = normalizeCandidatesByType(parsedCandidates, candidateLimit);
-        const assessment = assessMemoryCandidates(
-          atomicCandidates,
-          promptSnapshot.map((message) => message.mes).join("\n"),
-          snapshot.flatMap((message, offset) => message.is_system ? [] : [chunk.startMessageId + offset])
-        );
-        const candidates = assessment.accepted.map((candidate) => ({
+        const candidateLimit = 20;
+        const localAssessmentLimit = 60;
+        const classifiedCandidates = parsedCandidates.map((candidate) => ({
           ...candidate,
           evidenceRole: classifyEvidenceRole(
             candidate.sourceMessageIds,
@@ -5530,11 +5663,22 @@ var ExtractionService = class {
             chunk.startMessageId
           )
         }));
+        const atomicCandidates = normalizeCandidatesByType(
+          classifiedCandidates,
+          localAssessmentLimit
+        );
+        const assessment = assessMemoryCandidates(
+          atomicCandidates,
+          promptSnapshot.map((message) => message.mes).join("\n"),
+          snapshot.flatMap((message, offset) => message.is_system ? [] : [chunk.startMessageId + offset])
+        );
+        const candidates = normalizeCandidatesByType(assessment.accepted, candidateLimit);
         recordDebugTrace(state, settings.debug, "extraction", "\u5267\u60C5\u5019\u9009\u62BD\u53D6\u5B8C\u6210\u3002", {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           candidates: candidates.length,
           parsedCandidates: parsedCandidates.length,
           atomicCandidates: atomicCandidates.length,
+          acceptedBeforeLimit: assessment.accepted.length,
           candidateLimit,
           rejectedCandidates: assessment.rejected.length,
           ...assessment.rejected.length > 0 ? { rejectedReasons: assessment.rejected.map((item) => item.reason).join(" | ") } : {},
@@ -5923,8 +6067,61 @@ var STAGE_SUMMARY_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u4E2A\u4E25\u683C\u7684\u9
 8. \u8F93\u51FA\u4E00\u6761\u53EF\u72EC\u7ACB\u9605\u8BFB\u7684\u4E2D\u6587\u9636\u6BB5\u603B\u7ED3\u6B63\u6587\uFF0C\u4E0D\u5F15\u7528\u4E0D\u5B58\u5728\u7684\u4E0A\u4E00\u7248\u603B\u7ED3\uFF0C\u4E0D\u8981\u89E3\u91CA\u8FC7\u7A0B\uFF0C\u4E0D\u8981\u8F93\u51FAMarkdown\u4EE3\u7801\u5757\u6216JSON\u3002
 9. \u603B\u7ED3\u957F\u5EA6\u5FC5\u987B\u670D\u4ECE\u8F93\u51FA\u9884\u7B97\uFF1B\u7A7A\u95F4\u4E0D\u8DB3\u65F6\u4F18\u5148\u4FDD\u7559\u5F53\u524D\u5C40\u52BF\u3001\u5173\u952E\u56E0\u679C\u3001\u4EBA\u7269\u5173\u7CFB\u3001\u627F\u8BFA\u3001\u79D8\u5BC6\u3001\u7EBF\u7D22\u548C\u672A\u89E3\u51B3\u4E8B\u9879\u3002
 10. userUiPersona\u53EA\u662FSillyTavern\u754C\u9762\u4E0A\u7684\u8BF4\u8BDD\u8005\u6807\u7B7E\uFF0C\u4E0D\u7B49\u4E8E\u5267\u60C5\u89D2\u8272\u59D3\u540D\uFF0C\u4E5F\u4E0D\u662F\u59D3\u540D\u3001\u79CD\u65CF\u3001\u6027\u522B\u3001\u5E74\u9F84\u3001\u8EAB\u4EFD\u6216\u5173\u7CFB\u7684\u8BC1\u636E\u3002\u539F\u6587\u672A\u660E\u786E\u7ED9\u51FA\u7528\u6237\u5267\u60C5\u8EAB\u4EFD\u65F6\u7EDF\u4E00\u5199\u201C\u7528\u6237\u89D2\u8272\u201D\u3002
-11. assistantCharacter\u53EF\u7528\u4E8E\u6807\u8BC6AI\u6240\u626E\u6F14\u7684\u89D2\u8272\uFF0C\u4F46\u539F\u6587\u51B2\u7A81\u65F6\u4EE5\u672C\u6279\u539F\u6587\u4E3A\u51C6\u3002\u4E0D\u5F97\u6839\u636E\u9884\u8BBE\u4E60\u60EF\u6216\u754C\u9762\u540D\u5B57\u65B0\u589E\u7A33\u5B9A\u8EAB\u4EFD\u3002`;
-function buildStageSummaryPrompt(messages, sourceStartMessageId, identity = { userUiPersona: "", assistantCharacter: "" }) {
+11. assistantCharacter\u53EF\u7528\u4E8E\u6807\u8BC6AI\u6240\u626E\u6F14\u7684\u89D2\u8272\uFF0C\u4F46\u539F\u6587\u51B2\u7A81\u65F6\u4EE5\u672C\u6279\u539F\u6587\u4E3A\u51C6\u3002\u4E0D\u5F97\u6839\u636E\u9884\u8BBE\u4E60\u60EF\u6216\u754C\u9762\u540D\u5B57\u65B0\u589E\u7A33\u5B9A\u8EAB\u4EFD\u3002
+12. authoritative_facts\u82E5\u5B58\u5728\uFF0C\u662F\u4ECE\u540C\u4E00\u6279\u6D88\u606F\u63D0\u53D6\u51FA\u7684\u9AD8\u7F6E\u4FE1\u72B6\u6001\u6821\u6B63\u8D26\u672C\u3002\u5B83\u53EA\u7528\u4E8E\u89E3\u51B3\u672C\u6279\u5185\u90E8\u51B2\u7A81\uFF1A\u7528\u6237\u660E\u786E\u4E8B\u5B9E\u4F18\u5148\u4E8E\u51B2\u7A81\u7684Assistant\u63A8\u6D4B\u3001\u63D0\u95EE\u3001\u8BEF\u8BA4\u6216\u88AB\u7EA0\u6B63\u53D9\u8FF0\uFF1BAssistant\u53EA\u6709\u5728\u660E\u786E\u53D9\u8FF0\u4E86\u4ECEbefore\u5230after\u7684\u5B9E\u9645\u5267\u60C5\u63A8\u8FDB\u65F6\u624D\u80FD\u66F4\u65B0\u65E7\u72B6\u6001\u3002\u88AB\u5426\u5B9A\u7684\u65E7\u8BF4\u6CD5\u5FC5\u987B\u5B8C\u5168\u7701\u7565\uFF0C\u4E0D\u80FD\u7EE7\u7EED\u5199\u6210\u4E8B\u5B9E\u3001\u8BA1\u5212\u3001\u60AC\u5FF5\u6216\u5E76\u5217\u7248\u672C\u3002`;
+function currentVersionSourceIdsInRange(memory, sourceStartMessageId, sourceEndMessageId) {
+  const currentVersionIds = memory.sourceMessageIds.filter((messageId) => messageId >= memory.source.startMessageId && messageId <= memory.source.endMessageId);
+  if (currentVersionIds.length === 0 || currentVersionIds.some((messageId) => messageId < sourceStartMessageId || messageId > sourceEndMessageId)) {
+    return [];
+  }
+  return currentVersionIds;
+}
+function groundingLine(memory, sourceIds) {
+  const source = sourceIds.map((messageId) => `#${messageId}`).join("\u3001");
+  const authority = memory.evidenceRole === "user" ? "User\u660E\u786E\u4E8B\u5B9E" : memory.evidenceRole === "mixed" ? "User\u53C2\u4E0E\u786E\u8BA4\u4E8B\u5B9E" : "Assistant\u660E\u786E\u5267\u60C5\u63A8\u8FDB";
+  if (memory.stateChanges.length > 0) {
+    const facts = memory.stateChanges.map((change) => {
+      const transition = change.before?.trim() ? `${change.before.trim()} \u2192 ${change.after.trim()}` : change.after.trim();
+      return `${change.entity.trim()} \xB7 ${change.attribute.trim()}\uFF1A${transition}`;
+    }).join("\uFF1B");
+    return `- ${source}\uFF5C${authority}\uFF5C\u72B6\u6001\uFF1A${facts}`;
+  }
+  const kind = memory.type === "commitment" ? "\u627F\u8BFA/\u4EFB\u52A1" : memory.type === "relationship_change" ? "\u5173\u7CFB" : memory.type === "revelation" ? "\u63ED\u793A" : "\u5173\u952E\u4E8B\u5B9E";
+  return `- ${source}\uFF5C${authority}\uFF5C${kind}\uFF1A${memory.event.trim()}`;
+}
+function buildStageSummaryGrounding(memories, sourceStartMessageId, sourceEndMessageId, maxCharacters = 4e3) {
+  const candidates = memories.flatMap((memory) => {
+    const sourceIds = currentVersionSourceIdsInRange(
+      memory,
+      sourceStartMessageId,
+      sourceEndMessageId
+    );
+    const explicitTransition = memory.stateChanges.some((change) => Boolean(change.before?.trim()) && change.before?.normalize("NFKC").trim() !== change.after.normalize("NFKC").trim());
+    const groundedType = memory.stateChanges.length > 0 || [
+      "commitment",
+      "relationship_change",
+      "revelation"
+    ].includes(memory.type);
+    return sourceIds.length > 0 && groundedType && !memory.excluded && (memory.status === "active" || memory.status === "resolved") && memory.truthStatus === "confirmed" && (memory.evidenceRole === "user" || memory.evidenceRole === "mixed" || memory.evidenceRole === "assistant" && explicitTransition) ? [{ memory, sourceIds, explicitTransition }] : [];
+  }).sort((left, right) => Number(right.explicitTransition) - Number(left.explicitTransition) || evidenceRoleRank(right.memory.evidenceRole) - evidenceRoleRank(left.memory.evidenceRole) || Math.max(...right.sourceIds) - Math.max(...left.sourceIds) || right.memory.importance - left.memory.importance);
+  const selected = [];
+  const seen = /* @__PURE__ */ new Set();
+  const limit = Math.max(0, Math.floor(maxCharacters));
+  for (const candidate of candidates) {
+    const line = groundingLine(candidate.memory, candidate.sourceIds);
+    const key = line.replace(/^-\s+[^｜]+｜[^｜]+｜/u, "");
+    if (seen.has(key)) {
+      continue;
+    }
+    if ([...selected.map((item) => item.line), line].join("\n").length > limit) {
+      continue;
+    }
+    seen.add(key);
+    selected.push({ line, sourceMessageId: Math.max(...candidate.sourceIds) });
+  }
+  return selected.sort((left, right) => left.sourceMessageId - right.sourceMessageId).map((item) => item.line).join("\n");
+}
+function buildStageSummaryPrompt(messages, sourceStartMessageId, identity = { userUiPersona: "", assistantCharacter: "" }, authoritativeFacts = "") {
   const payload = messages.map((message, offset) => ({ message, messageId: sourceStartMessageId + offset })).filter(({ message }) => !message.is_system).map(({ message, messageId }) => ({
     messageId,
     role: message.is_user ? "user" : "assistant",
@@ -5944,6 +6141,12 @@ function buildStageSummaryPrompt(messages, sourceStartMessageId, identity = { us
     "<history_messages>",
     JSON.stringify(payload),
     "</history_messages>",
+    ...authoritativeFacts.trim() ? [
+      "<authoritative_facts>",
+      "\u4EE5\u4E0B\u53EA\u5217\u672C\u6279\u4E2D\u6709\u6D88\u606F\u6765\u6E90\u7684\u9AD8\u6743\u5A01\u6821\u6B63\u3002\u7528\u6237\u660E\u786E\u4E8B\u5B9E\u4F18\u5148\u4E8E\u51B2\u7A81\u7684Assistant\u63A8\u6D4B\uFF1B\u4EC5\u628A\u5B83\u7528\u4E8E\u6D88\u89E3\u51B2\u7A81\uFF0C\u4E0D\u8981\u9010\u6761\u7167\u6284\uFF1A",
+      authoritativeFacts.trim(),
+      "</authoritative_facts>"
+    ] : [],
     "\u53EA\u8F93\u51FA\u8FD9\u4E00\u6279\u6D88\u606F\u7684\u9636\u6BB5\u603B\u7ED3\u6B63\u6587\u3002"
   ].join("\n");
 }
@@ -6060,12 +6263,18 @@ var StageSummaryService = class {
         const startedAt = performance.now();
         const snapshotHash = await sha256(sourcePayload2(snapshot, chunk.startMessageId));
         const identity = summaryIdentity(context);
+        const authoritativeFacts = buildStageSummaryGrounding(
+          state.memories,
+          chunk.startMessageId,
+          chunk.endMessageId
+        );
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
           prompt: buildStageSummaryPrompt(
             snapshot,
             chunk.startMessageId,
-            identity
+            identity,
+            authoritativeFacts
           ),
           maxTokens: settings.summary.maxTokens
         });
@@ -6101,7 +6310,8 @@ var StageSummaryService = class {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           summaryCharacters: text2.length,
           summaryEntries: state.stageSummary.entries.length,
-          personaLabelSanitized: text2 !== normalizeSummary(raw, snapshot)
+          personaLabelSanitized: text2 !== normalizeSummary(raw, snapshot),
+          authoritativeFactCharacters: authoritativeFacts.length
         });
         await this.memoryRepository.save(state);
         updatedChunks += 1;
@@ -6663,6 +6873,60 @@ var queryRewriteService = new QueryRewriteService();
 // src/retrieval/ranker.ts
 var MIN_RECALL_RANK_SCORE = 2;
 var RELATIVE_RECALL_RANK_RATIO = 0.4;
+function stateTransitionAdvances(newer, older) {
+  if (newer.truthStatus !== "confirmed" || newer.source.endMessageId <= older.source.endMessageId || newer.stateChanges.length !== 1 || older.stateChanges.length !== 1) {
+    return false;
+  }
+  const before = normalizeIdentityText(newer.stateChanges[0]?.before ?? "");
+  const previous = normalizeIdentityText(older.stateChanges[0]?.after ?? "");
+  return before.length >= 2 && previous.length >= 2 && (before === previous || before.includes(previous) || previous.includes(before));
+}
+function preferredStateMemory(left, right) {
+  if (left.manuallyEdited !== right.manuallyEdited) {
+    return left.manuallyEdited ? left : right;
+  }
+  if (stateTransitionAdvances(left, right)) {
+    return left;
+  }
+  if (stateTransitionAdvances(right, left)) {
+    return right;
+  }
+  const truthRank = (memory) => {
+    switch (memory.truthStatus) {
+      case "confirmed":
+        return 4;
+      case "claimed":
+        return 3;
+      case "inferred":
+        return 2;
+      case "uncertain":
+        return 1;
+    }
+  };
+  const truthDifference = truthRank(left) - truthRank(right);
+  if (truthDifference !== 0) {
+    return truthDifference > 0 ? left : right;
+  }
+  const authority = evidenceRoleRank(left.evidenceRole) - evidenceRoleRank(right.evidenceRole);
+  if (authority !== 0) {
+    return authority > 0 ? left : right;
+  }
+  return left.source.endMessageId !== right.source.endMessageId ? left.source.endMessageId > right.source.endMessageId ? left : right : left.importance >= right.importance ? left : right;
+}
+function suppressStaleAtomicStates(memories) {
+  const preferredBySlot = /* @__PURE__ */ new Map();
+  for (const memory of memories) {
+    if (memory.stateChanges.length !== 1) {
+      continue;
+    }
+    const change = memory.stateChanges[0];
+    const slot = canonicalStateSlot(change.entity, change.attribute, memory.type);
+    const existing = preferredBySlot.get(slot);
+    preferredBySlot.set(slot, existing ? preferredStateMemory(existing, memory) : memory);
+  }
+  const preferredIds = new Set([...preferredBySlot.values()].map((memory) => memory.id));
+  return memories.filter((memory) => memory.stateChanges.length !== 1 || preferredIds.has(memory.id));
+}
 function exactEntityMatches(query, memory) {
   const normalizedQuery = query.toLocaleLowerCase();
   const entityTerms2 = [.../* @__PURE__ */ new Set([...memory.entities, ...memory.aliases])].map((term) => term.trim().toLocaleLowerCase()).filter((term) => term.length >= 2);
@@ -6882,9 +7146,9 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
       warnings.push("\u90E8\u5206\u5267\u60C5\u8BB0\u5FC6\u5C1A\u672A\u5B8C\u6210\u5411\u91CF\u5316\uFF0C\u5C06\u4F7F\u7528\u53EF\u7528\u7D22\u5F15\u548C\u5173\u952E\u8BCD\u53EC\u56DE\u3002");
       logger.warn("\u540C\u6B65\u5F85\u5904\u7406\u5411\u91CF\u5931\u8D25\u3002", error);
     }
-    const windowExternalMemories = state.memories.filter(
+    const windowExternalMemories = suppressStaleAtomicStates(state.memories.filter(
       (memory) => !memory.excluded && memory.status !== "invalid" && memory.status !== "superseded" && hasSourceOutsideWindow(memory, retainedSourceStart)
-    );
+    ));
     const shadowedMemories = windowExternalMemories.filter((memory) => isShadowedByRecentUserFact(
       memory,
       sourceChat,
@@ -6982,7 +7246,8 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
       settings.recall.maxEvents,
       settings.recall.maxTokens,
       `${queryPlan.intentQuery}
-${currentInput?.mes ?? ""}`
+${currentInput?.mes ?? ""}`,
+      eligibleMemories
     );
     const entityConstraints = recallEnabled ? buildEntityDisambiguationConstraints(
       state.memories.filter((memory) => !memory.excluded && memory.status !== "invalid" && memory.status !== "superseded"),
@@ -7063,6 +7328,7 @@ ${currentInput?.mes ?? ""}`
       intentVectorMatches: vectorResults.intent.map((result) => `${result.hash}@${result.rank}`).join(","),
       sceneVectorMatches: vectorResults.scene.map((result) => `${result.hash}@${result.rank}`).join(","),
       selectedMemoryIds: selected.map((memory) => memory.id).join(","),
+      exactEntityRescues: selected.filter((memory) => !ranked.some((rankedMemory) => rankedMemory.id === memory.id)).map((memory) => memory.id).join(","),
       estimatedRemovedTokens,
       estimatedSummaryTokens,
       estimatedInjectedTokens,
@@ -7826,7 +8092,16 @@ ${current.event}`)) {
     this.currentPage = page.page;
     list.replaceChildren();
     const hasActiveFilter = status !== "all" || Boolean(search);
-    count.textContent = memories.length === 0 ? "\u5F53\u524D\u804A\u5929\u5C1A\u65E0\u5267\u60C5\u8BB0\u5FC6\u3002" : filtered.length === 0 ? `\u5171 ${memories.length} \u6761\uFF0C\u7B5B\u9009\u540E 0 \u6761\u3002` : hasActiveFilter ? `\u5171 ${memories.length} \u6761\uFF0C\u7B5B\u9009\u540E ${filtered.length} \u6761\uFF1B\u7B2C ${page.page} / ${page.totalPages} \u9875\uFF0C\u672C\u9875\u52A0\u8F7D ${page.items.length} \u6761\u3002` : `\u5171 ${memories.length} \u6761\uFF1B\u7B2C ${page.page} / ${page.totalPages} \u9875\uFF0C\u672C\u9875\u52A0\u8F7D ${page.items.length} \u6761\u3002`;
+    const pageDescription = `\u7B2C ${page.page} / ${page.totalPages} \u9875\uFF0C\u672C\u9875\u52A0\u8F7D ${page.items.length} \u6761\u3002`;
+    if (memories.length === 0) {
+      count.textContent = "\u5F53\u524D\u804A\u5929\u5C1A\u65E0\u5267\u60C5\u8BB0\u5FC6\u3002";
+    } else if (filtered.length === 0) {
+      count.textContent = `\u5171 ${memories.length} \u6761\uFF0C\u7B5B\u9009\u540E 0 \u6761\u3002`;
+    } else if (hasActiveFilter) {
+      count.textContent = `\u5171 ${memories.length} \u6761\uFF0C\u7B5B\u9009\u540E ${filtered.length} \u6761\uFF1B${pageDescription}`;
+    } else {
+      count.textContent = `\u5171 ${memories.length} \u6761\uFF1B${pageDescription}`;
+    }
     pagination.hidden = filtered.length <= page.pageSize;
     previous.disabled = page.page <= 1;
     next.disabled = page.page >= page.totalPages;
@@ -7979,6 +8254,18 @@ var memoryMetadataManager = new MemoryMetadataManager(
 );
 var cachedVectorCollectionId = "";
 var cachedVectorCountText = "\u672A\u8BFB\u53D6";
+var cachedVectorRevision = "";
+function vectorRevision(state) {
+  return [
+    state.vectorCollectionId,
+    state.vectorFingerprint,
+    state.pendingVectorHashes.length,
+    state.pendingVectorDeleteHashes.length,
+    state.metrics.vectorItemsInserted,
+    state.metrics.vectorItemsDeleted,
+    state.metrics.vectorRebuilds
+  ].join(":");
+}
 function panelTemplate() {
   const panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -9003,6 +9290,7 @@ async function refreshStatus(panel, refreshVectorCount = false) {
     if (!state) {
       cachedVectorCollectionId = "";
       cachedVectorCountText = "\u672A\u8BFB\u53D6";
+      cachedVectorRevision = "";
       target.textContent = [
         getCurrentChatId() ? "\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316StoryEcho\u6570\u636E\u3002" : "\u5F53\u524D\u6CA1\u6709\u6253\u5F00\u804A\u5929\u3002",
         ...runtimeStatusText()
@@ -9017,8 +9305,11 @@ async function refreshStatus(panel, refreshVectorCount = false) {
     if (cachedVectorCollectionId !== state.vectorCollectionId) {
       cachedVectorCollectionId = state.vectorCollectionId;
       cachedVectorCountText = "\u672A\u8BFB\u53D6";
+      cachedVectorRevision = "";
     }
-    if (refreshVectorCount) {
+    const currentVectorRevision = vectorRevision(state);
+    if (refreshVectorCount || cachedVectorRevision !== currentVectorRevision) {
+      cachedVectorRevision = currentVectorRevision;
       try {
         const hashes = await vectorStore2.list(
           state.vectorCollectionId,
