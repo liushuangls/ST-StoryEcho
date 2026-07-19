@@ -442,23 +442,31 @@
 #story-echo-settings .story-echo-memory-list {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 0.4rem;
   max-height: 18rem;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 0.08rem;
 }
 
 #story-echo-settings .story-echo-memory-row {
   box-sizing: border-box;
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   align-items: stretch;
   gap: 0.18rem;
+  height: auto;
   width: 100%;
   max-width: none;
+  max-height: none;
   min-width: 0;
-  min-height: 0;
+  min-height: max-content;
   margin: 0;
+  overflow: hidden;
   padding: 0.55rem 0.65rem;
   text-align: left;
   white-space: normal;
@@ -472,15 +480,18 @@
 #story-echo-settings .story-echo-memory-row-title {
   display: -webkit-box;
   overflow: hidden;
+  min-width: 0;
   color: var(--SmartThemeBodyColor);
   font-weight: 650;
   line-height: 1.35;
+  overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 
 #story-echo-settings .story-echo-memory-row-meta {
   overflow: hidden;
+  min-width: 0;
   font-size: 0.78em;
   line-height: 1.3;
   opacity: 0.7;
