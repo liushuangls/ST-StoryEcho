@@ -117,7 +117,7 @@ npm install
 npm run check
 ```
 
-`manifest.json` 加载 `dist/index.js`。SillyTavern 通过 Git 地址安装扩展时不会执行前端构建，因此仓库会提交由源码生成的 `dist/`；修改源码后必须重新构建并一起提交产物。
+`manifest.json` 加载 `dist/index.js`，并为 JS/CSS 入口附加与扩展版本一致的查询参数，避免更新后继续命中旧浏览器缓存。SillyTavern 通过 Git 地址安装扩展时不会执行前端构建，因此仓库会提交由源码生成的 `dist/`；修改源码后必须重新构建并一起提交产物，发布新版本时也必须同步更新入口查询参数。
 
 ## 文档
 

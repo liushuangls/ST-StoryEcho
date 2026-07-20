@@ -15,14 +15,20 @@ describe('extension manifest', () => {
   it('points to committed, loadable assets and exported hooks', () => {
     const manifest = JSON.parse(readFileSync(resolve('manifest.json'), 'utf8')) as ExtensionManifest;
     const packageJson = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as { version: string };
+    const expectedVersionQuery = `v=${encodeURIComponent(EXTENSION_VERSION)}`;
+    const jsAsset = manifest.js.replace(/\?.*$/, '');
+    const cssAsset = manifest.css.replace(/\?.*$/, '');
+
     expect(manifest.version).toBe(EXTENSION_VERSION);
     expect(packageJson.version).toBe(EXTENSION_VERSION);
-    expect(existsSync(resolve(manifest.js))).toBe(true);
-    expect(existsSync(resolve(manifest.css))).toBe(true);
+    expect(manifest.js.split('?')[1]).toBe(expectedVersionQuery);
+    expect(manifest.css.split('?')[1]).toBe(expectedVersionQuery);
+    expect(existsSync(resolve(jsAsset))).toBe(true);
+    expect(existsSync(resolve(cssAsset))).toBe(true);
     expect(manifest.generate_interceptor).toBe('storyEchoGenerateInterceptor');
     expect(manifest.hooks).toEqual({ activate: 'onActivate' });
 
-    const bundle = readFileSync(resolve(manifest.js), 'utf8');
+    const bundle = readFileSync(resolve(jsAsset), 'utf8');
     expect(bundle).toContain('globalThis.storyEchoGenerateInterceptor');
     expect(bundle).toContain('memoryMetadataManager');
     expect(bundle).toMatch(/export\s*\{[\s\S]*onActivate/);
