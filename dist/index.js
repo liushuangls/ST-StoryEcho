@@ -2579,7 +2579,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 7;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.19.0";
+var EXTENSION_VERSION = "0.19.1";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
