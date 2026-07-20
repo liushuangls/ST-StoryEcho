@@ -9,6 +9,21 @@ import { normalizeSummary, StageSummaryService } from '../src/summary/service';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState, memory } from './fixtures';
 
+function sectionedSummary(confirmed: string): string {
+  return [
+    '【已确认剧情】',
+    confirmed,
+    '【当前状态】',
+    '无',
+    '【未解决线索】',
+    '无',
+    '【角色主张与推测】',
+    '无',
+    '【已失效或否定事实】',
+    '无',
+  ].join('\n');
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -208,6 +223,13 @@ describe('independent stage summaries', () => {
     ], '刘爽')).toContain('刘爽');
   });
 
+  it('requires every authority section for newly generated summaries', () => {
+    expect(() => normalizeSummary('只有一段普通总结。', [], '', true))
+      .toThrow(/缺少或打乱分级标题/);
+    expect(normalizeSummary(sectionedSummary('用户角色进入贝克街。'), [], '', true))
+      .toContain('【角色主张与推测】\n无');
+  });
+
   it('waits for a complete automatic batch and keeps the coverage cursor unchanged', async () => {
     const generateRaw = vi.fn(async () => '不应调用');
     const { state } = installContext([
@@ -224,7 +246,8 @@ describe('independent stage summaries', () => {
   });
 
   it('appends one bounded summary entry and advances the cursor for a complete batch', async () => {
-    const generateRaw = vi.fn(async (_options: unknown) => '众人在旧港取得钥匙，随后抵达新港。');
+    const summary = sectionedSummary('众人在旧港取得钥匙，随后抵达新港。');
+    const generateRaw = vi.fn(async (_options: unknown) => summary);
     const { context } = installContext([
       { is_user: false, mes: 'greeting' },
       { is_user: true, mes: 'u1' },
@@ -239,7 +262,7 @@ describe('independent stage summaries', () => {
     expect(result.state?.stageSummary).toMatchObject({
       coveredThroughMessageId: 4,
       entries: [{
-        text: '众人在旧港取得钥匙，随后抵达新港。',
+        text: summary,
         sourceStartMessageId: 0,
         sourceEndMessageId: 4,
       }],
@@ -269,8 +292,8 @@ describe('independent stage summaries', () => {
 
   it('creates immutable entries for successive batches without feeding an old summary back', async () => {
     const generateRaw = vi.fn()
-      .mockResolvedValueOnce('第一阶段总结')
-      .mockResolvedValueOnce('第二阶段总结');
+      .mockResolvedValueOnce(sectionedSummary('第一阶段总结'))
+      .mockResolvedValueOnce(sectionedSummary('第二阶段总结'));
     installContext([
       { is_user: true, mes: 'u1' },
       { is_user: false, mes: 'a1' },
@@ -287,12 +310,12 @@ describe('independent stage summaries', () => {
     expect(result.updatedChunks).toBe(2);
     expect(result.state?.stageSummary.entries).toMatchObject([
       {
-        text: '第一阶段总结',
+        text: sectionedSummary('第一阶段总结'),
         sourceStartMessageId: 0,
         sourceEndMessageId: 3,
       },
       {
-        text: '第二阶段总结',
+        text: sectionedSummary('第二阶段总结'),
         sourceStartMessageId: 4,
         sourceEndMessageId: 7,
       },

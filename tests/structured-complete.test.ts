@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StoryEchoSettings } from '../src/core/types';
 import { completeStructuredWithConfiguredProvider } from '../src/llm/complete';
+import {
+  resetStructuredOutputDiagnostics,
+  structuredOutputDiagnosticsSnapshot,
+} from '../src/llm/structured-diagnostics';
+import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 
 const SCHEMA = {
@@ -19,6 +24,8 @@ function parseQuery(raw: string): string {
 }
 
 afterEach(() => {
+  storyEchoTaskCoordinator.resetForTests();
+  resetStructuredOutputDiagnostics();
   vi.unstubAllGlobals();
 });
 
@@ -162,5 +169,75 @@ describe('structured LLM completion', () => {
 
     expect(outbound['custom_include_body']).toBe('response_format:\n  type: json_object');
     expect(generateRaw).toHaveBeenCalledWith(expect.not.objectContaining({ jsonSchema: SCHEMA }));
+  });
+
+  it('repairs harmless JSON syntax defects before making another provider call', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.llm.provider = 'openai-compatible';
+    settings.llm.custom.baseUrl = 'https://api.deepseek.com/v1';
+    settings.llm.custom.model = 'deepseek-v4-pro';
+    settings.llm.custom.fallbackToMain = false;
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '结果如下：\n```json\n{"query":"本地修复成功",}\n```' } }],
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ getRequestHeaders: () => ({}) }),
+    });
+
+    await expect(completeStructuredWithConfiguredProvider(settings, {
+      system: 'system',
+      prompt: 'prompt',
+      jsonSchema: SCHEMA,
+    }, parseQuery)).resolves.toBe('本地修复成功');
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(structuredOutputDiagnosticsSnapshot().localJsonRepairs).toBe(1);
+  });
+
+  it('ends a background fallback chain when a foreground generation is waiting', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.llm.provider = 'openai-compatible';
+    settings.llm.custom.baseUrl = 'https://api.deepseek.com/v1';
+    settings.llm.custom.model = 'deepseek-v4-pro';
+    settings.llm.custom.fallbackToMain = false;
+    let releaseResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      releaseResponse = resolve;
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockReturnValue(response);
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ getRequestHeaders: () => ({}) }),
+    });
+    const order: string[] = [];
+    const background = storyEchoTaskCoordinator.enqueueBackground('structured background', async () => {
+      order.push('background');
+      return completeStructuredWithConfiguredProvider(settings, {
+        system: 'system',
+        prompt: 'prompt',
+        jsonSchema: SCHEMA,
+      }, parseQuery);
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const foreground = storyEchoTaskCoordinator.enqueueForeground(
+      'foreground',
+      async () => {
+        order.push('foreground');
+        return false;
+      },
+      { holdForegroundLease: (prepared) => prepared },
+    );
+    const rejected = expect(background).rejects.toThrow(/前台生成已排队/);
+    releaseResponse(new Response(JSON.stringify({
+      choices: [{ message: { content: 'not json' } }],
+    }), { status: 200 }));
+
+    await rejected;
+    await foreground;
+    expect(order).toEqual(['background', 'foreground']);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(structuredOutputDiagnosticsSnapshot().backgroundYields).toBe(1);
   });
 });

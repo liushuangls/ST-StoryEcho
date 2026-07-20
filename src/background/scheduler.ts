@@ -6,11 +6,14 @@ import { recordExtractionCooldownSkip } from '../llm/structured-diagnostics';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { selectRecentWindow } from '../prompt/window';
-import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
+import {
+  isBackgroundYieldForForegroundError,
+  storyEchoTaskCoordinator,
+} from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
 
-const BACKGROUND_DELAY_MS = 750;
+const BACKGROUND_DELAY_MS = 3_000;
 const EXTRACTION_BACKOFF_BASE_MS = 30_000;
 const EXTRACTION_BACKOFF_MAX_MS = 15 * 60_000;
 
@@ -240,6 +243,14 @@ export class BackgroundProcessingScheduler {
         }
         await this.processCurrentChat();
       } catch (error) {
+        if (isBackgroundYieldForForegroundError(error)) {
+          // End this coordinator task so the already-queued foreground task
+          // can run. The same uncommitted history block is requeued after the
+          // real reply lease is released; no cursor has advanced.
+          this.rerunRequested = true;
+          logger.info('后台剧情整理已在LLM重试边界让行，稍后从未提交分块重试。');
+          return;
+        }
         // Extraction and summary services already record bounded diagnostics.
         // The event handler must never create an unhandled rejection or affect
         // the assistant reply the user has just received.
@@ -301,6 +312,9 @@ export class BackgroundProcessingScheduler {
           state = await extractionService.processNextThroughVerifiedHistory(targetEndMessageId) ?? state;
           this.extractionCooldown = undefined;
         } catch (error) {
+          if (isBackgroundYieldForForegroundError(error)) {
+            throw error;
+          }
           if (this.historyRevision === extractionRevision) {
             const failures = sameFailedBlock ? cooldown.failures + 1 : 1;
             const delayMs = Math.min(

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { StoryMemory, TavernChatMessage } from '../src/core/types';
 import { shortlistMemories } from '../src/consolidation/shortlist';
+import {
+  directlyGroundedStoryMemoryNames,
+  normalizedStoryEntityName,
+  unsupportedStoryMemoryNames,
+} from '../src/extraction/quality';
 import { buildRetrievalQueryPlan } from '../src/retrieval/query-builder';
 import { rankMemories } from '../src/retrieval/ranker';
 import { estimateMessageTokens } from '../src/prompt/render';
@@ -19,7 +24,7 @@ describe('hundreds-floor local performance', () => {
   it('keeps windowing and memory ranking bounded for 500 messages', () => {
     const messages: TavernChatMessage[] = Array.from({ length: 500 }, (_, index) => ({
       is_user: index % 2 === 0,
-      mes: `第 ${index} 楼：${'剧情文本'.repeat(80)}`,
+      mes: `第 ${index} 楼：角色${index}与物品${index}。${'剧情文本'.repeat(80)}`,
     }));
     messages.push({ is_user: true, mes: '银钥匙现在在哪里？' });
 
@@ -29,7 +34,13 @@ describe('hundreds-floor local performance', () => {
       event: `角色${index}完成第${index}件长期事件`,
       entities: [`角色${index}`, `物品${index}`],
       aliases: [],
+      stateChanges: [{
+        entity: `物品${index}`,
+        attribute: '持有者',
+        after: `角色${index}`,
+      }],
       retrievalText: `角色${index}与物品${index}的当前状态`,
+      sourceMessageIds: [index],
       source: {
         startMessageId: index,
         endMessageId: index,
@@ -80,6 +91,15 @@ describe('hundreds-floor local performance', () => {
     const shortlistAverageMs = averageDuration(30, () => {
       shortlistCount = shortlistMemories(candidates, memories, new Set()).length;
     });
+    let groundedMemoryCount = 0;
+    const groundingAverageMs = averageDuration(20, () => {
+      const establishedNames = new Set(memories.flatMap((item) => (
+        directlyGroundedStoryMemoryNames(item, messages).map(normalizedStoryEntityName)
+      )));
+      groundedMemoryCount = memories.filter((item) => (
+        unsupportedStoryMemoryNames(item, messages, establishedNames).length === 0
+      )).length;
+    });
     const state = chatState(memories);
     state.stageSummary.entries = Array.from({ length: 23 }, (_, index) => ({
       text: `第${index + 1}阶段总结：${'关键剧情与人物关系。'.repeat(20)}`,
@@ -103,6 +123,7 @@ describe('hundreds-floor local performance', () => {
       tokenEstimateAverageMs: Number(tokenEstimateAverageMs.toFixed(3)),
       rankingAverageMs: Number(rankingAverageMs.toFixed(3)),
       shortlistAverageMs: Number(shortlistAverageMs.toFixed(3)),
+      groundingAverageMs: Number(groundingAverageMs.toFixed(3)),
       stageSummaries: state.stageSummary.entries.length,
       summaryWindowAverageMs: Number(summaryWindowAverageMs.toFixed(3)),
       metadataBytes,
@@ -113,11 +134,13 @@ describe('hundreds-floor local performance', () => {
     expect(rankedCount).toBeGreaterThan(0);
     expect(rankedCount).toBeLessThanOrEqual(4);
     expect(shortlistCount).toBe(3);
+    expect(groundedMemoryCount).toBe(300);
     expect(summaryWindowCount).toBe(4);
     expect(windowAverageMs).toBeLessThan(20);
     expect(tokenEstimateAverageMs).toBeLessThan(20);
     expect(rankingAverageMs).toBeLessThan(50);
     expect(shortlistAverageMs).toBeLessThan(100);
+    expect(groundingAverageMs).toBeLessThan(100);
     expect(summaryWindowAverageMs).toBeLessThan(5);
     expect(metadataBytes).toBeLessThan(1_000_000);
   });

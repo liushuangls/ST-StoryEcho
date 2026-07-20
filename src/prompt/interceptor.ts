@@ -9,6 +9,11 @@ import type {
 import { emitDiagnosticsUpdated } from '../debug/events';
 import { recordDebugTrace } from '../debug/metrics';
 import { extractionService } from '../extraction/service';
+import {
+  directlyGroundedStoryMemoryNames,
+  normalizedStoryEntityName,
+  unsupportedStoryMemoryNames,
+} from '../extraction/quality';
 import { isInternalGenerationRequest } from '../llm/internal-generation';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
@@ -17,6 +22,7 @@ import {
   withRewrittenRetrievalQuery,
 } from '../retrieval/query-builder';
 import { hasSourceOutsideWindow } from '../retrieval/eligibility';
+import { isFactVerificationQuery } from '../retrieval/intent';
 import { isShadowedByRecentUserFact } from '../retrieval/recent-shadow';
 import { queryRewriteService } from '../retrieval/query-rewriter';
 import {
@@ -273,13 +279,35 @@ async function prepareStoryEchoPrompt(
       logger.warn('同步待处理向量失败。', error);
     }
 
-    const windowExternalMemories = suppressStaleAtomicStates(state.memories.filter(
+    const currentInput = chat[window.currentInputIndex];
+    const factVerification = isFactVerificationQuery(currentInput?.mes ?? '');
+    const establishedNames = new Set(state.memories.flatMap((memory) => (
+      directlyGroundedStoryMemoryNames(memory, sourceChat).map(normalizedStoryEntityName)
+    )));
+    const ungroundedMemoryNames = new Map<string, string[]>();
+    const groundedMemories = state.memories.filter((memory) => {
+      const names = unsupportedStoryMemoryNames(memory, sourceChat, establishedNames);
+      if (names.length > 0) {
+        ungroundedMemoryNames.set(memory.id, names);
+        return false;
+      }
+      return true;
+    });
+    const windowExternalMemories = suppressStaleAtomicStates(groundedMemories.filter(
       (memory) =>
         !memory.excluded &&
         memory.status !== 'invalid' &&
         memory.status !== 'superseded' &&
         hasSourceOutsideWindow(memory, retainedSourceStart),
     ));
+    if (ungroundedMemoryNames.size > 0) {
+      recordDebugTrace(state, settings.debug, 'retrieval', '已隔离缺少源楼层证据的旧版记忆。', {
+        memories: [...ungroundedMemoryNames.entries()]
+          .map(([id, names]) => `${id}:${names.join('、')}`)
+          .join(' | '),
+        count: ungroundedMemoryNames.size,
+      });
+    }
     const shadowedMemories = windowExternalMemories.filter((memory) => (
       isShadowedByRecentUserFact(
         memory,
@@ -289,7 +317,10 @@ async function prepareStoryEchoPrompt(
       )
     ));
     const shadowedIds = new Set(shadowedMemories.map((memory) => memory.id));
-    const eligibleMemories = windowExternalMemories.filter((memory) => !shadowedIds.has(memory.id));
+    const eligibleMemories = windowExternalMemories.filter((memory) => (
+      !shadowedIds.has(memory.id) &&
+      (!factVerification || memory.truthStatus === 'confirmed')
+    ));
     const recallEnabled = settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
     if (shadowedMemories.length > 0) {
       recordDebugTrace(state, settings.debug, 'retrieval', '近期用户事实已遮蔽冲突的较早记忆。', {
@@ -390,7 +421,6 @@ async function prepareStoryEchoPrompt(
       ...vectorResults.intent.map((result) => result.hash),
       ...vectorResults.scene.map((result) => result.hash),
     ]).size;
-    const currentInput = chat[window.currentInputIndex];
     const selected = selectWithinBudget(
       ranked,
       settings.recall.maxEvents,
@@ -400,14 +430,17 @@ async function prepareStoryEchoPrompt(
     );
     const entityConstraints = recallEnabled
       ? buildEntityDisambiguationConstraints(
-        state.memories.filter((memory) => (
-          !memory.excluded && memory.status !== 'invalid' && memory.status !== 'superseded'
+        groundedMemories.filter((memory) => (
+          !memory.excluded &&
+          memory.status !== 'invalid' &&
+          memory.status !== 'superseded' &&
+          (!factVerification || memory.truthStatus === 'confirmed')
         )),
         currentInput?.mes ?? '',
       )
       : [];
     const recallBlock = selected.length > 0 || entityConstraints.length > 0
-      ? renderMemoryBlock(selected, entityConstraints)
+      ? renderMemoryBlock(selected, entityConstraints, factVerification)
       : '';
     const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
     const summaryEntries = settings.summary.enabled
@@ -417,9 +450,10 @@ async function prepareStoryEchoPrompt(
       entry.text,
       entry.sourceStartMessageId,
       entry.sourceEndMessageId,
-    ));
-    const currentStateBlock = summaryBlocks.length > 0
-      ? renderCurrentStateCoordinationBlock(state.memories)
+      factVerification,
+    )).filter(Boolean);
+    const currentStateBlock = summaryEntries.length > 0
+      ? renderCurrentStateCoordinationBlock(groundedMemories, 600, factVerification)
       : '';
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
     const estimatedSummaryTokens = summaryBlocks.reduce(
@@ -433,7 +467,7 @@ async function prepareStoryEchoPrompt(
     const retainedAnchor = chat[window.retainedStartIndex];
     removeMessagesAtIndices(chat, window.removableIndices);
 
-    if (summaryBlocks.length > 0) {
+    if (summaryBlocks.length > 0 || currentStateBlock) {
       const anchorIndex = retainedAnchor ? chat.indexOf(retainedAnchor) : 0;
       chat.splice(
         Math.max(0, anchorIndex),
@@ -483,6 +517,7 @@ async function prepareStoryEchoPrompt(
       sceneVectorResults: vectorResults.scene.length,
       uniqueVectorResults: uniqueVectorResultCount,
       queryStrategy: queryPlan.strategy,
+      factVerification,
       weakIntent: queryPlan.weakIntent,
       intentWeight: queryPlan.intentWeight,
       sceneWeight: queryPlan.sceneWeight,

@@ -7,13 +7,27 @@ import { logger } from '../core/logger';
 import { MainLlmProvider } from './main-provider';
 import { createLlmProvider } from './provider-factory';
 import {
+  BackgroundYieldForForegroundError,
+  storyEchoTaskCoordinator,
+} from '../runtime/task-coordinator';
+import {
+  recordBackgroundYield,
+  recordLocalJsonRepair,
   recordStructuredAttempt,
   recordStructuredFailure,
   recordStructuredProviderFallback,
   recordStructuredSuccess,
 } from './structured-diagnostics';
+import { repairedJsonText } from './json-repair';
 
 const MAX_RETRY_TOKENS = 8_192;
+
+function yieldBackgroundAtRetryBoundary(): void {
+  if (storyEchoTaskCoordinator.shouldYieldBackgroundToForeground()) {
+    recordBackgroundYield();
+    throw new BackgroundYieldForForegroundError();
+  }
+}
 
 async function completeNonEmpty(
   provider: LlmProvider,
@@ -26,6 +40,7 @@ async function completeNonEmpty(
   if (request.signal?.aborted) {
     throw new Error('LLM请求已取消。');
   }
+  yieldBackgroundAtRetryBoundary();
 
   const initialBudget = Math.max(128, Math.floor(request.maxTokens ?? 1_024));
   const retryBudget = Math.min(MAX_RETRY_TOKENS, initialBudget * 2);
@@ -109,6 +124,7 @@ async function completeStructuredWithProvider<T>(
   const instructed = withJsonInstructions(request);
   const failures: string[] = [];
   for (const mode of provider.structuredOutputOrder()) {
+    yieldBackgroundAtRetryBoundary();
     if (!provider.supportsStructuredOutput(mode)) {
       logger.debug(`${provider.id}不支持${mode}，跳过该结构化层级。`);
       continue;
@@ -119,7 +135,18 @@ async function completeStructuredWithProvider<T>(
         ...instructed,
         structuredOutput: mode,
       });
-      const parsed = parse(raw);
+      let parsed: T;
+      try {
+        parsed = parse(raw);
+      } catch (initialError) {
+        try {
+          parsed = parse(repairedJsonText(raw));
+          recordLocalJsonRepair();
+          logger.info(`${provider.id}的${mode}输出已由本地JSON语法修复，无需再次调用LLM。`);
+        } catch {
+          throw initialError;
+        }
+      }
       recordStructuredSuccess(provider.id, mode);
       return parsed;
     } catch (error) {
@@ -150,6 +177,7 @@ export async function completeStructuredWithConfiguredProvider<T>(
     if (provider.id !== 'openai-compatible' || !settings.llm.custom.fallbackToMain) {
       throw error;
     }
+    yieldBackgroundAtRetryBoundary();
     logger.warn('自定义LLM的三种结构化模式均失败，回退到SillyTavern主连接。', error);
     recordStructuredProviderFallback();
     return completeStructuredWithProvider(new MainLlmProvider(), request, parse);
@@ -170,6 +198,7 @@ export async function completeWithConfiguredProvider(
     if (provider.id !== 'openai-compatible' || !settings.llm.custom.fallbackToMain) {
       throw error;
     }
+    yieldBackgroundAtRetryBoundary();
     logger.warn('自定义LLM调用失败，回退到SillyTavern主连接。', error);
     return completeNonEmpty(new MainLlmProvider(), request);
   }

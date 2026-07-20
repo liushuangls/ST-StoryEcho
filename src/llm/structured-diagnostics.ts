@@ -9,6 +9,8 @@ export interface StructuredOutputDiagnostics {
   failures: ModeCounts;
   providerFallbacks: number;
   adaptiveSplits: number;
+  localJsonRepairs: number;
+  backgroundYields: number;
   extractionCooldownSkips: number;
   lastProvider: LlmProviderId | null;
   lastMode: LlmStructuredOutputMode | null;
@@ -27,6 +29,8 @@ function createDiagnostics(): StructuredOutputDiagnostics {
     failures: emptyModeCounts(),
     providerFallbacks: 0,
     adaptiveSplits: 0,
+    localJsonRepairs: 0,
+    backgroundYields: 0,
     extractionCooldownSkips: 0,
     lastProvider: null,
     lastMode: null,
@@ -80,6 +84,18 @@ export function recordStructuredProviderFallback(): void {
 
 export function recordAdaptiveExtractionSplit(): void {
   diagnostics.adaptiveSplits += 1;
+  diagnostics.lastUpdatedAt = new Date().toISOString();
+  emitDiagnosticsUpdated();
+}
+
+export function recordLocalJsonRepair(): void {
+  diagnostics.localJsonRepairs += 1;
+  diagnostics.lastUpdatedAt = new Date().toISOString();
+  emitDiagnosticsUpdated();
+}
+
+export function recordBackgroundYield(): void {
+  diagnostics.backgroundYields += 1;
   diagnostics.lastUpdatedAt = new Date().toISOString();
   emitDiagnosticsUpdated();
 }

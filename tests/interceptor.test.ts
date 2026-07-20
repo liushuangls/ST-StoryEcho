@@ -7,6 +7,10 @@ import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../src/vector/config';
 import { chatState, memory } from './fixtures';
 
+function sectionedSummary(value: string): string {
+  return `【已确认剧情】\n${value}\n【当前状态】\n无\n【未解决线索】\n无\n【角色主张与推测】\n无\n【已失效或否定事实】\n无`;
+}
+
 afterEach(() => {
   storyEchoTaskCoordinator.resetForTests();
   vi.unstubAllGlobals();
@@ -43,7 +47,7 @@ async function installContext(options: {
     entries: options.summaryCoveredThrough === undefined || options.summaryCoveredThrough < 0
       ? []
       : [{
-          text: '较早时，林雨开始保管银色钥匙。',
+          text: sectionedSummary('较早时，林雨开始保管银色钥匙。'),
           sourceStartMessageId: 0,
           sourceEndMessageId: options.summaryCoveredThrough,
           sourceHash: 'summary-source',
@@ -218,21 +222,21 @@ describe('StoryEcho request ordering', () => {
     stored.stageSummary = {
       entries: [
         {
-          text: '第一阶段',
+          text: sectionedSummary('第一阶段'),
           sourceStartMessageId: 0,
           sourceEndMessageId: 0,
           sourceHash: 'summary-1',
           updatedAt: '2026-01-01T00:00:00.000Z',
         },
         {
-          text: '第二阶段',
+          text: sectionedSummary('第二阶段'),
           sourceStartMessageId: 1,
           sourceEndMessageId: 1,
           sourceHash: 'summary-2',
           updatedAt: '2026-01-02T00:00:00.000Z',
         },
         {
-          text: '第三阶段',
+          text: sectionedSummary('第三阶段'),
           sourceStartMessageId: 2,
           sourceEndMessageId: 2,
           sourceHash: 'summary-3',
@@ -254,5 +258,71 @@ describe('StoryEcho request ordering', () => {
     expect(summaries[0]?.mes).toContain('第二阶段');
     expect(summaries[1]?.mes).toContain('第三阶段');
     expect(summaries.map((message) => message.mes)).not.toContain(expect.stringContaining('第一阶段'));
+  });
+
+  it('excludes inferred memories and summary hypotheses from strict fact verification', async () => {
+    const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
+    const stored = context.chatMetadata[MODULE_ID];
+    stored.memories[0]!.truthStatus = 'inferred';
+    stored.stageSummary.entries[0]!.text = [
+      '【已确认剧情】',
+      '众人在院中喝水。',
+      '【当前状态】',
+      '无',
+      '【未解决线索】',
+      '无',
+      '【角色主张与推测】',
+      '福尔摩斯猜测托马斯持有银色钥匙。',
+      '【已失效或否定事实】',
+      '无',
+    ].join('\n');
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(promptChat.some(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'recall',
+    )).toBe(false);
+    const injected = promptChat.map((message) => message.mes).join('\n');
+    expect(injected).not.toContain('托马斯');
+    expect(context.chatMetadata[MODULE_ID].lastInspection?.candidateMemoryIds).toEqual([]);
+  });
+
+  it('isolates an unsupported legacy name from recall, disambiguation, and current-state injection', async () => {
+    const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
+    const stored = context.chatMetadata[MODULE_ID];
+    const source = { startMessageId: 3, endMessageId: 4, sourceHash: 'phantom-source' };
+    stored.memories = [memory({
+      source,
+      sourceMessageIds: [3, 4],
+      sourceHistory: [
+        { startMessageId: 1, endMessageId: 2, sourceHash: 'older-phantom' },
+        source,
+      ],
+      event: '托马斯转移到钟楼。',
+      entities: ['托马斯'],
+      aliases: [],
+      scene: { participants: ['托马斯'] },
+      stateChanges: [{ entity: '托马斯', attribute: '位置', after: '钟楼' }],
+      knownBy: ['托马斯'],
+      retrievalText: '托马斯当前位于钟楼。',
+      injectionText: '托马斯当前位于钟楼。',
+      truthStatus: 'confirmed',
+    })];
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    const injected = promptChat.map((message) => message.mes).join('\n');
+    expect(injected).not.toContain('托马斯');
+    expect(promptChat.some(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'recall',
+    )).toBe(false);
+    expect(promptChat.some(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'state',
+    )).toBe(false);
+    expect(context.chatMetadata[MODULE_ID].debugTraces.some(
+      (trace) => trace.message.includes('已隔离缺少源楼层证据的旧版记忆'),
+    )).toBe(true);
   });
 });

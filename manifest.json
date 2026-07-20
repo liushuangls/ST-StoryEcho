@@ -7,7 +7,7 @@
   "js": "dist/index.js",
   "css": "style.css",
   "author": "liushuang",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "generate_interceptor": "storyEchoGenerateInterceptor",
   "hooks": {
     "activate": "onActivate"

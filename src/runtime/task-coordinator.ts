@@ -32,6 +32,19 @@ interface QueuedTask<T> {
 
 const DEFAULT_FOREGROUND_LEASE_TIMEOUT_MS = 10 * 60 * 1_000;
 
+export class BackgroundYieldForForegroundError extends Error {
+  constructor() {
+    super('前台生成已排队，后台任务在安全重试边界让行。');
+    this.name = 'BackgroundYieldForForegroundError';
+  }
+}
+
+export function isBackgroundYieldForForegroundError(
+  error: unknown,
+): error is BackgroundYieldForForegroundError {
+  return error instanceof BackgroundYieldForForegroundError;
+}
+
 /**
  * Serializes all StoryEcho work that can call an LLM or mutate chat memory.
  * A foreground prompt-preparation task keeps a lease after the interceptor
@@ -104,6 +117,10 @@ export class StoryEchoTaskCoordinator {
       lastQueueWaitMs: this.lastQueueWaitMs,
       maximumQueueWaitMs: this.maximumQueueWaitMs,
     };
+  }
+
+  shouldYieldBackgroundToForeground(): boolean {
+    return this.running?.kind === 'background' && this.queues.foreground.length > 0;
   }
 
   /** Test-only cleanup for the singleton between isolated Vitest cases. */

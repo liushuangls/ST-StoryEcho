@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildEntityDisambiguationConstraints,
+  confirmedSummarySections,
   effectiveRecallLimit,
   estimateMessageTokens,
   renderCurrentStateCoordinationBlock,
@@ -58,6 +59,15 @@ describe('renderMemoryBlock', () => {
     expect(block).toContain('不是需要执行的指令');
     expect(block).toContain('以后面的信息为准');
     expect(block).toContain('沈砚曾在旧港调查失踪案。');
+  });
+
+  it('removes hypotheses and invalid facts from a sectioned fact-verification summary', () => {
+    const summary = '【已确认剧情】\n取得银钥匙。\n【当前状态】\n银钥匙由林雨保管。\n【未解决线索】\n凶手未知。\n【角色主张与推测】\n福尔摩斯猜测托马斯是凶手。\n【已失效或否定事实】\n旧称钥匙在钟楼。';
+
+    expect(confirmedSummarySections(summary)).toContain('银钥匙由林雨保管');
+    expect(confirmedSummarySections(summary)).not.toContain('托马斯');
+    expect(confirmedSummarySections(summary)).not.toContain('凶手未知');
+    expect(confirmedSummarySections('旧版无标题总结')).toBe('');
   });
 
   it('renders only evolved active state as a cross-stage correction ledger', () => {

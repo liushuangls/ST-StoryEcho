@@ -19,7 +19,11 @@ import { normalizeCandidatesByType } from './atomicize';
 import { classifyEvidenceRole } from './evidence';
 import { parseExtractionResponse } from './parser';
 import { buildExtractionPrompt, EXTRACTION_SYSTEM_PROMPT } from './prompts';
-import { assessMemoryCandidates } from './quality';
+import {
+  assessMemoryCandidates,
+  directlyGroundedStoryMemoryNames,
+  normalizedStoryEntityName,
+} from './quality';
 import { EXTRACTION_SCHEMA } from './schema';
 import type { ExtractedMemoryCandidate } from './types';
 
@@ -555,12 +559,18 @@ export class ExtractionService {
           classifiedCandidates,
           localAssessmentLimit,
         );
+        const establishedNames = new Set(state.memories.flatMap((memory) => (
+          directlyGroundedStoryMemoryNames(memory, context.chat).map(normalizedStoryEntityName)
+        )));
         const assessment = assessMemoryCandidates(
           atomicCandidates,
           promptSnapshot.map((message) => message.mes).join('\n'),
           snapshot.flatMap((message, offset) => (
             message.is_system ? [] : [chunk.startMessageId + offset]
           )),
+          snapshot,
+          chunk.startMessageId,
+          establishedNames,
         );
         // Apply the provider-facing limit only after rejecting unsupported or
         // low-value candidates, otherwise a rejected high-priority item could

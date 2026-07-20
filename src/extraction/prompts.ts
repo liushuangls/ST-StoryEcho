@@ -31,6 +31,8 @@ export const EXTRACTION_SYSTEM_PROMPT = `你是一个严格的长篇角色扮演
 19. 问句、玩笑、试探和AI对用户身份的猜测不是稳定事实；只有本人明确确认、可靠剧情证据或后续明确纠正后才能标为confirmed。AI关于自身厂商、训练时间、系统时间能力等脱离角色剧情的自我说明通常不提取。
 20. 用户明确纠正当前年份、地点、身份或其他持续状态时要提取新值，并在before有直接依据时写出旧值；不要把被纠正的AI猜测当作同等权威事实。
 21. history_messages中的name只是SillyTavern界面说话者标签，不是剧情身份的证据。除非消息正文明确自我介绍或剧情直接确认，不得把界面用户名写进人物身份、knownBy或稳定状态。
+22. 候选中的每个具体人物专名和编号都必须能在其sourceMessageIds对应的消息正文中找到直接依据；不得用reference_context给匿名人物补姓名。正文只写“男子”“列车长”时，禁止擅自补成“托马斯”等专名。
+23. Assistant的推测、推断、假设、怀疑和开放式反问即使语气肯定也不能标为confirmed；只有可见行动、直接观察、明确确认或已经发生的剧情转移才是confirmed。推断若确实影响后续行动可标为inferred，否则不输出。
 
 根对象必须且只能包含episodes、stateFacts、relationships、commitments、revelations、clues六个数组：剧情/冲突放episodes；独立状态槽放stateFacts；人物关系边放relationships；承诺任务生命周期放commitments；完整秘密命题放revelations；证物及其直接含义放clues。truthStatus只能是confirmed、claimed、inferred、uncertain。
 

@@ -16,6 +16,13 @@ import {
 
 const MAX_SUMMARY_SOURCE_CHARACTERS = 32_000;
 const MAX_STORED_SUMMARY_CHARACTERS = 64_000;
+export const REQUIRED_SUMMARY_HEADINGS = [
+  '【已确认剧情】',
+  '【当前状态】',
+  '【未解决线索】',
+  '【角色主张与推测】',
+  '【已失效或否定事实】',
+] as const;
 
 export interface StageSummaryProgress {
   startMessageId: number;
@@ -64,6 +71,7 @@ export function normalizeSummary(
   raw: string,
   sourceMessages: TavernChatMessage[] = [],
   userUiPersona = '',
+  requireSections = false,
 ): string {
   const withoutFence = raw
     .trim()
@@ -77,6 +85,16 @@ export function normalizeSummary(
     .trim();
   if (!withoutWrapper) {
     throw new Error('阶段总结模型返回了空内容。');
+  }
+  if (requireSections) {
+    let previousIndex = -1;
+    for (const heading of REQUIRED_SUMMARY_HEADINGS) {
+      const index = withoutWrapper.indexOf(heading);
+      if (index < 0 || index <= previousIndex) {
+        throw new Error(`阶段总结缺少或打乱分级标题：${heading}`);
+      }
+      previousIndex = index;
+    }
   }
   const sourceText = sourceMessages.map((message) => storyContent(message)).join('\n');
   const persona = userUiPersona.trim();
@@ -208,17 +226,27 @@ export class StageSummaryService {
           ),
           maxTokens: settings.summary.maxTokens,
         });
-        const text = normalizeSummary(raw, snapshot, identity.userUiPersona);
-        // Read the live chat again instead of trusting the context object
-        // captured before the LLM call. SillyTavern can replace the chat array
-        // when a message is edited or a branch is switched while generation is
-        // in flight.
+        // Detect a branch/edit before accepting even the summary format, so a
+        // stale request is always reported and discarded for the right cause.
         const currentChat = getContext().chat;
         const currentHash = await sha256(sourcePayload(
           currentChat.slice(chunk.startMessageId, chunk.endMessageId + 1),
           chunk.startMessageId,
         ));
         if (currentHash !== snapshotHash) {
+          throw new Error('阶段总结期间源消息发生变化，已丢弃本次结果。');
+        }
+        const text = normalizeSummary(raw, snapshot, identity.userUiPersona, true);
+        // Read the live chat again instead of trusting the context object
+        // captured before the LLM call. SillyTavern can replace the chat array
+        // when a message is edited or a branch is switched while generation is
+        // in flight.
+        const commitChat = getContext().chat;
+        const commitHash = await sha256(sourcePayload(
+          commitChat.slice(chunk.startMessageId, chunk.endMessageId + 1),
+          chunk.startMessageId,
+        ));
+        if (commitHash !== snapshotHash) {
           throw new Error('阶段总结期间源消息发生变化，已丢弃本次结果。');
         }
 
