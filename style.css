@@ -555,6 +555,59 @@
   margin-bottom: 0.75rem;
 }
 
+#story-echo-settings .story-echo-skeleton-summary {
+  align-items: flex-start;
+  margin-bottom: 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+#story-echo-settings .story-echo-skeleton-summary::-webkit-details-marker {
+  display: none;
+}
+
+#story-echo-settings .story-echo-skeleton-summary::marker {
+  content: '';
+}
+
+#story-echo-settings .story-echo-skeleton-summary-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.2rem;
+}
+
+#story-echo-settings .story-echo-skeleton-toggle-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-skeleton-toggle-expanded {
+  display: none;
+}
+
+#story-echo-settings .story-echo-skeleton-chevron {
+  transition: transform 140ms ease;
+}
+
+#story-echo-settings .story-echo-skeleton-editor[open] .story-echo-skeleton-toggle-collapsed {
+  display: none;
+}
+
+#story-echo-settings .story-echo-skeleton-editor[open] .story-echo-skeleton-toggle-expanded {
+  display: inline;
+}
+
+#story-echo-settings .story-echo-skeleton-editor[open] .story-echo-skeleton-chevron {
+  transform: rotate(90deg);
+}
+
+#story-echo-settings .story-echo-skeleton-body {
+  padding-top: 0.75rem;
+}
+
 #story-echo-settings .story-echo-summary-editor-range,
 #story-echo-settings .story-echo-summary-manual-hint {
   margin-top: 0.15rem;
@@ -1156,6 +1209,12 @@
   #story-echo-settings .story-echo-summary-editor-heading,
   #story-echo-settings .story-echo-summary-manager-heading {
     flex-direction: column;
+  }
+
+  #story-echo-settings .story-echo-skeleton-summary-hint {
+    align-items: flex-start;
+    max-width: 100%;
+    text-align: left;
   }
 
   #story-echo-settings .story-echo-token-story-grid {

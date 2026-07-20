@@ -2585,7 +2585,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 8;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.0";
+var EXTENSION_VERSION = "0.20.1";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -10395,30 +10395,39 @@ function sourceText2(entry) {
 function stageSummaryManagerTemplate() {
   return `
     <div class="story-echo-summary-manager">
-      <div class="story-echo-summary-editor story-echo-skeleton-editor">
-        <div class="story-echo-summary-editor-heading">
+      <details id="story-echo-skeleton-details" class="story-echo-summary-editor story-echo-skeleton-editor">
+        <summary class="story-echo-summary-editor-heading story-echo-skeleton-summary">
           <div>
             <strong>\u5168\u5C40\u5267\u60C5\u9AA8\u67B6</strong>
             <div id="story-echo-skeleton-status" class="story-echo-summary-editor-range">\u8FBE\u5230\u5F52\u6863\u6761\u4EF6\u540E\u81EA\u52A8\u751F\u6210</div>
           </div>
-          <span class="story-echo-summary-manual-hint">\u53EF\u7F16\u8F91\u3001\u4E0D\u53EF\u5220\u9664\uFF1B\u4EBA\u5DE5\u4FEE\u6539\u4F1A\u6210\u4E3A\u540E\u7EED\u66F4\u65B0\u57FA\u7EBF</span>
+          <span class="story-echo-summary-manual-hint story-echo-skeleton-summary-hint">
+            <span>\u53EF\u7F16\u8F91\u3001\u4E0D\u53EF\u5220\u9664\uFF1B\u4EBA\u5DE5\u4FEE\u6539\u4F1A\u6210\u4E3A\u540E\u7EED\u66F4\u65B0\u57FA\u7EBF</span>
+            <span class="story-echo-skeleton-toggle-copy">
+              <span class="story-echo-skeleton-toggle-collapsed">\u70B9\u51FB\u5C55\u5F00\u6B63\u6587</span>
+              <span class="story-echo-skeleton-toggle-expanded">\u70B9\u51FB\u6536\u8D77\u6B63\u6587</span>
+              <i class="fa-solid fa-chevron-right story-echo-skeleton-chevron" aria-hidden="true"></i>
+            </span>
+          </span>
+        </summary>
+        <div class="story-echo-skeleton-body">
+          <label class="story-echo-field">
+            <span>\u9AA8\u67B6\u6B63\u6587</span>
+            <textarea id="story-echo-skeleton-text" class="text_pole" rows="16" maxlength="96000" disabled placeholder="\u6700\u8FD1\u9636\u6BB5\u603B\u7ED3\u8D85\u8FC7 S \u6761\u540E\u81EA\u52A8\u751F\u6210"></textarea>
+          </label>
+          <p class="story-echo-hint">
+            \u65B0\u804A\u5929\u5728\u7B2C S+1 \u6761\u9636\u6BB5\u603B\u7ED3\u5F52\u6863\u65F6\u9996\u6B21\u751F\u6210\uFF1B\u5DF2\u6709\u957F\u804A\u5929\u6253\u5F00\u5E76\u7A33\u5B9A\u7EA6 3 \u79D2\u540E\u81EA\u52A8\u8865\u5EFA\u3002\u5E73\u65F6\u6BCF\u7D2F\u8BA1 3 \u6761\u5F85\u5F52\u6863\u603B\u7ED3\u6216\u7EA6 3000 Token \u66F4\u65B0\u4E00\u6B21\uFF1B\u66F4\u65B0\u6210\u529F\u524D\uFF0C\u5F85\u5408\u5E76\u603B\u7ED3\u4ECD\u4F1A\u968F\u8BF7\u6C42\u643A\u5E26\u3002\u7F16\u8F91\u65F6\u5FC5\u987B\u4FDD\u7559\u516D\u4E2A\u5206\u7EA7\u6807\u9898\uFF1B\u7A7A\u767D\u5185\u5BB9\u4E0D\u80FD\u4FDD\u5B58\uFF0C\u754C\u9762\u4E0D\u63D0\u4F9B\u5220\u9664\u64CD\u4F5C\u3002
+          </p>
+          <div class="story-echo-summary-editor-actions">
+            <button id="story-echo-skeleton-save" class="menu_button story-echo-action-primary" type="button" disabled>
+              <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u9AA8\u67B6\u4FEE\u6539</span>
+            </button>
+            <button id="story-echo-skeleton-update" class="menu_button" type="button">
+              <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>\u7ACB\u5373\u66F4\u65B0\u9AA8\u67B6</span>
+            </button>
+          </div>
         </div>
-        <label class="story-echo-field">
-          <span>\u9AA8\u67B6\u6B63\u6587</span>
-          <textarea id="story-echo-skeleton-text" class="text_pole" rows="16" maxlength="96000" disabled placeholder="\u6700\u8FD1\u9636\u6BB5\u603B\u7ED3\u8D85\u8FC7 S \u6761\u540E\u81EA\u52A8\u751F\u6210"></textarea>
-        </label>
-        <p class="story-echo-hint">
-          \u65B0\u804A\u5929\u5728\u7B2C S+1 \u6761\u9636\u6BB5\u603B\u7ED3\u5F52\u6863\u65F6\u9996\u6B21\u751F\u6210\uFF1B\u5DF2\u6709\u957F\u804A\u5929\u6253\u5F00\u5E76\u7A33\u5B9A\u7EA6 3 \u79D2\u540E\u81EA\u52A8\u8865\u5EFA\u3002\u5E73\u65F6\u6BCF\u7D2F\u8BA1 3 \u6761\u5F85\u5F52\u6863\u603B\u7ED3\u6216\u7EA6 3000 Token \u66F4\u65B0\u4E00\u6B21\uFF1B\u66F4\u65B0\u6210\u529F\u524D\uFF0C\u5F85\u5408\u5E76\u603B\u7ED3\u4ECD\u4F1A\u968F\u8BF7\u6C42\u643A\u5E26\u3002\u7F16\u8F91\u65F6\u5FC5\u987B\u4FDD\u7559\u516D\u4E2A\u5206\u7EA7\u6807\u9898\uFF1B\u7A7A\u767D\u5185\u5BB9\u4E0D\u80FD\u4FDD\u5B58\uFF0C\u754C\u9762\u4E0D\u63D0\u4F9B\u5220\u9664\u64CD\u4F5C\u3002
-        </p>
-        <div class="story-echo-summary-editor-actions">
-          <button id="story-echo-skeleton-save" class="menu_button story-echo-action-primary" type="button" disabled>
-            <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u9AA8\u67B6\u4FEE\u6539</span>
-          </button>
-          <button id="story-echo-skeleton-update" class="menu_button" type="button">
-            <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>\u7ACB\u5373\u66F4\u65B0\u9AA8\u67B6</span>
-          </button>
-        </div>
-      </div>
+      </details>
 
       <div class="story-echo-summary-manager-heading">
         <strong>\u5DF2\u751F\u6210\u7684\u9636\u6BB5\u603B\u7ED3</strong>

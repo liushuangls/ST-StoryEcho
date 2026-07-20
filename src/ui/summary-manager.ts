@@ -64,30 +64,39 @@ function sourceText(entry: StageSummaryEntry): string {
 export function stageSummaryManagerTemplate(): string {
   return `
     <div class="story-echo-summary-manager">
-      <div class="story-echo-summary-editor story-echo-skeleton-editor">
-        <div class="story-echo-summary-editor-heading">
+      <details id="story-echo-skeleton-details" class="story-echo-summary-editor story-echo-skeleton-editor">
+        <summary class="story-echo-summary-editor-heading story-echo-skeleton-summary">
           <div>
             <strong>全局剧情骨架</strong>
             <div id="story-echo-skeleton-status" class="story-echo-summary-editor-range">达到归档条件后自动生成</div>
           </div>
-          <span class="story-echo-summary-manual-hint">可编辑、不可删除；人工修改会成为后续更新基线</span>
+          <span class="story-echo-summary-manual-hint story-echo-skeleton-summary-hint">
+            <span>可编辑、不可删除；人工修改会成为后续更新基线</span>
+            <span class="story-echo-skeleton-toggle-copy">
+              <span class="story-echo-skeleton-toggle-collapsed">点击展开正文</span>
+              <span class="story-echo-skeleton-toggle-expanded">点击收起正文</span>
+              <i class="fa-solid fa-chevron-right story-echo-skeleton-chevron" aria-hidden="true"></i>
+            </span>
+          </span>
+        </summary>
+        <div class="story-echo-skeleton-body">
+          <label class="story-echo-field">
+            <span>骨架正文</span>
+            <textarea id="story-echo-skeleton-text" class="text_pole" rows="16" maxlength="96000" disabled placeholder="最近阶段总结超过 S 条后自动生成"></textarea>
+          </label>
+          <p class="story-echo-hint">
+            新聊天在第 S+1 条阶段总结归档时首次生成；已有长聊天打开并稳定约 3 秒后自动补建。平时每累计 3 条待归档总结或约 3000 Token 更新一次；更新成功前，待合并总结仍会随请求携带。编辑时必须保留六个分级标题；空白内容不能保存，界面不提供删除操作。
+          </p>
+          <div class="story-echo-summary-editor-actions">
+            <button id="story-echo-skeleton-save" class="menu_button story-echo-action-primary" type="button" disabled>
+              <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>保存骨架修改</span>
+            </button>
+            <button id="story-echo-skeleton-update" class="menu_button" type="button">
+              <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>立即更新骨架</span>
+            </button>
+          </div>
         </div>
-        <label class="story-echo-field">
-          <span>骨架正文</span>
-          <textarea id="story-echo-skeleton-text" class="text_pole" rows="16" maxlength="96000" disabled placeholder="最近阶段总结超过 S 条后自动生成"></textarea>
-        </label>
-        <p class="story-echo-hint">
-          新聊天在第 S+1 条阶段总结归档时首次生成；已有长聊天打开并稳定约 3 秒后自动补建。平时每累计 3 条待归档总结或约 3000 Token 更新一次；更新成功前，待合并总结仍会随请求携带。编辑时必须保留六个分级标题；空白内容不能保存，界面不提供删除操作。
-        </p>
-        <div class="story-echo-summary-editor-actions">
-          <button id="story-echo-skeleton-save" class="menu_button story-echo-action-primary" type="button" disabled>
-            <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>保存骨架修改</span>
-          </button>
-          <button id="story-echo-skeleton-update" class="menu_button" type="button">
-            <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>立即更新骨架</span>
-          </button>
-        </div>
-      </div>
+      </details>
 
       <div class="story-echo-summary-manager-heading">
         <strong>已生成的阶段总结</strong>

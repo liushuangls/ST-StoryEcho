@@ -53,6 +53,11 @@ describe('stage summary manager pagination and template', () => {
   it('renders an editable but non-deletable skeleton plus safe stage-summary controls', () => {
     const template = stageSummaryManagerTemplate();
 
+    expect(template).toContain('<details id="story-echo-skeleton-details"');
+    expect(template).not.toMatch(/<details[^>]*id="story-echo-skeleton-details"[^>]*\sopen(?:\s|=|>)/u);
+    expect(template).toContain('<summary class="story-echo-summary-editor-heading story-echo-skeleton-summary">');
+    expect(template).toContain('点击展开正文');
+    expect(template).toContain('点击收起正文');
     expect(template).toContain('id="story-echo-skeleton-text"');
     expect(template).toContain('id="story-echo-skeleton-save"');
     expect(template).toContain('id="story-echo-skeleton-update"');
