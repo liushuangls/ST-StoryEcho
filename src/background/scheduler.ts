@@ -262,10 +262,7 @@ export class BackgroundProcessingScheduler {
 
   private async processCurrentChat(): Promise<void> {
     const settings = this.settingsRepository.get();
-    if (
-      !settings.enabled ||
-      (!settings.extraction.automatic && !(settings.summary.enabled && settings.summary.automatic))
-    ) {
+    if (!settings.enabled) {
       return;
     }
 
@@ -276,6 +273,19 @@ export class BackgroundProcessingScheduler {
 
     let state = await this.memoryRepository.getOrCreate();
     if (!state) {
+      return;
+    }
+    if (!settings.memory.enabled) {
+      this.extractionCooldown = undefined;
+      this.verifiedPrefix = undefined;
+      if (this.historyRequiresReconcile) {
+        state = await stageSummaryService.reconcileHistory(state) ?? state;
+        this.historyRequiresReconcile = false;
+      }
+      if (state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
+        await stageSummaryService.processNextThrough(targetEndMessageId);
+      }
+      emitDiagnosticsUpdated();
       return;
     }
     if (
@@ -299,7 +309,7 @@ export class BackgroundProcessingScheduler {
       };
     }
 
-    if (settings.extraction.automatic && state.indexedThroughMessageId < targetEndMessageId) {
+    if (state.indexedThroughMessageId < targetEndMessageId) {
       const extractionRevision = this.historyRevision;
       const extractionStart = state.indexedThroughMessageId + 1;
       const cooldown = this.extractionCooldown;
@@ -365,11 +375,7 @@ export class BackgroundProcessingScheduler {
         logger.warn('后台同步待处理向量失败，将在后续回复重试。', error);
       }
     }
-    if (
-      settings.summary.enabled &&
-      settings.summary.automatic &&
-      state.stageSummary.coveredThroughMessageId < targetEndMessageId
-    ) {
+    if (state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
       await stageSummaryService.processNextThrough(targetEndMessageId);
     }
     emitDiagnosticsUpdated();

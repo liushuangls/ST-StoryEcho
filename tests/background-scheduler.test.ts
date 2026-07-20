@@ -68,8 +68,8 @@ describe('backgroundTargetMessageId', () => {
     ];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = true;
     settings.extraction.targetTurnsPerChunk = 2;
     settings.summary.enabled = true;
     settings.summary.automatic = true;
@@ -109,6 +109,51 @@ describe('backgroundTargetMessageId', () => {
     expect(summarize).toHaveBeenCalledWith(3);
   });
 
+  it('continues stage summaries without invoking the memory subsystem when memory is disabled', async () => {
+    const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.enabled = true;
+    settings.memory.enabled = false;
+    settings.recentWindow = { size: 1, unit: 'turns' };
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.indexedThroughMessageId = 1;
+    state.pendingVectorHashes = [123];
+    state.pendingVectorDeleteHashes = [456];
+    state.stageSummary.coveredThroughMessageId = -1;
+    const context = {
+      chat,
+      chatId: 'chat-id',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'chat-id',
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const reconcileExtraction = vi.spyOn(extractionService, 'reconcileHistory');
+    const extract = vi.spyOn(extractionService, 'processNextThroughVerifiedHistory');
+    const sync = vi.spyOn(extractionService, 'syncPendingVectors');
+    const reconcileSummary = vi.spyOn(stageSummaryService, 'reconcileHistory')
+      .mockResolvedValue(state);
+    const summarize = vi.spyOn(stageSummaryService, 'processNextThrough')
+      .mockImplementation(async (target) => {
+        state.stageSummary.coveredThroughMessageId = target;
+        return { state, updatedChunks: 1 };
+      });
+
+    await new BackgroundProcessingScheduler().runNow();
+
+    expect(reconcileSummary).toHaveBeenCalledOnce();
+    expect(summarize).toHaveBeenCalledWith(1);
+    expect(reconcileExtraction).not.toHaveBeenCalled();
+    expect(extract).not.toHaveBeenCalled();
+    expect(sync).not.toHaveBeenCalled();
+    expect(state.pendingVectorHashes).toEqual([123]);
+    expect(state.pendingVectorDeleteHashes).toEqual([456]);
+  });
+
   it('reuses an append-only verified prefix across background replies', async () => {
     const chat = [
       ...turn('u1', 'a1'),
@@ -117,8 +162,8 @@ describe('backgroundTargetMessageId', () => {
     ];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = true;
     settings.summary.enabled = false;
     const state = chatState([]);
     state.ownerChatId = 'chat-id';
@@ -161,8 +206,8 @@ describe('backgroundTargetMessageId', () => {
     ];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = true;
     settings.summary.enabled = false;
     const state = chatState([]);
     state.ownerChatId = 'chat-id';
@@ -208,8 +253,8 @@ describe('backgroundTargetMessageId', () => {
     const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = true;
     settings.summary.enabled = false;
     const state = chatState([]);
     state.ownerChatId = 'chat-id';
@@ -243,8 +288,8 @@ describe('backgroundTargetMessageId', () => {
     const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = false;
     settings.summary.enabled = true;
     settings.summary.automatic = true;
     const state = chatState([]);
@@ -281,8 +326,8 @@ describe('backgroundTargetMessageId', () => {
     const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = true;
     settings.summary.enabled = false;
     const state = chatState([]);
     state.ownerChatId = 'chat-id';
@@ -334,8 +379,8 @@ describe('backgroundTargetMessageId', () => {
     ];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = true;
     settings.summary.enabled = false;
     const state = chatState([]);
     state.ownerChatId = 'chat-id';
@@ -400,8 +445,8 @@ describe('backgroundTargetMessageId', () => {
     const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     settings.enabled = true;
+    settings.memory.enabled = true;
     settings.recentWindow = { size: 1, unit: 'turns' };
-    settings.extraction.automatic = true;
     settings.summary.enabled = false;
     const state = chatState([]);
     state.ownerChatId = 'chat-id';

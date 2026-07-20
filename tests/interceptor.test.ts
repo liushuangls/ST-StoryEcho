@@ -32,10 +32,9 @@ async function installContext(options: {
 }) {
   const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
   settings.enabled = true;
+  settings.memory.enabled = Boolean(options.withMemory);
   settings.debug = true;
   settings.recentWindow = { size: 1, unit: 'turns' };
-  settings.extraction.automatic = false;
-  settings.summary.automatic = false;
   settings.recall.queryMode = 'local';
   settings.recall.maxEvents = options.withMemory ? 1 : 0;
   Object.assign(settings, options.settings ?? {});
@@ -50,13 +49,13 @@ async function installContext(options: {
           text: sectionedSummary('较早时，林雨开始保管银色钥匙。'),
           sourceStartMessageId: 0,
           sourceEndMessageId: options.summaryCoveredThrough,
-          sourceHash: 'summary-source',
+          sourceHash: '',
           updatedAt: '2026-01-01T00:00:00.000Z',
         }],
     coveredThroughMessageId: options.summaryCoveredThrough ?? 2,
     coveredThroughHash: options.summaryCoveredThrough === undefined || options.summaryCoveredThrough < 0
       ? ''
-      : 'summary-source',
+      : '',
   };
   const context = {
     chat: structuredClone(sourceChat),
@@ -160,6 +159,30 @@ describe('StoryEcho request ordering', () => {
     )).toBe(false);
   });
 
+  it('preserves existing memories but performs no retrieval work in summary-only mode', async () => {
+    const { context, settings, state } = await installContext({
+      withMemory: true,
+      summaryCoveredThrough: 2,
+    });
+    settings.memory.enabled = false;
+    state.pendingVectorHashes = [123];
+    const promptChat = structuredClone(sourceChat);
+    const fetchMock = vi.mocked(globalThis.fetch);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(context.generateRaw).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.chatMetadata[MODULE_ID].memories).toHaveLength(1);
+    expect(context.chatMetadata[MODULE_ID].pendingVectorHashes).toEqual([123]);
+    expect(promptChat.some(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
+    )).toBe(true);
+    expect(promptChat.some(
+      (message) => ['recall', 'state'].includes(String(message.extra?.['story_echo_injection_kind'])),
+    )).toBe(false);
+  });
+
   it('keeps every unsummarized message when the summary cursor is behind', async () => {
     const { context } = await installContext({ withMemory: false, summaryCoveredThrough: -1 });
     const promptChat = structuredClone(sourceChat);
@@ -177,9 +200,8 @@ describe('StoryEcho request ordering', () => {
       withMemory: false,
       summaryCoveredThrough: -1,
     });
-    settings.extraction.automatic = true;
+    settings.memory.enabled = true;
     settings.extraction.targetTurnsPerChunk = 5;
-    settings.summary.enabled = false;
     state.indexedThroughMessageId = -1;
     state.indexedThroughHash = '';
     state.indexedPrefixHash = '';
@@ -197,10 +219,8 @@ describe('StoryEcho request ordering', () => {
       withMemory: false,
       summaryCoveredThrough: -1,
     });
-    settings.extraction.automatic = true;
+    settings.memory.enabled = true;
     settings.extraction.targetTurnsPerChunk = 1;
-    settings.summary.enabled = true;
-    settings.summary.automatic = true;
     settings.summary.targetTurnsPerUpdate = 1;
     state.indexedThroughMessageId = -1;
     state.indexedThroughHash = '';
@@ -248,26 +268,26 @@ describe('StoryEcho request ordering', () => {
           text: sectionedSummary('第一阶段'),
           sourceStartMessageId: 0,
           sourceEndMessageId: 0,
-          sourceHash: 'summary-1',
+          sourceHash: '',
           updatedAt: '2026-01-01T00:00:00.000Z',
         },
         {
           text: sectionedSummary('第二阶段'),
           sourceStartMessageId: 1,
           sourceEndMessageId: 1,
-          sourceHash: 'summary-2',
+          sourceHash: '',
           updatedAt: '2026-01-02T00:00:00.000Z',
         },
         {
           text: sectionedSummary('第三阶段'),
           sourceStartMessageId: 2,
           sourceEndMessageId: 2,
-          sourceHash: 'summary-3',
+          sourceHash: '',
           updatedAt: '2026-01-03T00:00:00.000Z',
         },
       ],
       coveredThroughMessageId: 2,
-      coveredThroughHash: 'summary-3',
+      coveredThroughHash: '',
       updatedAt: '2026-01-03T00:00:00.000Z',
     };
     const promptChat = structuredClone(sourceChat);

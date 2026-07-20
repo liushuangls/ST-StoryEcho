@@ -57,6 +57,38 @@ function installContext(
 }
 
 describe('independent stage summaries', () => {
+  it('advances independently of the extraction cursor in summary-only mode', async () => {
+    const generateRaw = vi.fn(async () => sectionedSummary('第一轮已经完成。'));
+    const installed = installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+    ], generateRaw, 1);
+    installed.settings.memory.enabled = false;
+    installed.state.indexedThroughMessageId = -1;
+
+    const result = await new StageSummaryService().processNextThrough(1);
+
+    expect(result.updatedChunks).toBe(1);
+    expect(result.state?.stageSummary.coveredThroughMessageId).toBe(1);
+    expect(result.state?.indexedThroughMessageId).toBe(-1);
+  });
+
+  it('waits for extraction coverage when the memory subsystem is enabled', async () => {
+    const generateRaw = vi.fn(async () => sectionedSummary('不应生成。'));
+    const installed = installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+    ], generateRaw, 1);
+    installed.settings.memory.enabled = true;
+    installed.state.indexedThroughMessageId = -1;
+
+    const result = await new StageSummaryService().processNextThrough(1);
+
+    expect(result.updatedChunks).toBe(0);
+    expect(result.state?.stageSummary.coveredThroughMessageId).toBe(-1);
+    expect(generateRaw).not.toHaveBeenCalled();
+  });
+
   it('builds an independent batch prompt with exact message ids', () => {
     const prompt = buildStageSummaryPrompt(
       [

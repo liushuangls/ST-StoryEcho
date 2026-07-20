@@ -47,7 +47,9 @@ const memoryRepository = new MemoryRepository();
 const vectorStore = new SillyTavernVectorStore();
 const memoryMetadataManager = new MemoryMetadataManager(
   memoryRepository,
-  async (state) => extractionService.syncPendingVectors(state),
+  async (state) => settingsRepository.get().memory.enabled
+    ? extractionService.syncPendingVectors(state)
+    : state,
   async () => {
     const requestedChatId = getCurrentChatId();
     return storyEchoTaskCoordinator.enqueueManual('重建自动剧情元数据', async () => {
@@ -55,6 +57,9 @@ const memoryMetadataManager = new MemoryMetadataManager(
         throw new Error('等待重建期间聊天已切换，已取消任务。');
       }
       const settings = settingsRepository.get();
+      if (!settings.memory.enabled) {
+        throw new Error('请先启用“剧情记忆与召回”再重建自动元数据。');
+      }
       const chat = getContext().chat;
       const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
       if (!window || window.retainedStartIndex <= 0) {
@@ -93,12 +98,12 @@ function panelTemplate(): HTMLElement {
       <div class="inline-drawer-content story-echo-panel-body">
         <div class="story-echo-switch-row story-echo-switch-primary">
           <div class="story-echo-switch-copy">
-            <span class="story-echo-switch-title">启用滑动窗口与历史剧情召回</span>
-            <span class="story-echo-switch-description">关闭后不总结、不裁剪上下文、不抽取历史，也不注入剧情记忆</span>
+            <span class="story-echo-switch-title">启用 StoryEcho 上下文管理</span>
+            <span class="story-echo-switch-description">使用 LLM 维护最小原文窗口与历史阶段总结</span>
           </div>
           <div class="story-echo-toggle">
             <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
-            <label class="story-echo-toggle-label" for="story-echo-enabled" aria-label="启用滑动窗口与历史剧情召回"></label>
+            <label class="story-echo-toggle-label" for="story-echo-enabled" aria-label="启用 StoryEcho 上下文管理"></label>
           </div>
         </div>
 
@@ -107,8 +112,8 @@ function panelTemplate(): HTMLElement {
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-sliders" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">上下文与召回</span>
-                <span class="story-echo-section-summary-description">最小原文、召回、查询与自动抽取</span>
+                <span class="story-echo-section-summary-title">上下文窗口</span>
+                <span class="story-echo-section-summary-description">最小原文与计数方式</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -125,55 +130,6 @@ function panelTemplate(): HTMLElement {
               <option value="messages">消息条数</option>
             </select>
           </label>
-          <label class="story-echo-field">
-            <span>最多召回事件</span>
-            <input id="story-echo-max-events" class="text_pole" type="number" min="0" max="50" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>召回 Token预算</span>
-            <input id="story-echo-max-tokens" class="text_pole" type="number" min="0" max="32000" step="50">
-          </label>
-          <label class="story-echo-field">
-            <span>向量相关性阈值</span>
-            <input id="story-echo-threshold" class="text_pole" type="number" min="0" max="1" step="0.01">
-          </label>
-          <label class="story-echo-field">
-            <span>检索查询构造</span>
-            <select id="story-echo-query-mode" class="text_pole">
-              <option value="llm">LLM上下文改写（推荐）</option>
-              <option value="local">本地快速规则</option>
-            </select>
-          </label>
-          <div class="story-echo-switch-row story-echo-field-wide">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">自动补充历史索引</span>
-              <span class="story-echo-switch-description">窗口外满配置轮数后，AI回复完成再在后台抽取；未处理原文继续保留</span>
-            </div>
-            <div class="story-echo-toggle">
-              <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-auto-extract" aria-label="自动补充历史索引"></label>
-            </div>
-          </div>
-          <label class="story-echo-field">
-            <span>每批抽取轮数</span>
-            <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
-          </label>
-          <label class="story-echo-field story-echo-field-wide">
-            <span>抽取参考上下文</span>
-            <select id="story-echo-reference-mode" class="text_pole">
-              <option value="character-world-info">角色卡精简信息 + 批次命中世界书（推荐）</option>
-              <option value="character">仅角色卡精简信息</option>
-              <option value="off">关闭</option>
-            </select>
-          </label>
-          <label class="story-echo-field">
-            <span>参考上下文总预算</span>
-            <input id="story-echo-reference-tokens" class="text_pole" type="number" min="256" max="16000" step="100">
-          </label>
-          <label class="story-echo-field">
-            <span>世界书最多条目</span>
-            <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
-          </label>
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">调试模式</span>
@@ -185,10 +141,77 @@ function panelTemplate(): HTMLElement {
             </div>
           </div>
           <p class="story-echo-hint story-echo-field-wide">
-            LLM改写会在每次需要召回时先生成一句检索查询；失败时自动回退本地双路查询。
-            “最多召回事件”是普通问题的上限，设为0会跳过查询与召回；明确要求分别核对多个实体时，会在Token预算内按实体覆盖并临时扩展到最多8条。低分候选仍会提前过滤。
-            抽取参考默认最多 3000 Token，只读取角色描述、性格、场景、Persona 与该历史批次直接命中的世界书；不会传入预设、system、jailbreak、示例对话或欢迎语。
+            最近窗口是最小保留量；阶段总结尚未覆盖的原文会继续保留，不会为了满足窗口大小而丢失历史。
           </p>
+          </div>
+        </details>
+
+        <div class="story-echo-switch-row story-echo-switch-primary">
+          <div class="story-echo-switch-copy">
+            <span class="story-echo-switch-title">启用剧情记忆与召回</span>
+            <span class="story-echo-switch-description">自动提取窗口外剧情、生成向量，并在需要时动态召回注入</span>
+          </div>
+          <div class="story-echo-toggle">
+            <input id="story-echo-memory-enabled" class="story-echo-toggle-input" type="checkbox">
+            <label class="story-echo-toggle-label" for="story-echo-memory-enabled" aria-label="启用剧情记忆与召回"></label>
+          </div>
+        </div>
+
+        <details class="story-echo-section story-echo-collapsible" data-story-echo-memory-only>
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-brain" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">剧情记忆参数</span>
+                <span class="story-echo-section-summary-description">自动抽取、查询与动态注入</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
+            <label class="story-echo-field">
+              <span>最多召回事件</span>
+              <input id="story-echo-max-events" class="text_pole" type="number" min="0" max="50" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>召回 Token预算</span>
+              <input id="story-echo-max-tokens" class="text_pole" type="number" min="0" max="32000" step="50">
+            </label>
+            <label class="story-echo-field">
+              <span>向量相关性阈值</span>
+              <input id="story-echo-threshold" class="text_pole" type="number" min="0" max="1" step="0.01">
+            </label>
+            <label class="story-echo-field">
+              <span>检索查询构造</span>
+              <select id="story-echo-query-mode" class="text_pole">
+                <option value="llm">LLM上下文改写（推荐）</option>
+                <option value="local">本地快速规则</option>
+              </select>
+            </label>
+            <label class="story-echo-field">
+              <span>每批抽取轮数</span>
+              <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>抽取参考上下文</span>
+              <select id="story-echo-reference-mode" class="text_pole">
+                <option value="character-world-info">角色卡精简信息 + 批次命中世界书（推荐）</option>
+                <option value="character">仅角色卡精简信息</option>
+                <option value="off">关闭</option>
+              </select>
+            </label>
+            <label class="story-echo-field">
+              <span>参考上下文总预算</span>
+              <input id="story-echo-reference-tokens" class="text_pole" type="number" min="256" max="16000" step="100">
+            </label>
+            <label class="story-echo-field">
+              <span>世界书最多条目</span>
+              <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
+            </label>
+            <p class="story-echo-hint story-echo-field-wide">
+              开启后自动完成抽取、整理、向量同步、检索与请求级注入。LLM查询改写失败时回退本地规则；已有元数据在关闭后仍会保留。
+              抽取参考只读取角色精简信息和该历史批次直接命中的世界书，不传入预设、system、jailbreak、示例对话或欢迎语。
+            </p>
           </div>
         </details>
 
@@ -204,26 +227,6 @@ function panelTemplate(): HTMLElement {
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
           </summary>
           <div class="story-echo-grid story-echo-section-body">
-            <div class="story-echo-switch-row story-echo-field-wide">
-              <div class="story-echo-switch-copy">
-                <span class="story-echo-switch-title">启用分批阶段总结</span>
-                <span class="story-echo-switch-description">窗口外每满一批就新增一条独立总结</span>
-              </div>
-              <div class="story-echo-toggle">
-                <input id="story-echo-summary-enabled" class="story-echo-toggle-input" type="checkbox">
-                <label class="story-echo-toggle-label" for="story-echo-summary-enabled" aria-label="启用分批阶段总结"></label>
-              </div>
-            </div>
-            <div class="story-echo-switch-row story-echo-field-wide">
-              <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">自动更新阶段总结</span>
-              <span class="story-echo-switch-description">达到一批后在AI回复完成后后台更新；生成前不等待，未总结原文继续保留</span>
-              </div>
-              <div class="story-echo-toggle">
-                <input id="story-echo-summary-automatic" class="story-echo-toggle-input" type="checkbox">
-                <label class="story-echo-toggle-label" for="story-echo-summary-automatic" aria-label="自动更新阶段总结"></label>
-              </div>
-            </div>
             <label class="story-echo-field">
               <span>总结间隔 N（用户 + AI 轮次）</span>
               <input id="story-echo-summary-turns" class="text_pole" type="number" min="1" max="100" step="1">
@@ -237,7 +240,7 @@ function panelTemplate(): HTMLElement {
               <input id="story-echo-summary-max-tokens" class="text_pole" type="number" min="128" max="8192" step="128">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文；每次请求只带最近 S 条总结。变更过的跨阶段状态会形成有界校正块；总结和校正位于近期原文前，动态召回位于当前 User 前，均不写入聊天记录。
+              总开关开启后自动维护阶段总结。最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文；每次请求只带最近 S 条总结。
             </p>
           </div>
         </details>
@@ -328,7 +331,7 @@ function panelTemplate(): HTMLElement {
           </div>
         </details>
 
-        <details class="story-echo-section story-echo-collapsible">
+        <details class="story-echo-section story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-database" aria-hidden="true"></i>
@@ -354,7 +357,7 @@ function panelTemplate(): HTMLElement {
           </div>
         </details>
 
-        <details id="story-echo-volcengine-embedding" class="story-echo-subsection story-echo-collapsible">
+        <details id="story-echo-volcengine-embedding" class="story-echo-subsection story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-fire" aria-hidden="true"></i>
@@ -399,7 +402,7 @@ function panelTemplate(): HTMLElement {
           </div>
         </details>
 
-        <details id="story-echo-custom-embedding" class="story-echo-subsection story-echo-collapsible">
+        <details id="story-echo-custom-embedding" class="story-echo-subsection story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-vector-square" aria-hidden="true"></i>
@@ -537,19 +540,28 @@ function syncVisibility(panel: HTMLElement, settings: StoryEchoSettings): void {
   const custom = element<HTMLElement>(panel, '#story-echo-custom-provider');
   custom.hidden = settings.llm.provider !== 'openai-compatible';
 
+  for (const memoryOnly of panel.querySelectorAll<HTMLElement>('[data-story-echo-memory-only]')) {
+    memoryOnly.hidden = !settings.memory.enabled;
+  }
+
   const customEmbedding = element<HTMLElement>(panel, '#story-echo-custom-embedding');
-  customEmbedding.hidden = settings.vector.source !== 'openai-compatible';
+  customEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== 'openai-compatible';
 
   const volcengineEmbedding = element<HTMLElement>(panel, '#story-echo-volcengine-embedding');
-  volcengineEmbedding.hidden = settings.vector.source !== 'volcengine-multimodal';
+  volcengineEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== 'volcengine-multimodal';
+
+  const rebuildMemories = element<HTMLButtonElement>(panel, '#story-echo-memory-rebuild');
+  rebuildMemories.disabled = !settings.memory.enabled;
+  rebuildMemories.title = settings.memory.enabled
+    ? ''
+    : '启用“剧情记忆与召回”后才能重建自动元数据';
 }
 
 function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-enabled').checked = settings.enabled;
+  element<HTMLInputElement>(panel, '#story-echo-memory-enabled').checked = settings.memory.enabled;
   element<HTMLInputElement>(panel, '#story-echo-window-size').value = String(settings.recentWindow.size);
   element<HTMLSelectElement>(panel, '#story-echo-window-unit').value = settings.recentWindow.unit;
-  element<HTMLInputElement>(panel, '#story-echo-summary-enabled').checked = settings.summary.enabled;
-  element<HTMLInputElement>(panel, '#story-echo-summary-automatic').checked = settings.summary.automatic;
   element<HTMLInputElement>(panel, '#story-echo-summary-turns').value =
     String(settings.summary.targetTurnsPerUpdate);
   element<HTMLInputElement>(panel, '#story-echo-summary-window').value =
@@ -561,7 +573,6 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-threshold').value = String(settings.recall.scoreThreshold);
   element<HTMLSelectElement>(panel, '#story-echo-query-mode').value = settings.recall.queryMode;
   element<HTMLSelectElement>(panel, '#story-echo-provider').value = settings.llm.provider;
-  element<HTMLInputElement>(panel, '#story-echo-auto-extract').checked = settings.extraction.automatic;
   element<HTMLInputElement>(panel, '#story-echo-extraction-turns').value =
     String(settings.extraction.targetTurnsPerChunk);
   element<HTMLSelectElement>(panel, '#story-echo-reference-mode').value =
@@ -606,6 +617,14 @@ function bindSettings(panel: HTMLElement): void {
     scheduleDerivedUpdate();
   });
 
+  element<HTMLInputElement>(panel, '#story-echo-memory-enabled').addEventListener('change', (event) => {
+    const settings = settingsRepository.update((current) => {
+      current.memory.enabled = (event.currentTarget as HTMLInputElement).checked;
+    });
+    syncVisibility(panel, settings);
+    scheduleDerivedUpdate();
+  });
+
   element<HTMLInputElement>(panel, '#story-echo-window-size').addEventListener('input', (event) => {
     settingsRepository.update((settings) => {
       settings.recentWindow.size = Math.max(0, Math.floor(numberValue(event.currentTarget as HTMLInputElement, 10)));
@@ -616,20 +635,6 @@ function bindSettings(panel: HTMLElement): void {
   element<HTMLSelectElement>(panel, '#story-echo-window-unit').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
       settings.recentWindow.unit = (event.currentTarget as HTMLSelectElement).value as WindowUnit;
-    });
-    scheduleDerivedUpdate();
-  });
-
-  element<HTMLInputElement>(panel, '#story-echo-summary-enabled').addEventListener('change', (event) => {
-    settingsRepository.update((settings) => {
-      settings.summary.enabled = (event.currentTarget as HTMLInputElement).checked;
-    });
-    scheduleDerivedUpdate();
-  });
-
-  element<HTMLInputElement>(panel, '#story-echo-summary-automatic').addEventListener('change', (event) => {
-    settingsRepository.update((settings) => {
-      settings.summary.automatic = (event.currentTarget as HTMLInputElement).checked;
     });
     scheduleDerivedUpdate();
   });
@@ -687,13 +692,6 @@ function bindSettings(panel: HTMLElement): void {
       current.llm.provider = (event.currentTarget as HTMLSelectElement).value as LlmProviderId;
     });
     syncVisibility(panel, settings);
-  });
-
-  element<HTMLInputElement>(panel, '#story-echo-auto-extract').addEventListener('change', (event) => {
-    settingsRepository.update((settings) => {
-      settings.extraction.automatic = (event.currentTarget as HTMLInputElement).checked;
-    });
-    scheduleDerivedUpdate();
   });
 
   element<HTMLInputElement>(panel, '#story-echo-extraction-turns').addEventListener('input', (event) => {
@@ -966,21 +964,21 @@ function bindSettings(panel: HTMLElement): void {
           return false;
         }
         const target = window.retainedStartIndex - 1;
-        await extractionService.processThrough(target, (progress) => {
-          status.textContent = `正在抽取消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
-        });
-        if (settings.summary.enabled) {
-          await stageSummaryService.processAllThrough(target, (progress) => {
-            status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
+        if (settings.memory.enabled) {
+          await extractionService.processThrough(target, (progress) => {
+            status.textContent = `正在抽取消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
           });
         }
+        await stageSummaryService.processAllThrough(target, (progress) => {
+          status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
+        });
         return true;
       });
       if (!processed) {
         notify.info('当前没有窗口外历史需要处理。');
         return;
       }
-      notify.success('窗口外历史处理完成；不足所配置抽取或总结批次的尾部原文会继续保留。');
+      notify.success('窗口外历史处理完成；不足所配置批次的尾部原文会继续保留。');
       await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : '历史处理失败。');
@@ -1000,17 +998,20 @@ function bindSettings(panel: HTMLElement): void {
       notify.info('当前聊天还没有StoryEcho调试数据。');
       return;
     }
-    let vectorCount: number | string = 'unavailable';
-    try {
-      vectorCount = (await vectorStore.list(
-        state.vectorCollectionId,
-        resolveVectorConfig(settingsRepository.get()),
-      )).length;
-    } catch {
-      // The report still has useful local diagnostics when Vector Storage is unavailable.
+    const settings = settingsRepository.get();
+    let vectorCount: number | string = settings.memory.enabled ? 'unavailable' : 'memory-disabled';
+    if (settings.memory.enabled) {
+      try {
+        vectorCount = (await vectorStore.list(
+          state.vectorCollectionId,
+          resolveVectorConfig(settings),
+        )).length;
+      } catch {
+        // The report still has useful local diagnostics when Vector Storage is unavailable.
+      }
     }
     try {
-      await copyText(buildDebugReport(state, settingsRepository.get(), vectorCount));
+      await copyText(buildDebugReport(state, settings, vectorCount));
       notify.success('调试报告已复制。');
     } catch (error) {
       notify.error(error instanceof Error ? error.message : '复制调试报告失败。');
@@ -1188,6 +1189,8 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
   const inspection = element<HTMLElement>(panel, '#story-echo-inspection');
   const traces = element<HTMLElement>(panel, '#story-echo-traces');
   try {
+    const currentSettings = settingsRepository.get();
+    syncVisibility(panel, currentSettings);
     const state = memoryRepository.getExisting();
     if (!state) {
       cachedVectorCollectionId = '';
@@ -1213,14 +1216,17 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       cachedVectorRevision = '';
     }
     const currentVectorRevision = vectorRevision(state);
-    if (refreshVectorCount || cachedVectorRevision !== currentVectorRevision) {
+    if (!currentSettings.memory.enabled) {
+      cachedVectorRevision = currentVectorRevision;
+      cachedVectorCountText = '未读取（记忆已关闭）';
+    } else if (refreshVectorCount || cachedVectorRevision !== currentVectorRevision) {
       // Mark before awaiting so the many diagnostics events emitted by one
       // background batch do not start duplicate collection-list requests.
       cachedVectorRevision = currentVectorRevision;
       try {
         const hashes = await vectorStore.list(
           state.vectorCollectionId,
-          resolveVectorConfig(settingsRepository.get()),
+          resolveVectorConfig(currentSettings),
         );
         cachedVectorCountText = String(hashes.length);
       } catch (error) {
@@ -1229,29 +1235,38 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       }
     }
 
-    const currentSettings = settingsRepository.get();
     const context = getContext();
     const backgroundTarget = backgroundTargetMessageId(context.chat, currentSettings);
-    const pendingExtractionTurns = backgroundTarget > state.indexedThroughMessageId
+    const pendingExtractionTurns = currentSettings.memory.enabled && backgroundTarget > state.indexedThroughMessageId
       ? countCompletedTurns(context.chat.slice(
           state.indexedThroughMessageId + 1,
           backgroundTarget + 1,
         ))
       : 0;
     target.textContent = [
-      `剧情事件：${state.memories.length}`,
-      `向量：${cachedVectorCountText}`,
-      `待同步向量：${state.pendingVectorHashes.length}`,
-      `待删除向量：${state.pendingVectorDeleteHashes.length}`,
-      `已处理到消息：${state.indexedThroughMessageId}`,
-      `抽取批次：每${currentSettings.extraction.targetTurnsPerChunk}轮（窗口外待处理${pendingExtractionTurns}轮）`,
+      currentSettings.memory.enabled ? '模式：上下文总结 + 剧情记忆' : '模式：仅上下文窗口 + 阶段总结',
+      ...(currentSettings.memory.enabled
+        ? [
+            `剧情事件：${state.memories.length}`,
+            `向量：${cachedVectorCountText}`,
+            `待同步向量：${state.pendingVectorHashes.length}`,
+            `待删除向量：${state.pendingVectorDeleteHashes.length}`,
+            `已处理到消息：${state.indexedThroughMessageId}`,
+            `抽取批次：每${currentSettings.extraction.targetTurnsPerChunk}轮（窗口外待处理${pendingExtractionTurns}轮）`,
+            `集合：${state.vectorCollectionId}`,
+          ]
+        : [
+            `剧情记忆：已关闭（保留 ${state.memories.length} 条）`,
+            `向量：${cachedVectorCountText}`,
+          ]),
       `阶段总结：${state.stageSummary.entries.length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
-      `集合：${state.vectorCollectionId}`,
       ...runtimeStatusText(),
     ].join('｜');
     const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
     const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);
-    const currentStateCorrection = renderCurrentStateCoordinationBlock(state.memories);
+    const currentStateCorrection = currentSettings.memory.enabled
+      ? renderCurrentStateCoordinationBlock(state.memories)
+      : '';
     stageSummaryTarget.textContent = visibleSummaries.length > 0
       ? [
           `已保存 ${state.stageSummary.entries.length} 条；正常请求携带最近 ${visibleSummaries.length} 条。`,

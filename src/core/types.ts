@@ -39,15 +39,20 @@ export interface ExternalEmbeddingSettings {
 }
 
 export interface StoryEchoSettings {
-  version: 6;
+  version: 7;
   enabled: boolean;
+  memory: {
+    enabled: boolean;
+  };
   debug: boolean;
   recentWindow: {
     size: number;
     unit: WindowUnit;
   };
   summary: {
+    /** @deprecated Kept only to migrate pre-0.17 settings. Summaries follow the master switch. */
     enabled: boolean;
+    /** @deprecated Kept only to migrate pre-0.17 settings. Summary maintenance is automatic. */
     automatic: boolean;
     targetTurnsPerUpdate: number;
     windowSize: number;
@@ -60,6 +65,7 @@ export interface StoryEchoSettings {
     queryMode: RetrievalQueryMode;
   };
   extraction: {
+    /** @deprecated Kept only to migrate pre-0.17 settings. Extraction follows memory.enabled. */
     automatic: boolean;
     targetTurnsPerChunk: number;
     reference: {

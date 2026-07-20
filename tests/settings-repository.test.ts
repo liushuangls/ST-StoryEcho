@@ -6,6 +6,49 @@ afterEach(() => {
 });
 
 describe('SettingsRepository credential persistence', () => {
+  it('starts new installs in LLM-only mode with summaries always active', () => {
+    const extensionSettings: Record<string, unknown> = {};
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    expect(new SettingsRepository().get()).toMatchObject({
+      version: 7,
+      enabled: false,
+      memory: { enabled: false },
+      summary: { enabled: true, automatic: true },
+      extraction: { automatic: false },
+    });
+  });
+
+  it('maps the memory switch onto legacy fields without exposing extra feature switches', () => {
+    const extensionSettings: Record<string, unknown> = {};
+    const saveSettingsDebounced = vi.fn();
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced }),
+    });
+    const repository = new SettingsRepository();
+
+    const enabled = repository.update((settings) => {
+      settings.memory.enabled = true;
+    });
+    expect(enabled).toMatchObject({
+      memory: { enabled: true },
+      summary: { enabled: true, automatic: true },
+      extraction: { automatic: true },
+    });
+
+    const disabled = repository.update((settings) => {
+      settings.memory.enabled = false;
+    });
+    expect(disabled).toMatchObject({
+      memory: { enabled: false },
+      summary: { enabled: true, automatic: true },
+      extraction: { automatic: false },
+    });
+    expect(saveSettingsDebounced).toHaveBeenCalledTimes(2);
+  });
+
   it('stores both custom keys in SillyTavern extension settings', () => {
     const extensionSettings: Record<string, unknown> = {};
     const saveSettingsDebounced = vi.fn();
@@ -48,11 +91,12 @@ describe('SettingsRepository credential persistence', () => {
 
     const written = repository.update((settings) => {
       settings.enabled = true;
+      settings.memory.enabled = true;
       settings.debug = true;
       settings.recentWindow = { size: 37, unit: 'messages' };
       settings.summary = {
-        enabled: false,
-        automatic: false,
+        enabled: true,
+        automatic: true,
         targetTurnsPerUpdate: 7,
         windowSize: 9,
         maxTokens: 2_304,
@@ -64,7 +108,7 @@ describe('SettingsRepository credential persistence', () => {
         queryMode: 'local',
       };
       settings.extraction = {
-        automatic: false,
+        automatic: true,
         targetTurnsPerChunk: 3,
         reference: {
           mode: 'character',
@@ -241,7 +285,8 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 6,
+      version: 7,
+      memory: { enabled: true },
       extraction: { automatic: true, targetTurnsPerChunk: 5 },
       summary: {
         enabled: true,
@@ -271,7 +316,8 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 6,
+      version: 7,
+      memory: { enabled: true },
       recentWindow: { size: 12, unit: 'turns' },
       summary: {
         enabled: true,
@@ -295,7 +341,8 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 6,
+      version: 7,
+      memory: { enabled: true },
       recall: { maxEvents: 3 },
     });
 
@@ -306,7 +353,7 @@ describe('SettingsRepository credential persistence', () => {
     expect(new SettingsRepository().get().recall.maxEvents).toBe(7);
   });
 
-  it('adds the controlled extraction reference defaults without overriding existing extraction settings', () => {
+  it('adds extraction reference defaults and preserves effective legacy recall behavior', () => {
     const extensionSettings: Record<string, unknown> = {
       story_echo: {
         version: 5,
@@ -318,9 +365,10 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 6,
+      version: 7,
+      memory: { enabled: true },
       extraction: {
-        automatic: false,
+        automatic: true,
         targetTurnsPerChunk: 8,
         reference: {
           mode: 'character-world-info',

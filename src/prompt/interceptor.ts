@@ -34,6 +34,7 @@ import {
 } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
+import { stageSummaryService } from '../summary/service';
 import type { VectorQueryResult } from '../vector/adapter';
 import { resolveVectorConfig } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
@@ -106,14 +107,19 @@ function safeSourceRetainedStart(
   sourceChat: TavernChatMessage[],
   minimumRetainedStart: number,
   state: StoryEchoChatState,
-  summaryEnabled: boolean,
+  memoryEnabled: boolean,
   unit: 'turns' | 'messages',
 ): number {
-  const extractionBoundary = Math.max(0, state.indexedThroughMessageId + 1);
-  const summaryBoundary = summaryEnabled && state.stageSummary.entries.length > 0
+  const summaryBoundary = state.stageSummary.entries.length > 0
     ? Math.max(0, state.stageSummary.coveredThroughMessageId + 1)
-    : summaryEnabled ? 0 : minimumRetainedStart;
-  const proposed = Math.min(minimumRetainedStart, extractionBoundary, summaryBoundary);
+    : 0;
+  const proposed = memoryEnabled
+    ? Math.min(
+        minimumRetainedStart,
+        Math.max(0, state.indexedThroughMessageId + 1),
+        summaryBoundary,
+      )
+    : Math.min(minimumRetainedStart, summaryBoundary);
   return unit === 'turns'
     ? alignRetainedStartToTurn(sourceChat, proposed)
     : proposed;
@@ -153,6 +159,7 @@ async function prepareStoryEchoPrompt(
 
   try {
     const startedAt = performance.now();
+    const memoryEnabled = settings.memory.enabled;
     const sourceChat = getContext().chat;
     const minimumSourceWindow = selectRecentWindow(
       sourceChat,
@@ -167,7 +174,9 @@ async function prepareStoryEchoPrompt(
     if (!state) {
       return;
     }
-    state = await extractionService.reconcileHistory(state, { purgeVectors: false });
+    state = memoryEnabled
+      ? await extractionService.reconcileHistory(state, { purgeVectors: false })
+      : await stageSummaryService.reconcileHistory(state);
     if (!state) {
       return;
     }
@@ -179,15 +188,12 @@ async function prepareStoryEchoPrompt(
     // raw message. The reply-complete scheduler catches up in the background.
     state.metrics.generationAttempts += 1;
 
-    if (state.indexedThroughMessageId < desiredCoveredThrough) {
+    if (memoryEnabled && state.indexedThroughMessageId < desiredCoveredThrough) {
       warnings.push(
         `剧情索引只覆盖到消息 ${state.indexedThroughMessageId}，索引后的原文暂不裁剪。`,
       );
     }
-    if (
-      settings.summary.enabled &&
-      state.stageSummary.coveredThroughMessageId < desiredCoveredThrough
-    ) {
+    if (state.stageSummary.coveredThroughMessageId < desiredCoveredThrough) {
       warnings.push(
         `阶段总结只覆盖到消息 ${state.stageSummary.coveredThroughMessageId}，未总结原文暂不裁剪。`,
       );
@@ -197,7 +203,7 @@ async function prepareStoryEchoPrompt(
       sourceChat,
       minimumSourceWindow.retainedStartIndex,
       state,
-      settings.summary.enabled,
+      memoryEnabled,
       settings.recentWindow.unit,
     );
     const retainedHistoricalMessageCount = countNonSystemMessages(
@@ -239,17 +245,20 @@ async function prepareStoryEchoPrompt(
       return;
     }
 
-    if (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0) {
+    if (
+      memoryEnabled &&
+      (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0)
+    ) {
       warnings.push('部分剧情记忆尚未完成向量化，将使用可用索引和关键词召回。');
     }
 
     const currentInput = chat[window.currentInputIndex];
     const factVerification = isFactVerificationQuery(currentInput?.mes ?? '');
-    const establishedNames = new Set(state.memories.flatMap((memory) => (
+    const establishedNames = new Set((memoryEnabled ? state.memories : []).flatMap((memory) => (
       directlyGroundedStoryMemoryNames(memory, sourceChat).map(normalizedStoryEntityName)
     )));
     const ungroundedMemoryNames = new Map<string, string[]>();
-    const groundedMemories = state.memories.filter((memory) => {
+    const groundedMemories = (memoryEnabled ? state.memories : []).filter((memory) => {
       const names = unsupportedStoryMemoryNames(memory, sourceChat, establishedNames);
       if (names.length > 0) {
         ungroundedMemoryNames.set(memory.id, names);
@@ -309,7 +318,8 @@ async function prepareStoryEchoPrompt(
     const eligibleMemories = windowExternalMemories.filter((memory) => (
       (!factVerification || memory.truthStatus === 'confirmed')
     ));
-    const recallEnabled = settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
+    const recallEnabled = memoryEnabled &&
+      settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
     if (shadowedMemories.length > 0) {
       recordDebugTrace(state, settings.debug, 'retrieval', '近期用户事实已遮蔽冲突的较早记忆。', {
         memoryIds: shadowedMemories.map((memory) => memory.id).join(','),
@@ -350,7 +360,9 @@ async function prepareStoryEchoPrompt(
         logger.warn('LLM检索查询改写失败，使用本地回退。', error);
       }
     }
-    const query = queryPlan.strategy === 'llm'
+    const query = !memoryEnabled
+      ? ''
+      : queryPlan.strategy === 'llm'
       ? [
           '策略：LLM上下文改写',
           `改写查询：${queryPlan.intentQuery}`,
@@ -441,16 +453,14 @@ async function prepareStoryEchoPrompt(
         excludedSummaries: state.stageSummary.entries.length - summaryPool.length,
       });
     }
-    const summaryEntries = settings.summary.enabled
-      ? summaryPool.slice(-summaryWindowSize)
-      : [];
+    const summaryEntries = summaryPool.slice(-summaryWindowSize);
     const summaryBlocks = summaryEntries.map((entry) => renderStageSummaryBlock(
       entry.text,
       entry.sourceStartMessageId,
       entry.sourceEndMessageId,
       factVerification,
     )).filter(Boolean);
-    const currentStateBlock = summaryEntries.length > 0
+    const currentStateBlock = memoryEnabled && summaryEntries.length > 0
       ? renderCurrentStateCoordinationBlock(
           activeScopedMemories.filter((memory) => !shadowedIds.has(memory.id)),
           600,

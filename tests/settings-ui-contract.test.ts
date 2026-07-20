@@ -13,10 +13,9 @@ const bindSettingsSource = source.slice(
 
 const EDITABLE_CONTROLS: Readonly<Record<string, 'input' | 'change'>> = {
   'story-echo-enabled': 'change',
+  'story-echo-memory-enabled': 'change',
   'story-echo-window-size': 'input',
   'story-echo-window-unit': 'change',
-  'story-echo-summary-enabled': 'change',
-  'story-echo-summary-automatic': 'change',
   'story-echo-summary-turns': 'input',
   'story-echo-summary-window': 'input',
   'story-echo-summary-max-tokens': 'input',
@@ -25,7 +24,6 @@ const EDITABLE_CONTROLS: Readonly<Record<string, 'input' | 'change'>> = {
   'story-echo-threshold': 'input',
   'story-echo-query-mode': 'change',
   'story-echo-provider': 'change',
-  'story-echo-auto-extract': 'change',
   'story-echo-extraction-turns': 'input',
   'story-echo-reference-mode': 'change',
   'story-echo-reference-tokens': 'input',

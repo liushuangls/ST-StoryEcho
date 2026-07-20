@@ -228,6 +228,74 @@ export class StageSummaryService {
   private readonly settingsRepository = new SettingsRepository();
   private readonly memoryRepository = new MemoryRepository();
 
+  /**
+   * Validate summary entries independently from the structured-memory index.
+   * This is required by the LLM-only mode, where indexedThroughMessageId is
+   * intentionally left untouched because extraction and vectors are disabled.
+   */
+  async reconcileHistory(
+    state?: StoryEchoChatState,
+  ): Promise<StoryEchoChatState | null> {
+    const current = state ?? await this.memoryRepository.getOrCreate();
+    if (!current || current.stageSummary.entries.length === 0) {
+      return current;
+    }
+    if (getCurrentChatId() !== current.ownerChatId) {
+      throw new Error('校验阶段总结期间聊天发生切换，已取消任务。');
+    }
+
+    const context = getContext();
+    let validEntries = 0;
+    let initializedHashes = 0;
+    for (const entry of current.stageSummary.entries) {
+      if (
+        entry.sourceStartMessageId < 0 ||
+        entry.sourceEndMessageId < entry.sourceStartMessageId ||
+        entry.sourceEndMessageId >= context.chat.length
+      ) {
+        break;
+      }
+      const actualHash = await sha256(sourcePayload(
+        context.chat.slice(entry.sourceStartMessageId, entry.sourceEndMessageId + 1),
+        entry.sourceStartMessageId,
+      ));
+      if (entry.sourceHash && entry.sourceHash !== actualHash) {
+        break;
+      }
+      if (!entry.sourceHash) {
+        entry.sourceHash = actualHash;
+        initializedHashes += 1;
+      }
+      validEntries += 1;
+    }
+
+    if (validEntries === current.stageSummary.entries.length) {
+      if (initializedHashes > 0) {
+        const latest = current.stageSummary.entries.at(-1)!;
+        current.stageSummary.coveredThroughHash = latest.sourceHash;
+        await this.memoryRepository.save(current);
+      }
+      return current;
+    }
+
+    const removedEntries = current.stageSummary.entries.length - validEntries;
+    const entries = current.stageSummary.entries.slice(0, validEntries);
+    const latest = entries.at(-1);
+    current.stageSummary = {
+      entries,
+      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+      coveredThroughHash: latest?.sourceHash ?? '',
+      ...(latest ? { updatedAt: latest.updatedAt } : {}),
+    };
+    delete current.lastInspection;
+    recordDebugTrace(current, this.settingsRepository.get().debug, 'summary', '聊天历史变化后已截断失效阶段总结。', {
+      removedEntries,
+      coveredThroughMessageId: current.stageSummary.coveredThroughMessageId,
+    });
+    await this.memoryRepository.save(current);
+    return current;
+  }
+
   processNextThrough(
     targetEndMessageId: number,
     onProgress?: (progress: StageSummaryProgress) => void,
@@ -272,17 +340,20 @@ export class StageSummaryService {
     const context = getContext();
     const settings = this.settingsRepository.get();
     let state = await this.memoryRepository.getOrCreate();
-    if (!state || !settings.summary.enabled) {
+    if (!state) {
       return { state, updatedChunks: 0 };
     }
     assertChatOwner(state);
 
-    // A summary never advances beyond the structured memory index. This makes
-    // the existing indexed-prefix fingerprint authoritative for edit/delete
-    // invalidation of both derived stores.
+    // Full memory mode waits for structured extraction so the summary can use
+    // its authoritative correction ledger. LLM-only mode owns an independent
+    // source hash and can advance without touching the extraction cursor.
+    const memoryCoverageLimit = settings.memory.enabled
+      ? state.indexedThroughMessageId
+      : Math.floor(targetEndMessageId);
     const maximumEnd = Math.min(
       Math.floor(targetEndMessageId),
-      state.indexedThroughMessageId,
+      memoryCoverageLimit,
       context.chat.length - 1,
     );
     let start = state.stageSummary.coveredThroughMessageId + 1;
@@ -335,11 +406,13 @@ export class StageSummaryService {
         const startedAt = performance.now();
         const snapshotHash = await sha256(sourcePayload(snapshot, chunk.startMessageId));
         const identity = summaryIdentity(context);
-        const authoritativeFacts = buildStageSummaryGrounding(
-          state.memories,
-          chunk.startMessageId,
-          chunk.endMessageId,
-        );
+        const authoritativeFacts = settings.memory.enabled
+          ? buildStageSummaryGrounding(
+              state.memories,
+              chunk.startMessageId,
+              chunk.endMessageId,
+            )
+          : '';
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
           prompt: buildStageSummaryPrompt(

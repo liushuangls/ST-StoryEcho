@@ -2577,9 +2577,9 @@ async function decideConsolidation(settings, candidates, memories) {
 var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
-var SETTINGS_VERSION = 6;
+var SETTINGS_VERSION = 7;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.16.0";
+var EXTENSION_VERSION = "0.17.0";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -3656,6 +3656,9 @@ async function buildExtractionReferenceContext(messages, settings, context = get
 var DEFAULT_SETTINGS = Object.freeze({
   version: SETTINGS_VERSION,
   enabled: false,
+  memory: {
+    enabled: false
+  },
   debug: false,
   recentWindow: {
     size: 10,
@@ -3675,7 +3678,7 @@ var DEFAULT_SETTINGS = Object.freeze({
     queryMode: "llm"
   },
   extraction: {
-    automatic: true,
+    automatic: false,
     targetTurnsPerChunk: 5,
     reference: {
       mode: "character-world-info",
@@ -3778,6 +3781,21 @@ function migratePerformanceDefaults(settings, stored) {
     settings.recall.maxEvents = DEFAULT_SETTINGS.recall.maxEvents;
   }
   settings.version = DEFAULT_SETTINGS.version;
+}
+function migrateFeatureLayers(settings, stored) {
+  const storedRoot = isRecord4(stored) ? stored : {};
+  const hasStoredSettings = Object.keys(storedRoot).length > 0;
+  const storedMemory = isRecord4(storedRoot["memory"]) ? storedRoot["memory"] : {};
+  if (hasStoredSettings && typeof storedMemory["enabled"] !== "boolean") {
+    const storedExtraction = isRecord4(storedRoot["extraction"]) ? storedRoot["extraction"] : {};
+    const storedRecall = isRecord4(storedRoot["recall"]) ? storedRoot["recall"] : {};
+    const extractionWasEnabled = storedExtraction["automatic"] !== false;
+    const recallWasEnabled = (typeof storedRecall["maxEvents"] !== "number" || storedRecall["maxEvents"] > 0) && (typeof storedRecall["maxTokens"] !== "number" || storedRecall["maxTokens"] > 0);
+    settings.memory.enabled = extractionWasEnabled || recallWasEnabled;
+  }
+  settings.summary.enabled = true;
+  settings.summary.automatic = true;
+  settings.extraction.automatic = settings.memory.enabled;
 }
 function boundedInteger(value, minimum, maximum, fallback) {
   return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, Math.floor(value))) : fallback;
@@ -3891,6 +3909,7 @@ var SettingsRepository = class {
     const settings = mergeKnown(cloneDefaults(), stored);
     migrateLegacyVolcengineEmbedding(settings, stored);
     migratePerformanceDefaults(settings, stored);
+    migrateFeatureLayers(settings, stored);
     normalizeSettings(settings);
     context.extensionSettings[MODULE_ID] = settings;
     return settings;
@@ -3898,6 +3917,7 @@ var SettingsRepository = class {
   update(mutator) {
     const settings = this.get();
     mutator(settings);
+    migrateFeatureLayers(settings, settings);
     normalizeSettings(settings);
     getContext().saveSettingsDebounced();
     return settings;
@@ -6799,6 +6819,64 @@ var StageSummaryService = class {
   queue = Promise.resolve();
   settingsRepository = new SettingsRepository();
   memoryRepository = new MemoryRepository();
+  /**
+   * Validate summary entries independently from the structured-memory index.
+   * This is required by the LLM-only mode, where indexedThroughMessageId is
+   * intentionally left untouched because extraction and vectors are disabled.
+   */
+  async reconcileHistory(state) {
+    const current = state ?? await this.memoryRepository.getOrCreate();
+    if (!current || current.stageSummary.entries.length === 0) {
+      return current;
+    }
+    if (getCurrentChatId() !== current.ownerChatId) {
+      throw new Error("\u6821\u9A8C\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
+    }
+    const context = getContext();
+    let validEntries = 0;
+    let initializedHashes = 0;
+    for (const entry of current.stageSummary.entries) {
+      if (entry.sourceStartMessageId < 0 || entry.sourceEndMessageId < entry.sourceStartMessageId || entry.sourceEndMessageId >= context.chat.length) {
+        break;
+      }
+      const actualHash = await sha256(sourcePayload2(
+        context.chat.slice(entry.sourceStartMessageId, entry.sourceEndMessageId + 1),
+        entry.sourceStartMessageId
+      ));
+      if (entry.sourceHash && entry.sourceHash !== actualHash) {
+        break;
+      }
+      if (!entry.sourceHash) {
+        entry.sourceHash = actualHash;
+        initializedHashes += 1;
+      }
+      validEntries += 1;
+    }
+    if (validEntries === current.stageSummary.entries.length) {
+      if (initializedHashes > 0) {
+        const latest2 = current.stageSummary.entries.at(-1);
+        current.stageSummary.coveredThroughHash = latest2.sourceHash;
+        await this.memoryRepository.save(current);
+      }
+      return current;
+    }
+    const removedEntries = current.stageSummary.entries.length - validEntries;
+    const entries = current.stageSummary.entries.slice(0, validEntries);
+    const latest = entries.at(-1);
+    current.stageSummary = {
+      entries,
+      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+      coveredThroughHash: latest?.sourceHash ?? "",
+      ...latest ? { updatedAt: latest.updatedAt } : {}
+    };
+    delete current.lastInspection;
+    recordDebugTrace(current, this.settingsRepository.get().debug, "summary", "\u804A\u5929\u5386\u53F2\u53D8\u5316\u540E\u5DF2\u622A\u65AD\u5931\u6548\u9636\u6BB5\u603B\u7ED3\u3002", {
+      removedEntries,
+      coveredThroughMessageId: current.stageSummary.coveredThroughMessageId
+    });
+    await this.memoryRepository.save(current);
+    return current;
+  }
   processNextThrough(targetEndMessageId, onProgress) {
     return this.enqueue(targetEndMessageId, {
       maxChunks: 1,
@@ -6827,13 +6905,14 @@ var StageSummaryService = class {
     const context = getContext();
     const settings = this.settingsRepository.get();
     let state = await this.memoryRepository.getOrCreate();
-    if (!state || !settings.summary.enabled) {
+    if (!state) {
       return { state, updatedChunks: 0 };
     }
     assertChatOwner2(state);
+    const memoryCoverageLimit = settings.memory.enabled ? state.indexedThroughMessageId : Math.floor(targetEndMessageId);
     const maximumEnd = Math.min(
       Math.floor(targetEndMessageId),
-      state.indexedThroughMessageId,
+      memoryCoverageLimit,
       context.chat.length - 1
     );
     let start = state.stageSummary.coveredThroughMessageId + 1;
@@ -6873,11 +6952,11 @@ var StageSummaryService = class {
         const startedAt = performance.now();
         const snapshotHash = await sha256(sourcePayload2(snapshot, chunk.startMessageId));
         const identity = summaryIdentity(context);
-        const authoritativeFacts = buildStageSummaryGrounding(
+        const authoritativeFacts = settings.memory.enabled ? buildStageSummaryGrounding(
           state.memories,
           chunk.startMessageId,
           chunk.endMessageId
-        );
+        ) : "";
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
           prompt: buildStageSummaryPrompt(
@@ -7156,7 +7235,7 @@ var BackgroundProcessingScheduler = class {
   }
   async processCurrentChat() {
     const settings = this.settingsRepository.get();
-    if (!settings.enabled || !settings.extraction.automatic && !(settings.summary.enabled && settings.summary.automatic)) {
+    if (!settings.enabled) {
       return;
     }
     const targetEndMessageId = backgroundTargetMessageId(getContext().chat, settings);
@@ -7165,6 +7244,19 @@ var BackgroundProcessingScheduler = class {
     }
     let state = await this.memoryRepository.getOrCreate();
     if (!state) {
+      return;
+    }
+    if (!settings.memory.enabled) {
+      this.extractionCooldown = void 0;
+      this.verifiedPrefix = void 0;
+      if (this.historyRequiresReconcile) {
+        state = await stageSummaryService.reconcileHistory(state) ?? state;
+        this.historyRequiresReconcile = false;
+      }
+      if (state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
+        await stageSummaryService.processNextThrough(targetEndMessageId);
+      }
+      emitDiagnosticsUpdated();
       return;
     }
     if (!this.verifiedPrefix || this.verifiedPrefix.ownerChatId !== state.ownerChatId || this.verifiedPrefix.indexedThroughMessageId !== state.indexedThroughMessageId || this.verifiedPrefix.indexedPrefixHash !== state.indexedPrefixHash) {
@@ -7182,7 +7274,7 @@ var BackgroundProcessingScheduler = class {
         indexedPrefixHash: state.indexedPrefixHash
       };
     }
-    if (settings.extraction.automatic && state.indexedThroughMessageId < targetEndMessageId) {
+    if (state.indexedThroughMessageId < targetEndMessageId) {
       const extractionRevision = this.historyRevision;
       const extractionStart = state.indexedThroughMessageId + 1;
       const cooldown = this.extractionCooldown;
@@ -7244,7 +7336,7 @@ var BackgroundProcessingScheduler = class {
         logger.warn("\u540E\u53F0\u540C\u6B65\u5F85\u5904\u7406\u5411\u91CF\u5931\u8D25\uFF0C\u5C06\u5728\u540E\u7EED\u56DE\u590D\u91CD\u8BD5\u3002", error);
       }
     }
-    if (settings.summary.enabled && settings.summary.automatic && state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
+    if (state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
       await stageSummaryService.processNextThrough(targetEndMessageId);
     }
     emitDiagnosticsUpdated();
@@ -7727,10 +7819,13 @@ function createInspection(type, retainedStartIndex, endIndex, removedMessageCoun
     warnings
   };
 }
-function safeSourceRetainedStart(sourceChat, minimumRetainedStart, state, summaryEnabled, unit) {
-  const extractionBoundary = Math.max(0, state.indexedThroughMessageId + 1);
-  const summaryBoundary = summaryEnabled && state.stageSummary.entries.length > 0 ? Math.max(0, state.stageSummary.coveredThroughMessageId + 1) : summaryEnabled ? 0 : minimumRetainedStart;
-  const proposed = Math.min(minimumRetainedStart, extractionBoundary, summaryBoundary);
+function safeSourceRetainedStart(sourceChat, minimumRetainedStart, state, memoryEnabled, unit) {
+  const summaryBoundary = state.stageSummary.entries.length > 0 ? Math.max(0, state.stageSummary.coveredThroughMessageId + 1) : 0;
+  const proposed = memoryEnabled ? Math.min(
+    minimumRetainedStart,
+    Math.max(0, state.indexedThroughMessageId + 1),
+    summaryBoundary
+  ) : Math.min(minimumRetainedStart, summaryBoundary);
   return unit === "turns" ? alignRetainedStartToTurn(sourceChat, proposed) : proposed;
 }
 function requestSystemMessage(mes, kind) {
@@ -7757,6 +7852,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
   }
   try {
     const startedAt = performance.now();
+    const memoryEnabled = settings.memory.enabled;
     const sourceChat = getContext().chat;
     const minimumSourceWindow = selectRecentWindow(
       sourceChat,
@@ -7770,19 +7866,19 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
     if (!state) {
       return;
     }
-    state = await extractionService.reconcileHistory(state, { purgeVectors: false });
+    state = memoryEnabled ? await extractionService.reconcileHistory(state, { purgeVectors: false }) : await stageSummaryService.reconcileHistory(state);
     if (!state) {
       return;
     }
     const warnings = [];
     const desiredCoveredThrough = minimumSourceWindow.retainedStartIndex - 1;
     state.metrics.generationAttempts += 1;
-    if (state.indexedThroughMessageId < desiredCoveredThrough) {
+    if (memoryEnabled && state.indexedThroughMessageId < desiredCoveredThrough) {
       warnings.push(
         `\u5267\u60C5\u7D22\u5F15\u53EA\u8986\u76D6\u5230\u6D88\u606F ${state.indexedThroughMessageId}\uFF0C\u7D22\u5F15\u540E\u7684\u539F\u6587\u6682\u4E0D\u88C1\u526A\u3002`
       );
     }
-    if (settings.summary.enabled && state.stageSummary.coveredThroughMessageId < desiredCoveredThrough) {
+    if (state.stageSummary.coveredThroughMessageId < desiredCoveredThrough) {
       warnings.push(
         `\u9636\u6BB5\u603B\u7ED3\u53EA\u8986\u76D6\u5230\u6D88\u606F ${state.stageSummary.coveredThroughMessageId}\uFF0C\u672A\u603B\u7ED3\u539F\u6587\u6682\u4E0D\u88C1\u526A\u3002`
       );
@@ -7791,7 +7887,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
       sourceChat,
       minimumSourceWindow.retainedStartIndex,
       state,
-      settings.summary.enabled,
+      memoryEnabled,
       settings.recentWindow.unit
     );
     const retainedHistoricalMessageCount = countNonSystemMessages(
@@ -7831,14 +7927,14 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
       emitDiagnosticsUpdated();
       return;
     }
-    if (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0) {
+    if (memoryEnabled && (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0)) {
       warnings.push("\u90E8\u5206\u5267\u60C5\u8BB0\u5FC6\u5C1A\u672A\u5B8C\u6210\u5411\u91CF\u5316\uFF0C\u5C06\u4F7F\u7528\u53EF\u7528\u7D22\u5F15\u548C\u5173\u952E\u8BCD\u53EC\u56DE\u3002");
     }
     const currentInput = chat[window.currentInputIndex];
     const factVerification = isFactVerificationQuery(currentInput?.mes ?? "");
-    const establishedNames = new Set(state.memories.flatMap((memory) => directlyGroundedStoryMemoryNames(memory, sourceChat).map(normalizedStoryEntityName)));
+    const establishedNames = new Set((memoryEnabled ? state.memories : []).flatMap((memory) => directlyGroundedStoryMemoryNames(memory, sourceChat).map(normalizedStoryEntityName)));
     const ungroundedMemoryNames = /* @__PURE__ */ new Map();
-    const groundedMemories = state.memories.filter((memory) => {
+    const groundedMemories = (memoryEnabled ? state.memories : []).filter((memory) => {
       const names = unsupportedStoryMemoryNames(memory, sourceChat, establishedNames);
       if (names.length > 0) {
         ungroundedMemoryNames.set(memory.id, names);
@@ -7885,7 +7981,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
       });
     }
     const eligibleMemories = windowExternalMemories.filter((memory) => !factVerification || memory.truthStatus === "confirmed");
-    const recallEnabled = settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
+    const recallEnabled = memoryEnabled && settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
     if (shadowedMemories.length > 0) {
       recordDebugTrace(state, settings.debug, "retrieval", "\u8FD1\u671F\u7528\u6237\u4E8B\u5B9E\u5DF2\u906E\u853D\u51B2\u7A81\u7684\u8F83\u65E9\u8BB0\u5FC6\u3002", {
         memoryIds: shadowedMemories.map((memory) => memory.id).join(","),
@@ -7922,7 +8018,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
         logger.warn("LLM\u68C0\u7D22\u67E5\u8BE2\u6539\u5199\u5931\u8D25\uFF0C\u4F7F\u7528\u672C\u5730\u56DE\u9000\u3002", error);
       }
     }
-    const query = queryPlan.strategy === "llm" ? [
+    const query = !memoryEnabled ? "" : queryPlan.strategy === "llm" ? [
       "\u7B56\u7565\uFF1ALLM\u4E0A\u4E0B\u6587\u6539\u5199",
       `\u6539\u5199\u67E5\u8BE2\uFF1A${queryPlan.intentQuery}`,
       `\u539F\u59CB\u7528\u6237\uFF1A${queryPlan.keywordIntentQuery || "\uFF08\u7A7A\uFF09"}`,
@@ -7989,14 +8085,14 @@ ${currentInput?.mes ?? ""}`,
         excludedSummaries: state.stageSummary.entries.length - summaryPool.length
       });
     }
-    const summaryEntries = settings.summary.enabled ? summaryPool.slice(-summaryWindowSize) : [];
+    const summaryEntries = summaryPool.slice(-summaryWindowSize);
     const summaryBlocks = summaryEntries.map((entry) => renderStageSummaryBlock(
       entry.text,
       entry.sourceStartMessageId,
       entry.sourceEndMessageId,
       factVerification
     )).filter(Boolean);
-    const currentStateBlock = summaryEntries.length > 0 ? renderCurrentStateCoordinationBlock(
+    const currentStateBlock = memoryEnabled && summaryEntries.length > 0 ? renderCurrentStateCoordinationBlock(
       activeScopedMemories.filter((memory) => !shadowedIds.has(memory.id)),
       600,
       factVerification,
@@ -8141,6 +8237,7 @@ function buildDebugReport(state, settings, vectorCount = "unknown") {
     },
     settings: {
       enabled: settings.enabled,
+      memoryEnabled: settings.memory.enabled,
       debug: settings.debug,
       recentWindow: settings.recentWindow,
       summary: settings.summary,
@@ -8976,7 +9073,7 @@ var memoryRepository2 = new MemoryRepository();
 var vectorStore2 = new SillyTavernVectorStore();
 var memoryMetadataManager = new MemoryMetadataManager(
   memoryRepository2,
-  async (state) => extractionService.syncPendingVectors(state),
+  async (state) => settingsRepository2.get().memory.enabled ? extractionService.syncPendingVectors(state) : state,
   async () => {
     const requestedChatId = getCurrentChatId();
     return storyEchoTaskCoordinator.enqueueManual("\u91CD\u5EFA\u81EA\u52A8\u5267\u60C5\u5143\u6570\u636E", async () => {
@@ -8984,6 +9081,9 @@ var memoryMetadataManager = new MemoryMetadataManager(
         throw new Error("\u7B49\u5F85\u91CD\u5EFA\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
       }
       const settings = settingsRepository2.get();
+      if (!settings.memory.enabled) {
+        throw new Error("\u8BF7\u5148\u542F\u7528\u201C\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE\u201D\u518D\u91CD\u5EFA\u81EA\u52A8\u5143\u6570\u636E\u3002");
+      }
       const chat = getContext().chat;
       const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
       if (!window || window.retainedStartIndex <= 0) {
@@ -9020,12 +9120,12 @@ function panelTemplate() {
       <div class="inline-drawer-content story-echo-panel-body">
         <div class="story-echo-switch-row story-echo-switch-primary">
           <div class="story-echo-switch-copy">
-            <span class="story-echo-switch-title">\u542F\u7528\u6ED1\u52A8\u7A97\u53E3\u4E0E\u5386\u53F2\u5267\u60C5\u53EC\u56DE</span>
-            <span class="story-echo-switch-description">\u5173\u95ED\u540E\u4E0D\u603B\u7ED3\u3001\u4E0D\u88C1\u526A\u4E0A\u4E0B\u6587\u3001\u4E0D\u62BD\u53D6\u5386\u53F2\uFF0C\u4E5F\u4E0D\u6CE8\u5165\u5267\u60C5\u8BB0\u5FC6</span>
+            <span class="story-echo-switch-title">\u542F\u7528 StoryEcho \u4E0A\u4E0B\u6587\u7BA1\u7406</span>
+            <span class="story-echo-switch-description">\u4F7F\u7528 LLM \u7EF4\u62A4\u6700\u5C0F\u539F\u6587\u7A97\u53E3\u4E0E\u5386\u53F2\u9636\u6BB5\u603B\u7ED3</span>
           </div>
           <div class="story-echo-toggle">
             <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
-            <label class="story-echo-toggle-label" for="story-echo-enabled" aria-label="\u542F\u7528\u6ED1\u52A8\u7A97\u53E3\u4E0E\u5386\u53F2\u5267\u60C5\u53EC\u56DE"></label>
+            <label class="story-echo-toggle-label" for="story-echo-enabled" aria-label="\u542F\u7528 StoryEcho \u4E0A\u4E0B\u6587\u7BA1\u7406"></label>
           </div>
         </div>
 
@@ -9034,8 +9134,8 @@ function panelTemplate() {
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-sliders" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">\u4E0A\u4E0B\u6587\u4E0E\u53EC\u56DE</span>
-                <span class="story-echo-section-summary-description">\u6700\u5C0F\u539F\u6587\u3001\u53EC\u56DE\u3001\u67E5\u8BE2\u4E0E\u81EA\u52A8\u62BD\u53D6</span>
+                <span class="story-echo-section-summary-title">\u4E0A\u4E0B\u6587\u7A97\u53E3</span>
+                <span class="story-echo-section-summary-description">\u6700\u5C0F\u539F\u6587\u4E0E\u8BA1\u6570\u65B9\u5F0F</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -9052,55 +9152,6 @@ function panelTemplate() {
               <option value="messages">\u6D88\u606F\u6761\u6570</option>
             </select>
           </label>
-          <label class="story-echo-field">
-            <span>\u6700\u591A\u53EC\u56DE\u4E8B\u4EF6</span>
-            <input id="story-echo-max-events" class="text_pole" type="number" min="0" max="50" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>\u53EC\u56DE Token\u9884\u7B97</span>
-            <input id="story-echo-max-tokens" class="text_pole" type="number" min="0" max="32000" step="50">
-          </label>
-          <label class="story-echo-field">
-            <span>\u5411\u91CF\u76F8\u5173\u6027\u9608\u503C</span>
-            <input id="story-echo-threshold" class="text_pole" type="number" min="0" max="1" step="0.01">
-          </label>
-          <label class="story-echo-field">
-            <span>\u68C0\u7D22\u67E5\u8BE2\u6784\u9020</span>
-            <select id="story-echo-query-mode" class="text_pole">
-              <option value="llm">LLM\u4E0A\u4E0B\u6587\u6539\u5199\uFF08\u63A8\u8350\uFF09</option>
-              <option value="local">\u672C\u5730\u5FEB\u901F\u89C4\u5219</option>
-            </select>
-          </label>
-          <div class="story-echo-switch-row story-echo-field-wide">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">\u81EA\u52A8\u8865\u5145\u5386\u53F2\u7D22\u5F15</span>
-              <span class="story-echo-switch-description">\u7A97\u53E3\u5916\u6EE1\u914D\u7F6E\u8F6E\u6570\u540E\uFF0CAI\u56DE\u590D\u5B8C\u6210\u518D\u5728\u540E\u53F0\u62BD\u53D6\uFF1B\u672A\u5904\u7406\u539F\u6587\u7EE7\u7EED\u4FDD\u7559</span>
-            </div>
-            <div class="story-echo-toggle">
-              <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-auto-extract" aria-label="\u81EA\u52A8\u8865\u5145\u5386\u53F2\u7D22\u5F15"></label>
-            </div>
-          </div>
-          <label class="story-echo-field">
-            <span>\u6BCF\u6279\u62BD\u53D6\u8F6E\u6570</span>
-            <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
-          </label>
-          <label class="story-echo-field story-echo-field-wide">
-            <span>\u62BD\u53D6\u53C2\u8003\u4E0A\u4E0B\u6587</span>
-            <select id="story-echo-reference-mode" class="text_pole">
-              <option value="character-world-info">\u89D2\u8272\u5361\u7CBE\u7B80\u4FE1\u606F + \u6279\u6B21\u547D\u4E2D\u4E16\u754C\u4E66\uFF08\u63A8\u8350\uFF09</option>
-              <option value="character">\u4EC5\u89D2\u8272\u5361\u7CBE\u7B80\u4FE1\u606F</option>
-              <option value="off">\u5173\u95ED</option>
-            </select>
-          </label>
-          <label class="story-echo-field">
-            <span>\u53C2\u8003\u4E0A\u4E0B\u6587\u603B\u9884\u7B97</span>
-            <input id="story-echo-reference-tokens" class="text_pole" type="number" min="256" max="16000" step="100">
-          </label>
-          <label class="story-echo-field">
-            <span>\u4E16\u754C\u4E66\u6700\u591A\u6761\u76EE</span>
-            <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
-          </label>
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">\u8C03\u8BD5\u6A21\u5F0F</span>
@@ -9112,10 +9163,77 @@ function panelTemplate() {
             </div>
           </div>
           <p class="story-echo-hint story-echo-field-wide">
-            LLM\u6539\u5199\u4F1A\u5728\u6BCF\u6B21\u9700\u8981\u53EC\u56DE\u65F6\u5148\u751F\u6210\u4E00\u53E5\u68C0\u7D22\u67E5\u8BE2\uFF1B\u5931\u8D25\u65F6\u81EA\u52A8\u56DE\u9000\u672C\u5730\u53CC\u8DEF\u67E5\u8BE2\u3002
-            \u201C\u6700\u591A\u53EC\u56DE\u4E8B\u4EF6\u201D\u662F\u666E\u901A\u95EE\u9898\u7684\u4E0A\u9650\uFF0C\u8BBE\u4E3A0\u4F1A\u8DF3\u8FC7\u67E5\u8BE2\u4E0E\u53EC\u56DE\uFF1B\u660E\u786E\u8981\u6C42\u5206\u522B\u6838\u5BF9\u591A\u4E2A\u5B9E\u4F53\u65F6\uFF0C\u4F1A\u5728Token\u9884\u7B97\u5185\u6309\u5B9E\u4F53\u8986\u76D6\u5E76\u4E34\u65F6\u6269\u5C55\u5230\u6700\u591A8\u6761\u3002\u4F4E\u5206\u5019\u9009\u4ECD\u4F1A\u63D0\u524D\u8FC7\u6EE4\u3002
-            \u62BD\u53D6\u53C2\u8003\u9ED8\u8BA4\u6700\u591A 3000 Token\uFF0C\u53EA\u8BFB\u53D6\u89D2\u8272\u63CF\u8FF0\u3001\u6027\u683C\u3001\u573A\u666F\u3001Persona \u4E0E\u8BE5\u5386\u53F2\u6279\u6B21\u76F4\u63A5\u547D\u4E2D\u7684\u4E16\u754C\u4E66\uFF1B\u4E0D\u4F1A\u4F20\u5165\u9884\u8BBE\u3001system\u3001jailbreak\u3001\u793A\u4F8B\u5BF9\u8BDD\u6216\u6B22\u8FCE\u8BED\u3002
+            \u6700\u8FD1\u7A97\u53E3\u662F\u6700\u5C0F\u4FDD\u7559\u91CF\uFF1B\u9636\u6BB5\u603B\u7ED3\u5C1A\u672A\u8986\u76D6\u7684\u539F\u6587\u4F1A\u7EE7\u7EED\u4FDD\u7559\uFF0C\u4E0D\u4F1A\u4E3A\u4E86\u6EE1\u8DB3\u7A97\u53E3\u5927\u5C0F\u800C\u4E22\u5931\u5386\u53F2\u3002
           </p>
+          </div>
+        </details>
+
+        <div class="story-echo-switch-row story-echo-switch-primary">
+          <div class="story-echo-switch-copy">
+            <span class="story-echo-switch-title">\u542F\u7528\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE</span>
+            <span class="story-echo-switch-description">\u81EA\u52A8\u63D0\u53D6\u7A97\u53E3\u5916\u5267\u60C5\u3001\u751F\u6210\u5411\u91CF\uFF0C\u5E76\u5728\u9700\u8981\u65F6\u52A8\u6001\u53EC\u56DE\u6CE8\u5165</span>
+          </div>
+          <div class="story-echo-toggle">
+            <input id="story-echo-memory-enabled" class="story-echo-toggle-input" type="checkbox">
+            <label class="story-echo-toggle-label" for="story-echo-memory-enabled" aria-label="\u542F\u7528\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE"></label>
+          </div>
+        </div>
+
+        <details class="story-echo-section story-echo-collapsible" data-story-echo-memory-only>
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-brain" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">\u5267\u60C5\u8BB0\u5FC6\u53C2\u6570</span>
+                <span class="story-echo-section-summary-description">\u81EA\u52A8\u62BD\u53D6\u3001\u67E5\u8BE2\u4E0E\u52A8\u6001\u6CE8\u5165</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
+            <label class="story-echo-field">
+              <span>\u6700\u591A\u53EC\u56DE\u4E8B\u4EF6</span>
+              <input id="story-echo-max-events" class="text_pole" type="number" min="0" max="50" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>\u53EC\u56DE Token\u9884\u7B97</span>
+              <input id="story-echo-max-tokens" class="text_pole" type="number" min="0" max="32000" step="50">
+            </label>
+            <label class="story-echo-field">
+              <span>\u5411\u91CF\u76F8\u5173\u6027\u9608\u503C</span>
+              <input id="story-echo-threshold" class="text_pole" type="number" min="0" max="1" step="0.01">
+            </label>
+            <label class="story-echo-field">
+              <span>\u68C0\u7D22\u67E5\u8BE2\u6784\u9020</span>
+              <select id="story-echo-query-mode" class="text_pole">
+                <option value="llm">LLM\u4E0A\u4E0B\u6587\u6539\u5199\uFF08\u63A8\u8350\uFF09</option>
+                <option value="local">\u672C\u5730\u5FEB\u901F\u89C4\u5219</option>
+              </select>
+            </label>
+            <label class="story-echo-field">
+              <span>\u6BCF\u6279\u62BD\u53D6\u8F6E\u6570</span>
+              <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>\u62BD\u53D6\u53C2\u8003\u4E0A\u4E0B\u6587</span>
+              <select id="story-echo-reference-mode" class="text_pole">
+                <option value="character-world-info">\u89D2\u8272\u5361\u7CBE\u7B80\u4FE1\u606F + \u6279\u6B21\u547D\u4E2D\u4E16\u754C\u4E66\uFF08\u63A8\u8350\uFF09</option>
+                <option value="character">\u4EC5\u89D2\u8272\u5361\u7CBE\u7B80\u4FE1\u606F</option>
+                <option value="off">\u5173\u95ED</option>
+              </select>
+            </label>
+            <label class="story-echo-field">
+              <span>\u53C2\u8003\u4E0A\u4E0B\u6587\u603B\u9884\u7B97</span>
+              <input id="story-echo-reference-tokens" class="text_pole" type="number" min="256" max="16000" step="100">
+            </label>
+            <label class="story-echo-field">
+              <span>\u4E16\u754C\u4E66\u6700\u591A\u6761\u76EE</span>
+              <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
+            </label>
+            <p class="story-echo-hint story-echo-field-wide">
+              \u5F00\u542F\u540E\u81EA\u52A8\u5B8C\u6210\u62BD\u53D6\u3001\u6574\u7406\u3001\u5411\u91CF\u540C\u6B65\u3001\u68C0\u7D22\u4E0E\u8BF7\u6C42\u7EA7\u6CE8\u5165\u3002LLM\u67E5\u8BE2\u6539\u5199\u5931\u8D25\u65F6\u56DE\u9000\u672C\u5730\u89C4\u5219\uFF1B\u5DF2\u6709\u5143\u6570\u636E\u5728\u5173\u95ED\u540E\u4ECD\u4F1A\u4FDD\u7559\u3002
+              \u62BD\u53D6\u53C2\u8003\u53EA\u8BFB\u53D6\u89D2\u8272\u7CBE\u7B80\u4FE1\u606F\u548C\u8BE5\u5386\u53F2\u6279\u6B21\u76F4\u63A5\u547D\u4E2D\u7684\u4E16\u754C\u4E66\uFF0C\u4E0D\u4F20\u5165\u9884\u8BBE\u3001system\u3001jailbreak\u3001\u793A\u4F8B\u5BF9\u8BDD\u6216\u6B22\u8FCE\u8BED\u3002
+            </p>
           </div>
         </details>
 
@@ -9131,26 +9249,6 @@ function panelTemplate() {
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
           </summary>
           <div class="story-echo-grid story-echo-section-body">
-            <div class="story-echo-switch-row story-echo-field-wide">
-              <div class="story-echo-switch-copy">
-                <span class="story-echo-switch-title">\u542F\u7528\u5206\u6279\u9636\u6BB5\u603B\u7ED3</span>
-                <span class="story-echo-switch-description">\u7A97\u53E3\u5916\u6BCF\u6EE1\u4E00\u6279\u5C31\u65B0\u589E\u4E00\u6761\u72EC\u7ACB\u603B\u7ED3</span>
-              </div>
-              <div class="story-echo-toggle">
-                <input id="story-echo-summary-enabled" class="story-echo-toggle-input" type="checkbox">
-                <label class="story-echo-toggle-label" for="story-echo-summary-enabled" aria-label="\u542F\u7528\u5206\u6279\u9636\u6BB5\u603B\u7ED3"></label>
-              </div>
-            </div>
-            <div class="story-echo-switch-row story-echo-field-wide">
-              <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">\u81EA\u52A8\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3</span>
-              <span class="story-echo-switch-description">\u8FBE\u5230\u4E00\u6279\u540E\u5728AI\u56DE\u590D\u5B8C\u6210\u540E\u540E\u53F0\u66F4\u65B0\uFF1B\u751F\u6210\u524D\u4E0D\u7B49\u5F85\uFF0C\u672A\u603B\u7ED3\u539F\u6587\u7EE7\u7EED\u4FDD\u7559</span>
-              </div>
-              <div class="story-echo-toggle">
-                <input id="story-echo-summary-automatic" class="story-echo-toggle-input" type="checkbox">
-                <label class="story-echo-toggle-label" for="story-echo-summary-automatic" aria-label="\u81EA\u52A8\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3"></label>
-              </div>
-            </div>
             <label class="story-echo-field">
               <span>\u603B\u7ED3\u95F4\u9694 N\uFF08\u7528\u6237 + AI \u8F6E\u6B21\uFF09</span>
               <input id="story-echo-summary-turns" class="text_pole" type="number" min="1" max="100" step="1">
@@ -9164,7 +9262,7 @@ function panelTemplate() {
               <input id="story-echo-summary-max-tokens" class="text_pole" type="number" min="128" max="8192" step="128">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              \u6700\u5C0F\u7A97\u53E3 W \u5185\u539F\u6587\u59CB\u7EC8\u4FDD\u7559\uFF1B\u7A97\u53E3\u5916\u6BCF\u6EE1 N \u8F6E\u751F\u6210\u4E00\u6761\u72EC\u7ACB\u603B\u7ED3\uFF0C\u672A\u6EE1 N \u8F6E\u7EE7\u7EED\u4FDD\u7559\u539F\u6587\uFF1B\u6BCF\u6B21\u8BF7\u6C42\u53EA\u5E26\u6700\u8FD1 S \u6761\u603B\u7ED3\u3002\u53D8\u66F4\u8FC7\u7684\u8DE8\u9636\u6BB5\u72B6\u6001\u4F1A\u5F62\u6210\u6709\u754C\u6821\u6B63\u5757\uFF1B\u603B\u7ED3\u548C\u6821\u6B63\u4F4D\u4E8E\u8FD1\u671F\u539F\u6587\u524D\uFF0C\u52A8\u6001\u53EC\u56DE\u4F4D\u4E8E\u5F53\u524D User \u524D\uFF0C\u5747\u4E0D\u5199\u5165\u804A\u5929\u8BB0\u5F55\u3002
+              \u603B\u5F00\u5173\u5F00\u542F\u540E\u81EA\u52A8\u7EF4\u62A4\u9636\u6BB5\u603B\u7ED3\u3002\u6700\u5C0F\u7A97\u53E3 W \u5185\u539F\u6587\u59CB\u7EC8\u4FDD\u7559\uFF1B\u7A97\u53E3\u5916\u6BCF\u6EE1 N \u8F6E\u751F\u6210\u4E00\u6761\u72EC\u7ACB\u603B\u7ED3\uFF0C\u672A\u6EE1 N \u8F6E\u7EE7\u7EED\u4FDD\u7559\u539F\u6587\uFF1B\u6BCF\u6B21\u8BF7\u6C42\u53EA\u5E26\u6700\u8FD1 S \u6761\u603B\u7ED3\u3002
             </p>
           </div>
         </details>
@@ -9255,7 +9353,7 @@ function panelTemplate() {
           </div>
         </details>
 
-        <details class="story-echo-section story-echo-collapsible">
+        <details class="story-echo-section story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-database" aria-hidden="true"></i>
@@ -9281,7 +9379,7 @@ function panelTemplate() {
           </div>
         </details>
 
-        <details id="story-echo-volcengine-embedding" class="story-echo-subsection story-echo-collapsible">
+        <details id="story-echo-volcengine-embedding" class="story-echo-subsection story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-fire" aria-hidden="true"></i>
@@ -9326,7 +9424,7 @@ function panelTemplate() {
           </div>
         </details>
 
-        <details id="story-echo-custom-embedding" class="story-echo-subsection story-echo-collapsible">
+        <details id="story-echo-custom-embedding" class="story-echo-subsection story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-vector-square" aria-hidden="true"></i>
@@ -9455,17 +9553,22 @@ function populateCustomModelOptions(panel, models, currentModel) {
 function syncVisibility(panel, settings) {
   const custom = element2(panel, "#story-echo-custom-provider");
   custom.hidden = settings.llm.provider !== "openai-compatible";
+  for (const memoryOnly of panel.querySelectorAll("[data-story-echo-memory-only]")) {
+    memoryOnly.hidden = !settings.memory.enabled;
+  }
   const customEmbedding = element2(panel, "#story-echo-custom-embedding");
-  customEmbedding.hidden = settings.vector.source !== "openai-compatible";
+  customEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== "openai-compatible";
   const volcengineEmbedding = element2(panel, "#story-echo-volcengine-embedding");
-  volcengineEmbedding.hidden = settings.vector.source !== "volcengine-multimodal";
+  volcengineEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== "volcengine-multimodal";
+  const rebuildMemories = element2(panel, "#story-echo-memory-rebuild");
+  rebuildMemories.disabled = !settings.memory.enabled;
+  rebuildMemories.title = settings.memory.enabled ? "" : "\u542F\u7528\u201C\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE\u201D\u540E\u624D\u80FD\u91CD\u5EFA\u81EA\u52A8\u5143\u6570\u636E";
 }
 function syncForm(panel, settings) {
   element2(panel, "#story-echo-enabled").checked = settings.enabled;
+  element2(panel, "#story-echo-memory-enabled").checked = settings.memory.enabled;
   element2(panel, "#story-echo-window-size").value = String(settings.recentWindow.size);
   element2(panel, "#story-echo-window-unit").value = settings.recentWindow.unit;
-  element2(panel, "#story-echo-summary-enabled").checked = settings.summary.enabled;
-  element2(panel, "#story-echo-summary-automatic").checked = settings.summary.automatic;
   element2(panel, "#story-echo-summary-turns").value = String(settings.summary.targetTurnsPerUpdate);
   element2(panel, "#story-echo-summary-window").value = String(settings.summary.windowSize);
   element2(panel, "#story-echo-summary-max-tokens").value = String(settings.summary.maxTokens);
@@ -9474,7 +9577,6 @@ function syncForm(panel, settings) {
   element2(panel, "#story-echo-threshold").value = String(settings.recall.scoreThreshold);
   element2(panel, "#story-echo-query-mode").value = settings.recall.queryMode;
   element2(panel, "#story-echo-provider").value = settings.llm.provider;
-  element2(panel, "#story-echo-auto-extract").checked = settings.extraction.automatic;
   element2(panel, "#story-echo-extraction-turns").value = String(settings.extraction.targetTurnsPerChunk);
   element2(panel, "#story-echo-reference-mode").value = settings.extraction.reference.mode;
   element2(panel, "#story-echo-reference-tokens").value = String(settings.extraction.reference.maxTokens);
@@ -9508,6 +9610,13 @@ function bindSettings(panel) {
     });
     scheduleDerivedUpdate();
   });
+  element2(panel, "#story-echo-memory-enabled").addEventListener("change", (event) => {
+    const settings = settingsRepository2.update((current) => {
+      current.memory.enabled = event.currentTarget.checked;
+    });
+    syncVisibility(panel, settings);
+    scheduleDerivedUpdate();
+  });
   element2(panel, "#story-echo-window-size").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.recentWindow.size = Math.max(0, Math.floor(numberValue(event.currentTarget, 10)));
@@ -9517,18 +9626,6 @@ function bindSettings(panel) {
   element2(panel, "#story-echo-window-unit").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.recentWindow.unit = event.currentTarget.value;
-    });
-    scheduleDerivedUpdate();
-  });
-  element2(panel, "#story-echo-summary-enabled").addEventListener("change", (event) => {
-    settingsRepository2.update((settings) => {
-      settings.summary.enabled = event.currentTarget.checked;
-    });
-    scheduleDerivedUpdate();
-  });
-  element2(panel, "#story-echo-summary-automatic").addEventListener("change", (event) => {
-    settingsRepository2.update((settings) => {
-      settings.summary.automatic = event.currentTarget.checked;
     });
     scheduleDerivedUpdate();
   });
@@ -9578,12 +9675,6 @@ function bindSettings(panel) {
       current.llm.provider = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
-  });
-  element2(panel, "#story-echo-auto-extract").addEventListener("change", (event) => {
-    settingsRepository2.update((settings) => {
-      settings.extraction.automatic = event.currentTarget.checked;
-    });
-    scheduleDerivedUpdate();
   });
   element2(panel, "#story-echo-extraction-turns").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
@@ -9831,21 +9922,21 @@ function bindSettings(panel) {
           return false;
         }
         const target = window.retainedStartIndex - 1;
-        await extractionService.processThrough(target, (progress) => {
-          status.textContent = `\u6B63\u5728\u62BD\u53D6\u6D88\u606F ${progress.startMessageId}\uFF5E${progress.endMessageId} / ${progress.targetEndMessageId}\uFF0C\u65B0\u589E ${progress.newMemoryCount} \u6761\u3001\u66F4\u65B0 ${progress.changedMemoryCount} \u6761\u4E8B\u4EF6\u2026\u2026`;
-        });
-        if (settings.summary.enabled) {
-          await stageSummaryService.processAllThrough(target, (progress) => {
-            status.textContent = `\u6B63\u5728\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.startMessageId}\uFF5E${progress.endMessageId} / ${progress.targetEndMessageId}\u2026\u2026`;
+        if (settings.memory.enabled) {
+          await extractionService.processThrough(target, (progress) => {
+            status.textContent = `\u6B63\u5728\u62BD\u53D6\u6D88\u606F ${progress.startMessageId}\uFF5E${progress.endMessageId} / ${progress.targetEndMessageId}\uFF0C\u65B0\u589E ${progress.newMemoryCount} \u6761\u3001\u66F4\u65B0 ${progress.changedMemoryCount} \u6761\u4E8B\u4EF6\u2026\u2026`;
           });
         }
+        await stageSummaryService.processAllThrough(target, (progress) => {
+          status.textContent = `\u6B63\u5728\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.startMessageId}\uFF5E${progress.endMessageId} / ${progress.targetEndMessageId}\u2026\u2026`;
+        });
         return true;
       });
       if (!processed) {
         notify.info("\u5F53\u524D\u6CA1\u6709\u7A97\u53E3\u5916\u5386\u53F2\u9700\u8981\u5904\u7406\u3002");
         return;
       }
-      notify.success("\u7A97\u53E3\u5916\u5386\u53F2\u5904\u7406\u5B8C\u6210\uFF1B\u4E0D\u8DB3\u6240\u914D\u7F6E\u62BD\u53D6\u6216\u603B\u7ED3\u6279\u6B21\u7684\u5C3E\u90E8\u539F\u6587\u4F1A\u7EE7\u7EED\u4FDD\u7559\u3002");
+      notify.success("\u7A97\u53E3\u5916\u5386\u53F2\u5904\u7406\u5B8C\u6210\uFF1B\u4E0D\u8DB3\u6240\u914D\u7F6E\u6279\u6B21\u7684\u5C3E\u90E8\u539F\u6587\u4F1A\u7EE7\u7EED\u4FDD\u7559\u3002");
       await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : "\u5386\u53F2\u5904\u7406\u5931\u8D25\u3002");
@@ -9863,16 +9954,19 @@ function bindSettings(panel) {
       notify.info("\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709StoryEcho\u8C03\u8BD5\u6570\u636E\u3002");
       return;
     }
-    let vectorCount = "unavailable";
-    try {
-      vectorCount = (await vectorStore2.list(
-        state.vectorCollectionId,
-        resolveVectorConfig(settingsRepository2.get())
-      )).length;
-    } catch {
+    const settings = settingsRepository2.get();
+    let vectorCount = settings.memory.enabled ? "unavailable" : "memory-disabled";
+    if (settings.memory.enabled) {
+      try {
+        vectorCount = (await vectorStore2.list(
+          state.vectorCollectionId,
+          resolveVectorConfig(settings)
+        )).length;
+      } catch {
+      }
     }
     try {
-      await copyText(buildDebugReport(state, settingsRepository2.get(), vectorCount));
+      await copyText(buildDebugReport(state, settings, vectorCount));
       notify.success("\u8C03\u8BD5\u62A5\u544A\u5DF2\u590D\u5236\u3002");
     } catch (error) {
       notify.error(error instanceof Error ? error.message : "\u590D\u5236\u8C03\u8BD5\u62A5\u544A\u5931\u8D25\u3002");
@@ -10027,6 +10121,8 @@ async function refreshStatus(panel, refreshVectorCount = false) {
   const inspection = element2(panel, "#story-echo-inspection");
   const traces = element2(panel, "#story-echo-traces");
   try {
+    const currentSettings = settingsRepository2.get();
+    syncVisibility(panel, currentSettings);
     const state = memoryRepository2.getExisting();
     if (!state) {
       cachedVectorCollectionId = "";
@@ -10049,12 +10145,15 @@ async function refreshStatus(panel, refreshVectorCount = false) {
       cachedVectorRevision = "";
     }
     const currentVectorRevision = vectorRevision(state);
-    if (refreshVectorCount || cachedVectorRevision !== currentVectorRevision) {
+    if (!currentSettings.memory.enabled) {
+      cachedVectorRevision = currentVectorRevision;
+      cachedVectorCountText = "\u672A\u8BFB\u53D6\uFF08\u8BB0\u5FC6\u5DF2\u5173\u95ED\uFF09";
+    } else if (refreshVectorCount || cachedVectorRevision !== currentVectorRevision) {
       cachedVectorRevision = currentVectorRevision;
       try {
         const hashes = await vectorStore2.list(
           state.vectorCollectionId,
-          resolveVectorConfig(settingsRepository2.get())
+          resolveVectorConfig(currentSettings)
         );
         cachedVectorCountText = String(hashes.length);
       } catch (error) {
@@ -10062,27 +10161,32 @@ async function refreshStatus(panel, refreshVectorCount = false) {
         logger.debug("\u8BFB\u53D6\u5411\u91CF\u72B6\u6001\u5931\u8D25\u3002", error);
       }
     }
-    const currentSettings = settingsRepository2.get();
     const context = getContext();
     const backgroundTarget = backgroundTargetMessageId(context.chat, currentSettings);
-    const pendingExtractionTurns = backgroundTarget > state.indexedThroughMessageId ? countCompletedTurns(context.chat.slice(
+    const pendingExtractionTurns = currentSettings.memory.enabled && backgroundTarget > state.indexedThroughMessageId ? countCompletedTurns(context.chat.slice(
       state.indexedThroughMessageId + 1,
       backgroundTarget + 1
     )) : 0;
     target.textContent = [
-      `\u5267\u60C5\u4E8B\u4EF6\uFF1A${state.memories.length}`,
-      `\u5411\u91CF\uFF1A${cachedVectorCountText}`,
-      `\u5F85\u540C\u6B65\u5411\u91CF\uFF1A${state.pendingVectorHashes.length}`,
-      `\u5F85\u5220\u9664\u5411\u91CF\uFF1A${state.pendingVectorDeleteHashes.length}`,
-      `\u5DF2\u5904\u7406\u5230\u6D88\u606F\uFF1A${state.indexedThroughMessageId}`,
-      `\u62BD\u53D6\u6279\u6B21\uFF1A\u6BCF${currentSettings.extraction.targetTurnsPerChunk}\u8F6E\uFF08\u7A97\u53E3\u5916\u5F85\u5904\u7406${pendingExtractionTurns}\u8F6E\uFF09`,
+      currentSettings.memory.enabled ? "\u6A21\u5F0F\uFF1A\u4E0A\u4E0B\u6587\u603B\u7ED3 + \u5267\u60C5\u8BB0\u5FC6" : "\u6A21\u5F0F\uFF1A\u4EC5\u4E0A\u4E0B\u6587\u7A97\u53E3 + \u9636\u6BB5\u603B\u7ED3",
+      ...currentSettings.memory.enabled ? [
+        `\u5267\u60C5\u4E8B\u4EF6\uFF1A${state.memories.length}`,
+        `\u5411\u91CF\uFF1A${cachedVectorCountText}`,
+        `\u5F85\u540C\u6B65\u5411\u91CF\uFF1A${state.pendingVectorHashes.length}`,
+        `\u5F85\u5220\u9664\u5411\u91CF\uFF1A${state.pendingVectorDeleteHashes.length}`,
+        `\u5DF2\u5904\u7406\u5230\u6D88\u606F\uFF1A${state.indexedThroughMessageId}`,
+        `\u62BD\u53D6\u6279\u6B21\uFF1A\u6BCF${currentSettings.extraction.targetTurnsPerChunk}\u8F6E\uFF08\u7A97\u53E3\u5916\u5F85\u5904\u7406${pendingExtractionTurns}\u8F6E\uFF09`,
+        `\u96C6\u5408\uFF1A${state.vectorCollectionId}`
+      ] : [
+        `\u5267\u60C5\u8BB0\u5FC6\uFF1A\u5DF2\u5173\u95ED\uFF08\u4FDD\u7559 ${state.memories.length} \u6761\uFF09`,
+        `\u5411\u91CF\uFF1A${cachedVectorCountText}`
+      ],
       `\u9636\u6BB5\u603B\u7ED3\uFF1A${state.stageSummary.entries.length}\u6761 / \u8986\u76D6\u5230\u6D88\u606F ${state.stageSummary.coveredThroughMessageId}`,
-      `\u96C6\u5408\uFF1A${state.vectorCollectionId}`,
       ...runtimeStatusText()
     ].join("\uFF5C");
     const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
     const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);
-    const currentStateCorrection = renderCurrentStateCoordinationBlock(state.memories);
+    const currentStateCorrection = currentSettings.memory.enabled ? renderCurrentStateCoordinationBlock(state.memories) : "";
     stageSummaryTarget.textContent = visibleSummaries.length > 0 ? [
       `\u5DF2\u4FDD\u5B58 ${state.stageSummary.entries.length} \u6761\uFF1B\u6B63\u5E38\u8BF7\u6C42\u643A\u5E26\u6700\u8FD1 ${visibleSummaries.length} \u6761\u3002`,
       ...visibleSummaries.map((entry, index) => [

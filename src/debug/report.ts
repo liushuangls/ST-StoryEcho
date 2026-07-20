@@ -39,6 +39,7 @@ export function buildDebugReport(
     },
     settings: {
       enabled: settings.enabled,
+      memoryEnabled: settings.memory.enabled,
       debug: settings.debug,
       recentWindow: settings.recentWindow,
       summary: settings.summary,

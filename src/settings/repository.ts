@@ -78,6 +78,29 @@ function migratePerformanceDefaults(settings: StoryEchoSettings, stored: unknown
   settings.version = DEFAULT_SETTINGS.version;
 }
 
+function migrateFeatureLayers(settings: StoryEchoSettings, stored: unknown): void {
+  const storedRoot = isRecord(stored) ? stored : {};
+  const hasStoredSettings = Object.keys(storedRoot).length > 0;
+  const storedMemory = isRecord(storedRoot['memory']) ? storedRoot['memory'] : {};
+  if (hasStoredSettings && typeof storedMemory['enabled'] !== 'boolean') {
+    const storedExtraction = isRecord(storedRoot['extraction']) ? storedRoot['extraction'] : {};
+    const storedRecall = isRecord(storedRoot['recall']) ? storedRoot['recall'] : {};
+    const extractionWasEnabled = storedExtraction['automatic'] !== false;
+    const recallWasEnabled = (
+      (typeof storedRecall['maxEvents'] !== 'number' || storedRecall['maxEvents'] > 0) &&
+      (typeof storedRecall['maxTokens'] !== 'number' || storedRecall['maxTokens'] > 0)
+    );
+    settings.memory.enabled = extractionWasEnabled || recallWasEnabled;
+  }
+
+  // Since 0.17 the product exposes only the master switch and the memory
+  // switch. Keep these legacy fields synchronized so old diagnostics and
+  // downgraded installs see the closest equivalent behavior.
+  settings.summary.enabled = true;
+  settings.summary.automatic = true;
+  settings.extraction.automatic = settings.memory.enabled;
+}
+
 function boundedInteger(value: number, minimum: number, maximum: number, fallback: number): number {
   return Number.isFinite(value)
     ? Math.min(maximum, Math.max(minimum, Math.floor(value)))
@@ -197,6 +220,7 @@ export class SettingsRepository {
     const settings = mergeKnown(cloneDefaults(), stored);
     migrateLegacyVolcengineEmbedding(settings, stored);
     migratePerformanceDefaults(settings, stored);
+    migrateFeatureLayers(settings, stored);
     normalizeSettings(settings);
     context.extensionSettings[MODULE_ID] = settings;
     return settings;
@@ -205,6 +229,7 @@ export class SettingsRepository {
   update(mutator: (settings: StoryEchoSettings) => void): StoryEchoSettings {
     const settings = this.get();
     mutator(settings);
+    migrateFeatureLayers(settings, settings);
     normalizeSettings(settings);
     getContext().saveSettingsDebounced();
     return settings;

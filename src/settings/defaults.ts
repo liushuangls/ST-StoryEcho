@@ -4,6 +4,9 @@ import type { StoryEchoSettings } from '../core/types';
 export const DEFAULT_SETTINGS = Object.freeze({
   version: SETTINGS_VERSION,
   enabled: false,
+  memory: {
+    enabled: false,
+  },
   debug: false,
   recentWindow: {
     size: 10,
@@ -23,7 +26,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     queryMode: 'llm',
   },
   extraction: {
-    automatic: true,
+    automatic: false,
     targetTurnsPerChunk: 5,
     reference: {
       mode: 'character-world-info',
