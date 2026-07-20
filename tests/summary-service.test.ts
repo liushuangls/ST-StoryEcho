@@ -365,6 +365,28 @@ describe('independent stage summaries', () => {
     expect(generateRaw).not.toHaveBeenCalled();
   });
 
+  it('summarizes a complete long turn when the character cap cuts a batch before N turns', async () => {
+    const summary = sectionedSummary('第一段超长剧情已经压缩。');
+    const generateRaw = vi.fn(async () => summary);
+    installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: '甲'.repeat(40_000) },
+      { is_user: true, mes: 'u2' },
+      { is_user: false, mes: '乙'.repeat(40_000) },
+    ], generateRaw, 10);
+
+    const result = await new StageSummaryService().processAllThrough(3);
+
+    expect(result.updatedChunks).toBe(1);
+    expect(result.state?.stageSummary.entries).toMatchObject([{
+      text: summary,
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 1,
+    }]);
+    expect(result.state?.stageSummary.coveredThroughMessageId).toBe(1);
+    expect(generateRaw).toHaveBeenCalledTimes(1);
+  });
+
   it('creates immutable entries for successive batches without feeding an old summary back', async () => {
     const generateRaw = vi.fn()
       .mockResolvedValueOnce(sectionedSummary('第一阶段总结'))

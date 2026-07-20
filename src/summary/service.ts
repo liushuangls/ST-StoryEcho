@@ -15,7 +15,7 @@ import {
   STAGE_SUMMARY_SYSTEM_PROMPT,
 } from './prompts';
 
-const MAX_SUMMARY_SOURCE_CHARACTERS = 32_000;
+const MAX_SUMMARY_SOURCE_CHARACTERS = 64_000;
 const MAX_STORED_SUMMARY_CHARACTERS = 64_000;
 export const REQUIRED_SUMMARY_HEADINGS = [
   '【已确认剧情】',
@@ -395,11 +395,24 @@ export class StageSummaryService {
         // An explicit story-phase transition closes the preceding summary even
         // when it contains fewer than N turns. This prevents one immutable
         // summary entry from mixing facts from two otherwise isolated phases.
-        const hasFullTurnBatch = countCompletedTurns(snapshot) >= settings.summary.targetTurnsPerUpdate ||
-          (splitBeforeBoundary && snapshot.some((message) => (
-            !message.is_system && storyContent(message).length > 0
-          )));
-        if (!hasFullTurnBatch) {
+        const completedTurns = countCompletedTurns(snapshot);
+        const hasFullTurnBatch = completedTurns >= settings.summary.targetTurnsPerUpdate;
+        // A normal tail waits until N complete turns accumulate. If the shared
+        // planner stopped before the requested end, however, the hard source
+        // character cap closed this chunk at the latest complete turn. Treat
+        // that bounded chunk as ready or one unusually long reply can block
+        // every later stage summary forever.
+        const stoppedBeforeRequestedEnd = plannedChunk.endMessageId < maximumEnd;
+        const closedByStoryPhase = splitBeforeBoundary && snapshot.some((message) => (
+          !message.is_system && storyContent(message).length > 0
+        ));
+        if (!hasFullTurnBatch && !stoppedBeforeRequestedEnd && !closedByStoryPhase) {
+          recordDebugTrace(state, settings.debug, 'summary', '阶段总结等待凑满配置批次。', {
+            startMessageId: chunk.startMessageId,
+            availableEndMessageId: chunk.endMessageId,
+            completedTurns,
+            targetTurns: settings.summary.targetTurnsPerUpdate,
+          });
           break;
         }
 

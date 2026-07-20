@@ -974,21 +974,33 @@ function bindSettings(panel: HTMLElement): void {
           return false;
         }
         const target = window.retainedStartIndex - 1;
+        const indexedBefore = memoryRepository.getExisting()?.indexedThroughMessageId ?? -1;
+        let indexedAfter = indexedBefore;
         if (settings.memory.enabled) {
-          await extractionService.processThrough(target, (progress) => {
+          const extractionState = await extractionService.processThrough(target, (progress) => {
             status.textContent = `正在抽取消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}，新增 ${progress.newMemoryCount} 条、更新 ${progress.changedMemoryCount} 条事件……`;
           });
+          indexedAfter = extractionState?.indexedThroughMessageId ?? indexedBefore;
         }
-        await stageSummaryService.processAllThrough(target, (progress) => {
+        const summaryResult = await stageSummaryService.processAllThrough(target, (progress) => {
           status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
         });
-        return true;
+        return {
+          summaryChunks: summaryResult.updatedChunks,
+          extractionAdvanced: indexedAfter > indexedBefore,
+        };
       });
       if (!processed) {
         notify.info('当前没有窗口外历史需要处理。');
         return;
       }
-      notify.success('窗口外历史处理完成；不足所配置批次的尾部原文会继续保留。');
+      if (processed.summaryChunks > 0) {
+        notify.success(`窗口外历史处理完成，已生成 ${processed.summaryChunks} 条阶段总结；不足所配置批次的尾部原文会继续保留。`);
+      } else if (processed.extractionAdvanced) {
+        notify.info('窗口外剧情记忆已处理；历史尚不足一个阶段总结批次，尾部原文会继续保留。');
+      } else {
+        notify.info('窗口外历史尚不足一个阶段总结批次，尾部原文会继续保留。');
+      }
       await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : '历史处理失败。');

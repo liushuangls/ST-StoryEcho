@@ -6773,7 +6773,7 @@ function buildStageSummaryPrompt(messages, sourceStartMessageId, identity = { us
 }
 
 // src/summary/service.ts
-var MAX_SUMMARY_SOURCE_CHARACTERS = 32e3;
+var MAX_SUMMARY_SOURCE_CHARACTERS = 64e3;
 var MAX_STORED_SUMMARY_CHARACTERS = 64e3;
 var REQUIRED_SUMMARY_HEADINGS = [
   "\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011",
@@ -7047,8 +7047,17 @@ var StageSummaryService = class {
           ...message.name ? { name: message.name } : {},
           mes: message.mes
         }));
-        const hasFullTurnBatch = countCompletedTurns(snapshot) >= settings.summary.targetTurnsPerUpdate || splitBeforeBoundary && snapshot.some((message) => !message.is_system && storyContent(message).length > 0);
-        if (!hasFullTurnBatch) {
+        const completedTurns = countCompletedTurns(snapshot);
+        const hasFullTurnBatch = completedTurns >= settings.summary.targetTurnsPerUpdate;
+        const stoppedBeforeRequestedEnd = plannedChunk.endMessageId < maximumEnd;
+        const closedByStoryPhase = splitBeforeBoundary && snapshot.some((message) => !message.is_system && storyContent(message).length > 0);
+        if (!hasFullTurnBatch && !stoppedBeforeRequestedEnd && !closedByStoryPhase) {
+          recordDebugTrace(state, settings.debug, "summary", "\u9636\u6BB5\u603B\u7ED3\u7B49\u5F85\u51D1\u6EE1\u914D\u7F6E\u6279\u6B21\u3002", {
+            startMessageId: chunk.startMessageId,
+            availableEndMessageId: chunk.endMessageId,
+            completedTurns,
+            targetTurns: settings.summary.targetTurnsPerUpdate
+          });
           break;
         }
         const startedAt = performance.now();
@@ -11034,21 +11043,33 @@ function bindSettings(panel) {
           return false;
         }
         const target = window.retainedStartIndex - 1;
+        const indexedBefore = memoryRepository2.getExisting()?.indexedThroughMessageId ?? -1;
+        let indexedAfter = indexedBefore;
         if (settings.memory.enabled) {
-          await extractionService.processThrough(target, (progress) => {
+          const extractionState = await extractionService.processThrough(target, (progress) => {
             status.textContent = `\u6B63\u5728\u62BD\u53D6\u6D88\u606F ${progress.startMessageId}\uFF5E${progress.endMessageId} / ${progress.targetEndMessageId}\uFF0C\u65B0\u589E ${progress.newMemoryCount} \u6761\u3001\u66F4\u65B0 ${progress.changedMemoryCount} \u6761\u4E8B\u4EF6\u2026\u2026`;
           });
+          indexedAfter = extractionState?.indexedThroughMessageId ?? indexedBefore;
         }
-        await stageSummaryService.processAllThrough(target, (progress) => {
+        const summaryResult = await stageSummaryService.processAllThrough(target, (progress) => {
           status.textContent = `\u6B63\u5728\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.startMessageId}\uFF5E${progress.endMessageId} / ${progress.targetEndMessageId}\u2026\u2026`;
         });
-        return true;
+        return {
+          summaryChunks: summaryResult.updatedChunks,
+          extractionAdvanced: indexedAfter > indexedBefore
+        };
       });
       if (!processed) {
         notify.info("\u5F53\u524D\u6CA1\u6709\u7A97\u53E3\u5916\u5386\u53F2\u9700\u8981\u5904\u7406\u3002");
         return;
       }
-      notify.success("\u7A97\u53E3\u5916\u5386\u53F2\u5904\u7406\u5B8C\u6210\uFF1B\u4E0D\u8DB3\u6240\u914D\u7F6E\u6279\u6B21\u7684\u5C3E\u90E8\u539F\u6587\u4F1A\u7EE7\u7EED\u4FDD\u7559\u3002");
+      if (processed.summaryChunks > 0) {
+        notify.success(`\u7A97\u53E3\u5916\u5386\u53F2\u5904\u7406\u5B8C\u6210\uFF0C\u5DF2\u751F\u6210 ${processed.summaryChunks} \u6761\u9636\u6BB5\u603B\u7ED3\uFF1B\u4E0D\u8DB3\u6240\u914D\u7F6E\u6279\u6B21\u7684\u5C3E\u90E8\u539F\u6587\u4F1A\u7EE7\u7EED\u4FDD\u7559\u3002`);
+      } else if (processed.extractionAdvanced) {
+        notify.info("\u7A97\u53E3\u5916\u5267\u60C5\u8BB0\u5FC6\u5DF2\u5904\u7406\uFF1B\u5386\u53F2\u5C1A\u4E0D\u8DB3\u4E00\u4E2A\u9636\u6BB5\u603B\u7ED3\u6279\u6B21\uFF0C\u5C3E\u90E8\u539F\u6587\u4F1A\u7EE7\u7EED\u4FDD\u7559\u3002");
+      } else {
+        notify.info("\u7A97\u53E3\u5916\u5386\u53F2\u5C1A\u4E0D\u8DB3\u4E00\u4E2A\u9636\u6BB5\u603B\u7ED3\u6279\u6B21\uFF0C\u5C3E\u90E8\u539F\u6587\u4F1A\u7EE7\u7EED\u4FDD\u7559\u3002");
+      }
       await refreshStatus(panel, true);
     } catch (error) {
       notify.error(error instanceof Error ? error.message : "\u5386\u53F2\u5904\u7406\u5931\u8D25\u3002");
