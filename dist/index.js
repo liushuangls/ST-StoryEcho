@@ -1426,7 +1426,7 @@ var OpenAiCompatibleProvider = class {
       chat_completion_source: "custom",
       group_names: [],
       include_reasoning: false,
-      reasoning_effort: "medium",
+      reasoning_effort: "low",
       enable_web_search: false,
       request_images: false,
       custom_prompt_post_processing: "strict",

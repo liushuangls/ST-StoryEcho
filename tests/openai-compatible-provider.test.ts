@@ -38,6 +38,10 @@ describe('OpenAiCompatibleProvider', () => {
       custom_include_headers: 'Authorization: Bearer llm-secret',
       stream: false,
       max_tokens: 123,
+      include_reasoning: false,
+      reasoning_effort: 'low',
+      temperature: 0,
+      top_p: 1,
       messages: [
         { role: 'system', content: 'system' },
         { role: 'user', content: 'prompt' },
