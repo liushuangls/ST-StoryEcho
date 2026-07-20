@@ -2579,7 +2579,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 7;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.17.1";
+var EXTENSION_VERSION = "0.18.0";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -2596,6 +2596,32 @@ var MEMORY_TYPES = /* @__PURE__ */ new Set([
 ]);
 var MEMORY_STATUSES = /* @__PURE__ */ new Set(["active", "resolved", "superseded", "invalid"]);
 var TRUTH_STATUSES = /* @__PURE__ */ new Set(["confirmed", "claimed", "inferred", "uncertain"]);
+var STAGE_SUMMARY_HEADINGS = [
+  "\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011",
+  "\u3010\u5F53\u524D\u72B6\u6001\u3011",
+  "\u3010\u672A\u89E3\u51B3\u7EBF\u7D22\u3011",
+  "\u3010\u89D2\u8272\u4E3B\u5F20\u4E0E\u63A8\u6D4B\u3011",
+  "\u3010\u5DF2\u5931\u6548\u6216\u5426\u5B9A\u4E8B\u5B9E\u3011"
+];
+var MAX_EDITED_SUMMARY_CHARACTERS = 64e3;
+function normalizeStageSummaryEdit(edit) {
+  const text2 = String(edit.text ?? "").trim();
+  if (!text2) {
+    throw new Error("\u9636\u6BB5\u603B\u7ED3\u6B63\u6587\u4E0D\u80FD\u4E3A\u7A7A\u3002");
+  }
+  if (text2.length > MAX_EDITED_SUMMARY_CHARACTERS) {
+    throw new Error(`\u9636\u6BB5\u603B\u7ED3\u6B63\u6587\u4E0D\u80FD\u8D85\u8FC7${MAX_EDITED_SUMMARY_CHARACTERS}\u4E2A\u5B57\u7B26\u3002`);
+  }
+  let previousIndex = -1;
+  for (const heading of STAGE_SUMMARY_HEADINGS) {
+    const index = text2.indexOf(heading);
+    if (index < 0 || index <= previousIndex) {
+      throw new Error(`\u9636\u6BB5\u603B\u7ED3\u7F3A\u5C11\u6216\u6253\u4E71\u5206\u7EA7\u6807\u9898\uFF1A${heading}`);
+    }
+    previousIndex = index;
+  }
+  return { text: text2 };
+}
 function editableText(value, field, maxLength, required = false) {
   const normalized5 = String(value ?? "").trim().slice(0, maxLength);
   if (required && !normalized5) {
@@ -2695,17 +2721,20 @@ function normalizeStageSummaryEntry(value) {
     return null;
   }
   const text2 = typeof value["text"] === "string" ? value["text"].trim() : "";
+  const deleted = value["deleted"] === true;
   const sourceStartMessageId = Number(value["sourceStartMessageId"]);
   const sourceEndMessageId = Number(value["sourceEndMessageId"]);
-  if (!text2 || !Number.isFinite(sourceStartMessageId) || !Number.isFinite(sourceEndMessageId) || sourceStartMessageId < 0 || sourceEndMessageId < sourceStartMessageId) {
+  if (!text2 && !deleted || !Number.isFinite(sourceStartMessageId) || !Number.isFinite(sourceEndMessageId) || sourceStartMessageId < 0 || sourceEndMessageId < sourceStartMessageId) {
     return null;
   }
   return {
-    text: text2,
+    text: deleted ? "" : text2,
     sourceStartMessageId: Math.floor(sourceStartMessageId),
     sourceEndMessageId: Math.floor(sourceEndMessageId),
     sourceHash: typeof value["sourceHash"] === "string" ? value["sourceHash"] : "",
-    updatedAt: typeof value["updatedAt"] === "string" ? value["updatedAt"] : LEGACY_SUMMARY_UPDATED_AT
+    updatedAt: typeof value["updatedAt"] === "string" ? value["updatedAt"] : LEGACY_SUMMARY_UPDATED_AT,
+    ...value["manuallyEdited"] === true ? { manuallyEdited: true } : {},
+    ...deleted ? { deleted: true } : {}
   };
 }
 function normalizeStageSummary(value) {
@@ -2977,6 +3006,79 @@ var MemoryRepository = class {
         removed.vectorHash
       ])];
     }
+    await this.save(state);
+    return state;
+  }
+  async updateStageSummaryEntry(sourceStartMessageId, edit) {
+    const state = await this.getOrCreate();
+    if (!state) {
+      throw new Error("\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u804A\u5929\u3002");
+    }
+    const index = state.stageSummary.entries.findIndex(
+      (entry) => entry.sourceStartMessageId === sourceStartMessageId
+    );
+    const existing = index >= 0 ? state.stageSummary.entries[index] : void 0;
+    if (!existing || existing.deleted) {
+      throw new Error("\u8981\u4FEE\u6539\u7684\u9636\u6BB5\u603B\u7ED3\u4E0D\u5B58\u5728\uFF0C\u53EF\u80FD\u5DF2\u5728\u5176\u4ED6\u9875\u9762\u5220\u9664\u6216\u5931\u6548\u3002");
+    }
+    const normalized5 = normalizeStageSummaryEdit(edit);
+    state.stageSummary.entries[index] = {
+      ...existing,
+      text: normalized5.text,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      manuallyEdited: true
+    };
+    const latest = state.stageSummary.entries.at(-1);
+    state.stageSummary = {
+      entries: state.stageSummary.entries,
+      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+      coveredThroughHash: latest?.sourceHash ?? "",
+      ...latest ? { updatedAt: latest.updatedAt } : {}
+    };
+    delete state.lastInspection;
+    await this.save(state);
+    return state;
+  }
+  /**
+   * Deleting the physical tail retreats the coverage cursor so that tail's
+   * raw source participates in later requests again. Deleting an older entry
+   * leaves a coverage tombstone: the summary stops being injected, while old
+   * raw history stays compressed and all later summaries remain valid.
+   */
+  async deleteStageSummaryEntry(sourceStartMessageId) {
+    const state = await this.getOrCreate();
+    if (!state) {
+      throw new Error("\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u804A\u5929\u3002");
+    }
+    const index = state.stageSummary.entries.findIndex(
+      (entry) => entry.sourceStartMessageId === sourceStartMessageId
+    );
+    if (index < 0) {
+      throw new Error("\u8981\u5220\u9664\u7684\u9636\u6BB5\u603B\u7ED3\u4E0D\u5B58\u5728\uFF0C\u53EF\u80FD\u5DF2\u5728\u5176\u4ED6\u9875\u9762\u5220\u9664\u6216\u5931\u6548\u3002");
+    }
+    const existing = state.stageSummary.entries[index];
+    if (existing.deleted) {
+      throw new Error("\u8981\u5220\u9664\u7684\u9636\u6BB5\u603B\u7ED3\u4E0D\u5B58\u5728\uFF0C\u53EF\u80FD\u5DF2\u5728\u5176\u4ED6\u9875\u9762\u5220\u9664\u6216\u5931\u6548\u3002");
+    }
+    const entries = [...state.stageSummary.entries];
+    if (index === entries.length - 1) {
+      entries.pop();
+    } else {
+      entries[index] = {
+        ...existing,
+        text: "",
+        deleted: true,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+    }
+    const latest = entries.at(-1);
+    state.stageSummary = {
+      entries,
+      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+      coveredThroughHash: latest?.sourceHash ?? "",
+      ...latest ? { updatedAt: latest.updatedAt } : {}
+    };
+    delete state.lastInspection;
     await this.save(state);
     return state;
   }
@@ -5531,8 +5633,8 @@ function directlyGroundedStoryMemoryNames(memory, messages) {
   const unsupported = new Set(unsupportedStoryMemoryNames(memory, messages));
   return specific.filter((name) => !unsupported.has(name));
 }
-function normalizedCandidate(candidate, sourceText2, removedUnsupportedThreads, validMessageIds) {
-  const keepUnresolved = !sourceText2 || EXPLICIT_UNRESOLVED_CUE.test(sourceText2);
+function normalizedCandidate(candidate, sourceText3, removedUnsupportedThreads, validMessageIds) {
+  const keepUnresolved = !sourceText3 || EXPLICIT_UNRESOLVED_CUE.test(sourceText3);
   if (!keepUnresolved && candidate.unresolvedThreads.length > 0) {
     removedUnsupportedThreads.push(...candidate.unresolvedThreads);
   }
@@ -5555,7 +5657,7 @@ function rejectionReason(candidate, requireSourceMessageIds) {
   }
   return null;
 }
-function assessMemoryCandidates(candidates, sourceText2 = "", validMessageIds, sourceMessages, sourceStartMessageId = 0, establishedNames = /* @__PURE__ */ new Set()) {
+function assessMemoryCandidates(candidates, sourceText3 = "", validMessageIds, sourceMessages, sourceStartMessageId = 0, establishedNames = /* @__PURE__ */ new Set()) {
   const accepted = [];
   const rejected = [];
   const removedUnsupportedThreads = [];
@@ -5567,8 +5669,8 @@ function assessMemoryCandidates(candidates, sourceText2 = "", validMessageIds, s
         candidate,
         sourceMessages,
         sourceStartMessageId,
-        sourceText2
-      ).text || sourceText2,
+        sourceText3
+      ).text || sourceText3,
       removedUnsupportedThreads,
       validMessageIdSet
     );
@@ -5576,7 +5678,7 @@ function assessMemoryCandidates(candidates, sourceText2 = "", validMessageIds, s
       prefiltered,
       sourceMessages,
       sourceStartMessageId,
-      sourceText2
+      sourceText3
     );
     const unsupportedNames = sourceMessages ? unsupportedSpecificNames(prefiltered, evidence, establishedNames) : [];
     if (unsupportedNames.length > 0) {
@@ -6801,9 +6903,9 @@ function normalizeSummary(raw, sourceMessages = [], userUiPersona = "", requireS
       previousIndex = index;
     }
   }
-  const sourceText2 = sourceMessages.map((message) => storyContent(message)).join("\n");
+  const sourceText3 = sourceMessages.map((message) => storyContent(message)).join("\n");
   const persona = userUiPersona.trim();
-  const identitySafe = persona.length >= 2 && !sourceText2.includes(persona) ? withoutWrapper.replace(new RegExp(escapedRegExp(persona), "gu"), "\u7528\u6237\u89D2\u8272") : withoutWrapper;
+  const identitySafe = persona.length >= 2 && !sourceText3.includes(persona) ? withoutWrapper.replace(new RegExp(escapedRegExp(persona), "gu"), "\u7528\u6237\u89D2\u8272") : withoutWrapper;
   const consistencySafe = requireSections ? removeResolvedSummaryThreads(identitySafe) : identitySafe;
   if (consistencySafe.length > MAX_STORED_SUMMARY_CHARACTERS) {
     throw new Error("\u9636\u6BB5\u603B\u7ED3\u6A21\u578B\u8FD4\u56DE\u5185\u5BB9\u8FC7\u957F\u3002");
@@ -7643,7 +7745,7 @@ function sectionSupportsState(section, entity, after) {
   return entity.length >= 2 && after.length >= 2 && section.includes(entity) && section.includes(after);
 }
 function prepareSummaryEvidence(entries) {
-  return [...entries].sort((left, right) => left.sourceEndMessageId - right.sourceEndMessageId).flatMap((entry) => {
+  return [...entries].filter((entry) => !entry.deleted).sort((left, right) => left.sourceEndMessageId - right.sourceEndMessageId).flatMap((entry) => {
     const sections = summarySections(entry.text);
     return sections.size === 0 ? [] : [{
       sourceEndMessageId: entry.sourceEndMessageId,
@@ -8078,11 +8180,12 @@ ${currentInput?.mes ?? ""}`,
     ) : [];
     const recallBlock = selected.length > 0 || entityConstraints.length > 0 ? renderMemoryBlock(selected, entityConstraints, factVerification) : "";
     const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
-    const summaryPool = storyPhaseScope.boundaryMessageId !== null && !storyPhaseScope.earlierPhaseQuery ? state.stageSummary.entries.filter((entry) => entry.sourceStartMessageId >= storyPhaseScope.boundaryMessageId) : state.stageSummary.entries;
-    if (summaryPool.length < state.stageSummary.entries.length) {
+    const activeStageSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
+    const summaryPool = storyPhaseScope.boundaryMessageId !== null && !storyPhaseScope.earlierPhaseQuery ? activeStageSummaries.filter((entry) => entry.sourceStartMessageId >= storyPhaseScope.boundaryMessageId) : activeStageSummaries;
+    if (summaryPool.length < activeStageSummaries.length) {
       recordDebugTrace(state, settings.debug, "retrieval", "\u5F53\u524D\u5267\u60C5\u9636\u6BB5\u5DF2\u7701\u7565\u8F83\u65E9\u9636\u6BB5\u603B\u7ED3\u3002", {
         boundaryMessageId: storyPhaseScope.boundaryMessageId ?? -1,
-        excludedSummaries: state.stageSummary.entries.length - summaryPool.length
+        excludedSummaries: activeStageSummaries.length - summaryPool.length
       });
     }
     const summaryEntries = summaryPool.slice(-summaryWindowSize);
@@ -8149,7 +8252,8 @@ ${currentInput?.mes ?? ""}`,
       retainedSourceStart,
       removedMessages: window.removableIndices.length,
       summaryCoveredThrough: state.stageSummary.coveredThroughMessageId,
-      summaryEntriesStored: state.stageSummary.entries.length,
+      summaryEntriesStored: activeStageSummaries.length,
+      summaryEntriesDeleted: state.stageSummary.entries.length - activeStageSummaries.length,
       summaryEntriesInjected: summaryBlocks.length,
       intentVectorResults: vectorResults.intent.length,
       sceneVectorResults: vectorResults.scene.length,
@@ -8226,7 +8330,8 @@ function buildDebugReport(state, settings, vectorCount = "unknown") {
       stageSummary: {
         coveredThroughMessageId: state.stageSummary.coveredThroughMessageId,
         updatedAt: state.stageSummary.updatedAt ?? null,
-        entryCount: state.stageSummary.entries.length,
+        entryCount: state.stageSummary.entries.filter((entry) => !entry.deleted).length,
+        deletedEntryCount: state.stageSummary.entries.filter((entry) => entry.deleted).length,
         entries: state.stageSummary.entries,
         currentStateCoordination: renderCurrentStateCoordinationBlock(state.memories) || null
       },
@@ -9066,11 +9171,351 @@ ${current.event}`)) {
   }
 };
 
+// src/ui/summary-manager.ts
+var SUMMARY_PAGE_SIZE = 10;
+function stageSummaryKey(entry) {
+  return `${entry.sourceStartMessageId}:${entry.sourceEndMessageId}`;
+}
+function toggleSummarySelection(currentKey, clickedKey) {
+  return currentKey === clickedKey ? "" : clickedKey;
+}
+function stageSummaryDeletionMode(entries, entry) {
+  return entries.at(-1)?.sourceStartMessageId === entry.sourceStartMessageId ? "restore-raw-tail" : "keep-covered-tombstone";
+}
+function summaryPreview(text2) {
+  const heading = /^【[^】]+】$/u;
+  return text2.split("\n").map((line) => line.trim()).find((line) => line && !heading.test(line) && line !== "\u65E0") ?? "\uFF08\u7A7A\u6BB5\u843D\uFF09";
+}
+function formattedTime(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    return value || "\u672A\u77E5\u65F6\u95F4";
+  }
+  return date.toLocaleString();
+}
+function searchableSummary(entry, index) {
+  return [
+    String(index + 1),
+    `${entry.sourceStartMessageId}-${entry.sourceEndMessageId}`,
+    entry.sourceHash,
+    entry.updatedAt,
+    entry.text
+  ].join("\n").toLocaleLowerCase();
+}
+function sourceText2(entry) {
+  return JSON.stringify({
+    sourceStartMessageId: entry.sourceStartMessageId,
+    sourceEndMessageId: entry.sourceEndMessageId,
+    sourceHash: entry.sourceHash,
+    manuallyEdited: Boolean(entry.manuallyEdited),
+    updatedAt: entry.updatedAt
+  }, null, 2);
+}
+function stageSummaryManagerTemplate() {
+  return `
+    <div class="story-echo-summary-manager">
+      <div class="story-echo-summary-manager-heading">
+        <strong>\u5DF2\u751F\u6210\u7684\u9636\u6BB5\u603B\u7ED3</strong>
+        <span>\u4FDD\u5B58\u5728\u5F53\u524D\u804A\u5929\u5143\u6570\u636E\u4E2D</span>
+      </div>
+      <div class="story-echo-summary-toolbar">
+        <label class="story-echo-field">
+          <span>\u641C\u7D22</span>
+          <input id="story-echo-summary-search" class="text_pole" type="search" placeholder="\u603B\u7ED3\u6B63\u6587\u3001\u6D88\u606F\u8303\u56F4\u6216\u6765\u6E90\u54C8\u5E0C">
+        </label>
+        <button id="story-echo-summary-reload" class="menu_button" type="button">
+          <i class="fa-solid fa-rotate" aria-hidden="true"></i><span>\u5237\u65B0\u5217\u8868</span>
+        </button>
+      </div>
+      <div id="story-echo-summary-count" class="story-echo-summary-count">\u5C1A\u65E0\u9636\u6BB5\u603B\u7ED3\u3002</div>
+      <div id="story-echo-summary-list" class="story-echo-summary-list"></div>
+      <nav id="story-echo-summary-pagination" class="story-echo-summary-pagination" aria-label="\u9636\u6BB5\u603B\u7ED3\u5206\u9875" hidden>
+        <button id="story-echo-summary-previous" class="menu_button" type="button">
+          <i class="fa-solid fa-chevron-left" aria-hidden="true"></i><span>\u4E0A\u4E00\u9875</span>
+        </button>
+        <span id="story-echo-summary-page" class="story-echo-summary-page" aria-live="polite">\u7B2C 1 / 1 \u9875</span>
+        <button id="story-echo-summary-next" class="menu_button" type="button">
+          <span>\u4E0B\u4E00\u9875</span><i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
+        </button>
+      </nav>
+
+      <div id="story-echo-summary-editor" class="story-echo-summary-editor" hidden>
+        <div class="story-echo-summary-editor-heading">
+          <div>
+            <strong>\u7F16\u8F91\u9636\u6BB5\u603B\u7ED3</strong>
+            <div id="story-echo-summary-editor-range" class="story-echo-summary-editor-range"></div>
+          </div>
+          <span class="story-echo-summary-manual-hint">\u4FDD\u5B58\u540E\u4FDD\u7559\u6765\u6E90\u8303\u56F4\u548C\u54C8\u5E0C\uFF0C\u5E76\u6807\u8BB0\u4E3A\u4EBA\u5DE5\u7F16\u8F91</span>
+        </div>
+        <label class="story-echo-field">
+          <span>\u603B\u7ED3\u6B63\u6587</span>
+          <textarea id="story-echo-summary-editor-text" class="text_pole" rows="14" maxlength="64000"></textarea>
+        </label>
+        <div class="story-echo-field story-echo-summary-source-field">
+          <span>\u53EA\u8BFB\u6765\u6E90\u4FE1\u606F</span>
+          <pre id="story-echo-summary-source" class="story-echo-summary-source"></pre>
+        </div>
+        <p class="story-echo-hint">
+          \u8BF7\u4FDD\u7559\u4E94\u4E2A\u5206\u7EA7\u6807\u9898\u3002\u5220\u9664\u7EDD\u4E0D\u4FEE\u6539\u6216\u5220\u9664\u804A\u5929\u539F\u6587\uFF1A\u5220\u9664\u6700\u65B0\u4E00\u6761\u4F1A\u56DE\u9000\u8986\u76D6\u4F4D\u7F6E\uFF0C\u8BA9\u8BE5\u6BB5\u539F\u6587\u91CD\u65B0\u53C2\u4E0E\u540E\u7EED\u8BF7\u6C42\uFF1B\u5220\u9664\u66F4\u8001\u7684\u6761\u76EE\u53EA\u505C\u7528\u8BE5\u603B\u7ED3\uFF0C\u4E0D\u91CD\u65B0\u53D1\u9001\u5F88\u8001\u7684\u539F\u6587\uFF0C\u4E5F\u4E0D\u5F71\u54CD\u540E\u7EED\u603B\u7ED3\u3002
+        </p>
+        <div class="story-echo-summary-editor-actions">
+          <button id="story-echo-summary-save" class="menu_button story-echo-action-primary" type="button">
+            <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u4FEE\u6539</span>
+          </button>
+          <button id="story-echo-summary-delete" class="menu_button story-echo-summary-delete" type="button">
+            <i class="fa-solid fa-trash" aria-hidden="true"></i><span>\u5220\u9664\u603B\u7ED3</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+function element2(panel, selector) {
+  const found = panel.querySelector(selector);
+  if (!found) {
+    throw new Error(`\u9636\u6BB5\u603B\u7ED3\u7BA1\u7406\u63A7\u4EF6\u4E0D\u5B58\u5728\uFF1A${selector}`);
+  }
+  return found;
+}
+var StageSummaryMetadataManager = class {
+  constructor(repository) {
+    this.repository = repository;
+  }
+  selectedSummaryKey = "";
+  populatedSummaryKey = "";
+  populatedUpdatedAt = "";
+  editorDirty = false;
+  editorRevision = 0;
+  currentPage = 1;
+  renderedChatUuid = "";
+  bind(panel, onChanged) {
+    const editor = element2(panel, "#story-echo-summary-editor");
+    const editorText = element2(panel, "#story-echo-summary-editor-text");
+    const markDirty = () => {
+      this.editorDirty = true;
+      this.editorRevision += 1;
+    };
+    editorText.addEventListener("input", markDirty);
+    editorText.addEventListener("change", markDirty);
+    element2(panel, "#story-echo-summary-search").addEventListener("input", () => {
+      this.currentPage = 1;
+      this.render(panel, this.repository.getExisting());
+    });
+    element2(panel, "#story-echo-summary-reload").addEventListener("click", () => {
+      this.currentPage = 1;
+      this.render(panel, this.repository.getExisting());
+    });
+    element2(panel, "#story-echo-summary-previous").addEventListener("click", () => {
+      this.changePage(panel, this.currentPage - 1);
+    });
+    element2(panel, "#story-echo-summary-next").addEventListener("click", () => {
+      this.changePage(panel, this.currentPage + 1);
+    });
+    element2(panel, "#story-echo-summary-list").addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const button = target.closest("button[data-summary-key]");
+      if (!button?.dataset.summaryKey) {
+        return;
+      }
+      const nextKey = toggleSummarySelection(this.selectedSummaryKey, button.dataset.summaryKey);
+      if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u9636\u6BB5\u603B\u7ED3\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u5173\u95ED\u6216\u5207\u6362\u5417\uFF1F")) {
+        return;
+      }
+      this.selectedSummaryKey = nextKey;
+      this.editorDirty = false;
+      this.populatedSummaryKey = "";
+      this.render(panel, this.repository.getExisting());
+    });
+    element2(panel, "#story-echo-summary-save").addEventListener("click", async (event) => {
+      const current = this.currentSummary();
+      if (!current) {
+        return;
+      }
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const text2 = editorText.value;
+        const submittedRevision = this.editorRevision;
+        const requestedChatId = getCurrentChatId();
+        const sourceStartMessageId = current.sourceStartMessageId;
+        await storyEchoTaskCoordinator.enqueueManual("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3", async () => {
+          if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+            throw new Error("\u7B49\u5F85\u4FDD\u5B58\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4FEE\u6539\u3002");
+          }
+          return this.repository.updateStageSummaryEntry(sourceStartMessageId, { text: text2 });
+        });
+        if (this.editorRevision === submittedRevision) {
+          this.editorDirty = false;
+        }
+        await onChanged();
+        notify.success("\u9636\u6BB5\u603B\u7ED3\u5DF2\u4FDD\u5B58\u3002");
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : "\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u5931\u8D25\u3002");
+      } finally {
+        button.disabled = false;
+      }
+    });
+    element2(panel, "#story-echo-summary-delete").addEventListener("click", async (event) => {
+      const state = this.repository.getExisting();
+      const current = this.currentSummary(state);
+      if (!state || !current) {
+        this.resetSelection();
+        this.render(panel, state);
+        return;
+      }
+      const deletionMode = stageSummaryDeletionMode(state.stageSummary.entries, current);
+      const consequence = deletionMode === "restore-raw-tail" ? "\u8FD9\u662F\u6700\u65B0\u4E00\u6761\u603B\u7ED3\u3002\u5220\u9664\u540E\u8986\u76D6\u4F4D\u7F6E\u4F1A\u56DE\u9000\uFF0C\u8FD9\u4E00\u6BB5\u539F\u6587\u5C06\u91CD\u65B0\u53C2\u4E0E\u540E\u7EED\u8BF7\u6C42\u3002" : "\u8FD9\u662F\u8F83\u8001\u7684\u603B\u7ED3\u3002\u5220\u9664\u540E\u53EA\u4F1A\u505C\u7528\u8BE5\u603B\u7ED3\uFF1B\u5B83\u8986\u76D6\u7684\u65E7\u539F\u6587\u4E0D\u4F1A\u91CD\u65B0\u53D1\u9001\uFF0C\u540E\u7EED\u603B\u7ED3\u4E0E\u8986\u76D6\u4F4D\u7F6E\u4FDD\u6301\u4E0D\u53D8\u3002";
+      if (!globalThis.confirm(
+        `\u5220\u9664\u6D88\u606F ${current.sourceStartMessageId}\uFF5E${current.sourceEndMessageId} \u7684\u9636\u6BB5\u603B\u7ED3\uFF1F
+
+${consequence}
+
+\u4EFB\u4F55\u804A\u5929\u539F\u6587\u90FD\u4E0D\u4F1A\u88AB\u4FEE\u6539\u6216\u5220\u9664\u3002\u82E5\u7B49\u5F85\u671F\u95F4\u540E\u53F0\u65B0\u589E\u4E86\u603B\u7ED3\uFF0C\u5C06\u4EE5\u5B9E\u9645\u6267\u884C\u65F6\u7684\u4F4D\u7F6E\u91C7\u7528\u4E0A\u8FF0\u89C4\u5219\u3002`
+      )) {
+        return;
+      }
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const requestedChatId = getCurrentChatId();
+        const result = await storyEchoTaskCoordinator.enqueueManual("\u5220\u9664\u9636\u6BB5\u603B\u7ED3", async () => {
+          if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+            throw new Error("\u7B49\u5F85\u5220\u9664\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u64CD\u4F5C\u3002");
+          }
+          return this.repository.deleteStageSummaryEntry(current.sourceStartMessageId);
+        });
+        const restoredRaw = !result.stageSummary.entries.some((entry) => entry.sourceStartMessageId === current.sourceStartMessageId);
+        this.resetSelection();
+        await onChanged();
+        notify.success(restoredRaw ? "\u6700\u65B0\u9636\u6BB5\u603B\u7ED3\u5DF2\u5220\u9664\uFF0C\u5BF9\u5E94\u539F\u6587\u5C06\u91CD\u65B0\u53C2\u4E0E\u540E\u7EED\u8BF7\u6C42\u3002" : "\u8F83\u8001\u9636\u6BB5\u603B\u7ED3\u5DF2\u505C\u7528\uFF0C\u5BF9\u5E94\u539F\u6587\u4ECD\u4FDD\u6301\u538B\u7F29\u3002");
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : "\u5220\u9664\u9636\u6BB5\u603B\u7ED3\u5931\u8D25\u3002");
+      } finally {
+        button.disabled = false;
+      }
+    });
+    void editor;
+  }
+  render(panel, state) {
+    const list = element2(panel, "#story-echo-summary-list");
+    const count = element2(panel, "#story-echo-summary-count");
+    const editor = element2(panel, "#story-echo-summary-editor");
+    const pagination = element2(panel, "#story-echo-summary-pagination");
+    const previous = element2(panel, "#story-echo-summary-previous");
+    const next = element2(panel, "#story-echo-summary-next");
+    const pageLabel = element2(panel, "#story-echo-summary-page");
+    const chatUuid = state?.chatUuid ?? "";
+    if (chatUuid !== this.renderedChatUuid) {
+      this.renderedChatUuid = chatUuid;
+      this.currentPage = 1;
+      this.resetSelection();
+    }
+    const entries = (state?.stageSummary.entries ?? []).filter((entry) => !entry.deleted);
+    const selected = entries.find((entry) => stageSummaryKey(entry) === this.selectedSummaryKey);
+    if (this.selectedSummaryKey && !selected) {
+      this.resetSelection();
+    }
+    const search = element2(panel, "#story-echo-summary-search").value.trim().toLocaleLowerCase();
+    const filtered = entries.map((entry, index) => ({ entry, index, key: stageSummaryKey(entry) })).filter(({ entry, index }) => !search || searchableSummary(entry, index).includes(search)).reverse();
+    const page = paginateItems(filtered, this.currentPage, SUMMARY_PAGE_SIZE);
+    this.currentPage = page.page;
+    list.replaceChildren();
+    const pageDescription = `\u7B2C ${page.page} / ${page.totalPages} \u9875\uFF0C\u672C\u9875\u52A0\u8F7D ${page.items.length} \u6761\u3002`;
+    if (entries.length === 0) {
+      count.textContent = "\u5F53\u524D\u804A\u5929\u5C1A\u65E0\u9636\u6BB5\u603B\u7ED3\u3002";
+    } else if (filtered.length === 0) {
+      count.textContent = `\u5171 ${entries.length} \u6761\uFF0C\u7B5B\u9009\u540E 0 \u6761\u3002`;
+    } else if (search) {
+      count.textContent = `\u5171 ${entries.length} \u6761\uFF0C\u7B5B\u9009\u540E ${filtered.length} \u6761\uFF1B${pageDescription}`;
+    } else {
+      count.textContent = `\u5171 ${entries.length} \u6761\uFF1B${pageDescription}`;
+    }
+    pagination.hidden = filtered.length <= page.pageSize;
+    previous.disabled = page.page <= 1;
+    next.disabled = page.page >= page.totalPages;
+    pageLabel.textContent = `\u7B2C ${page.page} / ${page.totalPages} \u9875`;
+    if (filtered.length === 0 && entries.length > 0) {
+      const empty = document.createElement("div");
+      empty.className = "story-echo-summary-empty";
+      empty.textContent = "\u6CA1\u6709\u7B26\u5408\u641C\u7D22\u6761\u4EF6\u7684\u9636\u6BB5\u603B\u7ED3\u3002";
+      list.append(empty);
+    }
+    for (const item of page.items) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "menu_button story-echo-summary-row";
+      button.dataset.summaryKey = item.key;
+      button.classList.toggle(
+        "story-echo-summary-row-selected",
+        item.key === this.selectedSummaryKey
+      );
+      button.setAttribute("aria-expanded", String(item.key === this.selectedSummaryKey));
+      button.setAttribute("aria-controls", "story-echo-summary-editor");
+      const title = document.createElement("span");
+      title.className = "story-echo-summary-row-title";
+      title.textContent = summaryPreview(item.entry.text);
+      const metadata = document.createElement("span");
+      metadata.className = "story-echo-summary-row-meta";
+      metadata.textContent = [
+        `#${item.index + 1}`,
+        `\u6D88\u606F ${item.entry.sourceStartMessageId}\uFF5E${item.entry.sourceEndMessageId}`,
+        formattedTime(item.entry.updatedAt),
+        item.entry.manuallyEdited ? "\u4EBA\u5DE5\u7F16\u8F91" : ""
+      ].filter(Boolean).join(" \xB7 ");
+      button.append(title, metadata);
+      list.append(button);
+    }
+    if (this.selectedSummaryKey && !page.items.some((item) => item.key === this.selectedSummaryKey) && !this.editorDirty) {
+      this.resetSelection();
+    }
+    const current = this.currentSummary(state);
+    editor.hidden = !current;
+    if (current && (stageSummaryKey(current) !== this.populatedSummaryKey || !this.editorDirty && current.updatedAt !== this.populatedUpdatedAt)) {
+      const currentIndex = entries.indexOf(current);
+      this.populateEditor(panel, current, currentIndex);
+      this.populatedSummaryKey = stageSummaryKey(current);
+      this.populatedUpdatedAt = current.updatedAt;
+      this.editorDirty = false;
+    }
+  }
+  currentSummary(state = this.repository.getExisting()) {
+    return state?.stageSummary.entries.find(
+      (entry) => !entry.deleted && stageSummaryKey(entry) === this.selectedSummaryKey
+    );
+  }
+  changePage(panel, requestedPage) {
+    if (requestedPage === this.currentPage) {
+      return;
+    }
+    if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u9636\u6BB5\u603B\u7ED3\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u7FFB\u9875\u5417\uFF1F")) {
+      return;
+    }
+    this.currentPage = requestedPage;
+    this.resetSelection();
+    this.render(panel, this.repository.getExisting());
+  }
+  populateEditor(panel, entry, index) {
+    element2(panel, "#story-echo-summary-editor-range").textContent = `#${index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`;
+    element2(panel, "#story-echo-summary-editor-text").value = entry.text;
+    element2(panel, "#story-echo-summary-source").textContent = sourceText2(entry);
+  }
+  resetSelection() {
+    this.selectedSummaryKey = "";
+    this.populatedSummaryKey = "";
+    this.populatedUpdatedAt = "";
+    this.editorDirty = false;
+  }
+};
+
 // src/ui/settings-panel.ts
 var PANEL_ID = "story-echo-settings";
 var settingsRepository2 = new SettingsRepository();
 var memoryRepository2 = new MemoryRepository();
 var vectorStore2 = new SillyTavernVectorStore();
+var stageSummaryMetadataManager = new StageSummaryMetadataManager(memoryRepository2);
 var memoryMetadataManager = new MemoryMetadataManager(
   memoryRepository2,
   async (state) => settingsRepository2.get().memory.enabled ? extractionService.syncPendingVectors(state) : state,
@@ -9264,6 +9709,9 @@ function panelTemplate() {
             <p class="story-echo-hint story-echo-field-wide">
               \u603B\u5F00\u5173\u5F00\u542F\u540E\u81EA\u52A8\u7EF4\u62A4\u9636\u6BB5\u603B\u7ED3\u3002\u6700\u5C0F\u7A97\u53E3 W \u5185\u539F\u6587\u59CB\u7EC8\u4FDD\u7559\uFF1B\u7A97\u53E3\u5916\u6BCF\u6EE1 N \u8F6E\u751F\u6210\u4E00\u6761\u72EC\u7ACB\u603B\u7ED3\uFF0C\u672A\u6EE1 N \u8F6E\u7EE7\u7EED\u4FDD\u7559\u539F\u6587\uFF1B\u6BCF\u6B21\u8BF7\u6C42\u53EA\u5E26\u6700\u8FD1 S \u6761\u603B\u7ED3\u3002
             </p>
+            <div class="story-echo-field-wide">
+              ${stageSummaryManagerTemplate()}
+            </div>
           </div>
         </details>
 
@@ -9514,7 +9962,7 @@ function panelTemplate() {
   `;
   return panel;
 }
-function element2(panel, selector) {
+function element3(panel, selector) {
   const found = panel.querySelector(selector);
   if (!found) {
     throw new Error(`\u8BBE\u7F6E\u63A7\u4EF6\u4E0D\u5B58\u5728\uFF1A${selector}`);
@@ -9530,7 +9978,7 @@ function numberValue(input, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 function populateCustomModelOptions(panel, models, currentModel) {
-  const select = element2(panel, "#story-echo-model-select");
+  const select = element3(panel, "#story-echo-model-select");
   select.replaceChildren();
   const placeholder = document.createElement("option");
   placeholder.value = "";
@@ -9551,52 +9999,52 @@ function populateCustomModelOptions(panel, models, currentModel) {
   select.value = currentModel || "";
 }
 function syncVisibility(panel, settings) {
-  const custom = element2(panel, "#story-echo-custom-provider");
+  const custom = element3(panel, "#story-echo-custom-provider");
   custom.hidden = settings.llm.provider !== "openai-compatible";
   for (const memoryOnly of panel.querySelectorAll("[data-story-echo-memory-only]")) {
     memoryOnly.hidden = !settings.memory.enabled;
   }
-  const customEmbedding = element2(panel, "#story-echo-custom-embedding");
+  const customEmbedding = element3(panel, "#story-echo-custom-embedding");
   customEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== "openai-compatible";
-  const volcengineEmbedding = element2(panel, "#story-echo-volcengine-embedding");
+  const volcengineEmbedding = element3(panel, "#story-echo-volcengine-embedding");
   volcengineEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== "volcengine-multimodal";
-  const rebuildMemories = element2(panel, "#story-echo-memory-rebuild");
+  const rebuildMemories = element3(panel, "#story-echo-memory-rebuild");
   rebuildMemories.disabled = !settings.memory.enabled;
   rebuildMemories.title = settings.memory.enabled ? "" : "\u542F\u7528\u201C\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE\u201D\u540E\u624D\u80FD\u91CD\u5EFA\u81EA\u52A8\u5143\u6570\u636E";
 }
 function syncForm(panel, settings) {
-  element2(panel, "#story-echo-enabled").checked = settings.enabled;
-  element2(panel, "#story-echo-memory-enabled").checked = settings.memory.enabled;
-  element2(panel, "#story-echo-window-size").value = String(settings.recentWindow.size);
-  element2(panel, "#story-echo-window-unit").value = settings.recentWindow.unit;
-  element2(panel, "#story-echo-summary-turns").value = String(settings.summary.targetTurnsPerUpdate);
-  element2(panel, "#story-echo-summary-window").value = String(settings.summary.windowSize);
-  element2(panel, "#story-echo-summary-max-tokens").value = String(settings.summary.maxTokens);
-  element2(panel, "#story-echo-max-events").value = String(settings.recall.maxEvents);
-  element2(panel, "#story-echo-max-tokens").value = String(settings.recall.maxTokens);
-  element2(panel, "#story-echo-threshold").value = String(settings.recall.scoreThreshold);
-  element2(panel, "#story-echo-query-mode").value = settings.recall.queryMode;
-  element2(panel, "#story-echo-provider").value = settings.llm.provider;
-  element2(panel, "#story-echo-extraction-turns").value = String(settings.extraction.targetTurnsPerChunk);
-  element2(panel, "#story-echo-reference-mode").value = settings.extraction.reference.mode;
-  element2(panel, "#story-echo-reference-tokens").value = String(settings.extraction.reference.maxTokens);
-  element2(panel, "#story-echo-reference-world-info").value = String(settings.extraction.reference.maxWorldInfoEntries);
-  element2(panel, "#story-echo-debug").checked = settings.debug;
-  element2(panel, "#story-echo-base-url").value = settings.llm.custom.baseUrl;
-  element2(panel, "#story-echo-model").value = settings.llm.custom.model;
-  element2(panel, "#story-echo-model-select").value = "";
-  element2(panel, "#story-echo-allow-http").checked = settings.llm.custom.allowInsecureHttp;
-  element2(panel, "#story-echo-fallback-main").checked = settings.llm.custom.fallbackToMain;
-  element2(panel, "#story-echo-api-key").value = settings.llm.custom.apiKey;
-  element2(panel, "#story-echo-vector-source").value = settings.vector.source;
-  element2(panel, "#story-echo-embedding-base-url").value = settings.vector.custom.baseUrl;
-  element2(panel, "#story-echo-embedding-model").value = settings.vector.custom.model;
-  element2(panel, "#story-echo-embedding-allow-http").checked = settings.vector.custom.allowInsecureHttp;
-  element2(panel, "#story-echo-embedding-api-key").value = settings.vector.custom.apiKey;
-  element2(panel, "#story-echo-volcengine-base-url").value = settings.vector.volcengine.baseUrl;
-  element2(panel, "#story-echo-volcengine-model").value = settings.vector.volcengine.model;
-  element2(panel, "#story-echo-volcengine-allow-http").checked = settings.vector.volcengine.allowInsecureHttp;
-  element2(panel, "#story-echo-volcengine-api-key").value = settings.vector.volcengine.apiKey;
+  element3(panel, "#story-echo-enabled").checked = settings.enabled;
+  element3(panel, "#story-echo-memory-enabled").checked = settings.memory.enabled;
+  element3(panel, "#story-echo-window-size").value = String(settings.recentWindow.size);
+  element3(panel, "#story-echo-window-unit").value = settings.recentWindow.unit;
+  element3(panel, "#story-echo-summary-turns").value = String(settings.summary.targetTurnsPerUpdate);
+  element3(panel, "#story-echo-summary-window").value = String(settings.summary.windowSize);
+  element3(panel, "#story-echo-summary-max-tokens").value = String(settings.summary.maxTokens);
+  element3(panel, "#story-echo-max-events").value = String(settings.recall.maxEvents);
+  element3(panel, "#story-echo-max-tokens").value = String(settings.recall.maxTokens);
+  element3(panel, "#story-echo-threshold").value = String(settings.recall.scoreThreshold);
+  element3(panel, "#story-echo-query-mode").value = settings.recall.queryMode;
+  element3(panel, "#story-echo-provider").value = settings.llm.provider;
+  element3(panel, "#story-echo-extraction-turns").value = String(settings.extraction.targetTurnsPerChunk);
+  element3(panel, "#story-echo-reference-mode").value = settings.extraction.reference.mode;
+  element3(panel, "#story-echo-reference-tokens").value = String(settings.extraction.reference.maxTokens);
+  element3(panel, "#story-echo-reference-world-info").value = String(settings.extraction.reference.maxWorldInfoEntries);
+  element3(panel, "#story-echo-debug").checked = settings.debug;
+  element3(panel, "#story-echo-base-url").value = settings.llm.custom.baseUrl;
+  element3(panel, "#story-echo-model").value = settings.llm.custom.model;
+  element3(panel, "#story-echo-model-select").value = "";
+  element3(panel, "#story-echo-allow-http").checked = settings.llm.custom.allowInsecureHttp;
+  element3(panel, "#story-echo-fallback-main").checked = settings.llm.custom.fallbackToMain;
+  element3(panel, "#story-echo-api-key").value = settings.llm.custom.apiKey;
+  element3(panel, "#story-echo-vector-source").value = settings.vector.source;
+  element3(panel, "#story-echo-embedding-base-url").value = settings.vector.custom.baseUrl;
+  element3(panel, "#story-echo-embedding-model").value = settings.vector.custom.model;
+  element3(panel, "#story-echo-embedding-allow-http").checked = settings.vector.custom.allowInsecureHttp;
+  element3(panel, "#story-echo-embedding-api-key").value = settings.vector.custom.apiKey;
+  element3(panel, "#story-echo-volcengine-base-url").value = settings.vector.volcengine.baseUrl;
+  element3(panel, "#story-echo-volcengine-model").value = settings.vector.volcengine.model;
+  element3(panel, "#story-echo-volcengine-allow-http").checked = settings.vector.volcengine.allowInsecureHttp;
+  element3(panel, "#story-echo-volcengine-api-key").value = settings.vector.volcengine.apiKey;
   syncVisibility(panel, settings);
 }
 function bindSettings(panel) {
@@ -9604,108 +10052,108 @@ function bindSettings(panel) {
     backgroundProcessingScheduler.schedule();
     void refreshStatus(panel);
   };
-  element2(panel, "#story-echo-enabled").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-enabled").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.enabled = event.currentTarget.checked;
     });
     scheduleDerivedUpdate();
   });
-  element2(panel, "#story-echo-memory-enabled").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-memory-enabled").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.memory.enabled = event.currentTarget.checked;
     });
     syncVisibility(panel, settings);
     scheduleDerivedUpdate();
   });
-  element2(panel, "#story-echo-window-size").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-window-size").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.recentWindow.size = Math.max(0, Math.floor(numberValue(event.currentTarget, 10)));
     });
     scheduleDerivedUpdate();
   });
-  element2(panel, "#story-echo-window-unit").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-window-unit").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.recentWindow.unit = event.currentTarget.value;
     });
     scheduleDerivedUpdate();
   });
-  element2(panel, "#story-echo-summary-turns").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-summary-turns").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 10));
       settings.summary.targetTurnsPerUpdate = Math.min(100, Math.max(1, value));
     });
     scheduleDerivedUpdate();
   });
-  element2(panel, "#story-echo-summary-window").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-summary-window").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 4));
       settings.summary.windowSize = Math.min(100, Math.max(1, value));
     });
     void refreshStatus(panel);
   });
-  element2(panel, "#story-echo-summary-max-tokens").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-summary-max-tokens").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 1600));
       settings.summary.maxTokens = Math.min(8192, Math.max(128, value));
     });
   });
-  element2(panel, "#story-echo-max-events").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-max-events").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.recall.maxEvents = Math.max(0, Math.floor(numberValue(event.currentTarget, 3)));
     });
   });
-  element2(panel, "#story-echo-max-tokens").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-max-tokens").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.recall.maxTokens = Math.max(0, Math.floor(numberValue(event.currentTarget, 1200)));
     });
   });
-  element2(panel, "#story-echo-threshold").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-threshold").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = numberValue(event.currentTarget, 0.25);
       settings.recall.scoreThreshold = Math.min(1, Math.max(0, value));
     });
   });
-  element2(panel, "#story-echo-query-mode").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-query-mode").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.recall.queryMode = event.currentTarget.value;
     });
   });
-  element2(panel, "#story-echo-provider").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-provider").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.llm.provider = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
   });
-  element2(panel, "#story-echo-extraction-turns").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-extraction-turns").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 5));
       settings.extraction.targetTurnsPerChunk = Math.min(20, Math.max(1, value));
     });
     scheduleDerivedUpdate();
   });
-  element2(panel, "#story-echo-reference-mode").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-reference-mode").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.extraction.reference.mode = event.currentTarget.value;
     });
   });
-  element2(panel, "#story-echo-reference-tokens").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-reference-tokens").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 3e3));
       settings.extraction.reference.maxTokens = Math.min(16e3, Math.max(256, value));
     });
   });
-  element2(panel, "#story-echo-reference-world-info").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-reference-world-info").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 5));
       settings.extraction.reference.maxWorldInfoEntries = Math.min(20, Math.max(0, value));
     });
   });
-  element2(panel, "#story-echo-debug").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-debug").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.debug = event.currentTarget.checked;
     });
   });
-  element2(panel, "#story-echo-base-url").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
     const current = settingsRepository2.get();
     const value = input.value.trim();
@@ -9728,25 +10176,25 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "Base URL\u65E0\u6548\u3002");
     }
   });
-  element2(panel, "#story-echo-model").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-model").addEventListener("input", (event) => {
     const model = event.currentTarget.value.trim();
     settingsRepository2.update((settings) => {
       settings.llm.custom.model = model;
     });
-    const select = element2(panel, "#story-echo-model-select");
+    const select = element3(panel, "#story-echo-model-select");
     select.value = [...select.options].some((option) => option.value === model) ? model : "";
   });
-  element2(panel, "#story-echo-model-select").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-model-select").addEventListener("change", (event) => {
     const model = event.currentTarget.value;
     if (!model) {
       return;
     }
-    element2(panel, "#story-echo-model").value = model;
+    element3(panel, "#story-echo-model").value = model;
     settingsRepository2.update((settings) => {
       settings.llm.custom.model = model;
     });
   });
-  element2(panel, "#story-echo-fetch-models").addEventListener("click", async (event) => {
+  element3(panel, "#story-echo-fetch-models").addEventListener("click", async (event) => {
     const button = event.currentTarget;
     const label = button.querySelector("span");
     button.disabled = true;
@@ -9767,29 +10215,29 @@ function bindSettings(panel) {
       }
     }
   });
-  element2(panel, "#story-echo-api-key").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-api-key").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.apiKey = event.currentTarget.value;
     });
   });
-  element2(panel, "#story-echo-allow-http").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.allowInsecureHttp = event.currentTarget.checked;
     });
   });
-  element2(panel, "#story-echo-fallback-main").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-fallback-main").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.fallbackToMain = event.currentTarget.checked;
     });
   });
-  element2(panel, "#story-echo-vector-source").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-vector-source").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.vector.source = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
     void refreshStatus(panel, true);
   });
-  element2(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
     const current = settingsRepository2.get();
     const value = input.value.trim();
@@ -9813,22 +10261,22 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "Embedding Base URL\u65E0\u6548\u3002");
     }
   });
-  element2(panel, "#story-echo-embedding-model").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-embedding-model").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.model = event.currentTarget.value.trim();
     });
   });
-  element2(panel, "#story-echo-embedding-api-key").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-embedding-api-key").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.apiKey = event.currentTarget.value;
     });
   });
-  element2(panel, "#story-echo-embedding-allow-http").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-embedding-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.allowInsecureHttp = event.currentTarget.checked;
     });
   });
-  element2(panel, "#story-echo-volcengine-base-url").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-volcengine-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
     const current = settingsRepository2.get();
     const value = input.value.trim();
@@ -9852,23 +10300,23 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "\u706B\u5C71\u65B9\u821F Base URL\u65E0\u6548\u3002");
     }
   });
-  element2(panel, "#story-echo-volcengine-model").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-volcengine-model").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.volcengine.model = event.currentTarget.value.trim();
     });
   });
-  element2(panel, "#story-echo-volcengine-api-key").addEventListener("input", (event) => {
+  element3(panel, "#story-echo-volcengine-api-key").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.volcengine.apiKey = event.currentTarget.value;
     });
   });
-  element2(panel, "#story-echo-volcengine-allow-http").addEventListener("change", (event) => {
+  element3(panel, "#story-echo-volcengine-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.volcengine.allowInsecureHttp = event.currentTarget.checked;
     });
   });
   const bindEmbeddingTest = (selector) => {
-    element2(panel, selector).addEventListener("click", async (event) => {
+    element3(panel, selector).addEventListener("click", async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
       try {
@@ -9890,7 +10338,7 @@ function bindSettings(panel) {
   };
   bindEmbeddingTest("#story-echo-test-embedding");
   bindEmbeddingTest("#story-echo-test-volcengine-embedding");
-  element2(panel, "#story-echo-test-llm").addEventListener("click", async (event) => {
+  element3(panel, "#story-echo-test-llm").addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
     try {
@@ -9905,9 +10353,9 @@ function bindSettings(panel) {
       button.disabled = false;
     }
   });
-  element2(panel, "#story-echo-process-history").addEventListener("click", async (event) => {
+  element3(panel, "#story-echo-process-history").addEventListener("click", async (event) => {
     const button = event.currentTarget;
-    const status = element2(panel, "#story-echo-status");
+    const status = element3(panel, "#story-echo-status");
     button.disabled = true;
     try {
       const requestedChatId = getCurrentChatId();
@@ -9945,10 +10393,10 @@ function bindSettings(panel) {
       button.disabled = false;
     }
   });
-  element2(panel, "#story-echo-refresh-status").addEventListener("click", async () => {
+  element3(panel, "#story-echo-refresh-status").addEventListener("click", async () => {
     await refreshStatus(panel, true);
   });
-  element2(panel, "#story-echo-copy-debug").addEventListener("click", async () => {
+  element3(panel, "#story-echo-copy-debug").addEventListener("click", async () => {
     const state = memoryRepository2.getExisting();
     if (!state) {
       notify.info("\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709StoryEcho\u8C03\u8BD5\u6570\u636E\u3002");
@@ -9972,7 +10420,7 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "\u590D\u5236\u8C03\u8BD5\u62A5\u544A\u5931\u8D25\u3002");
     }
   });
-  element2(panel, "#story-echo-reset-stats").addEventListener("click", async (event) => {
+  element3(panel, "#story-echo-reset-stats").addEventListener("click", async (event) => {
     const state = memoryRepository2.getExisting();
     if (!state) {
       notify.info("\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709\u7EDF\u8BA1\u6570\u636E\u3002");
@@ -10115,11 +10563,11 @@ function runtimeStatusText() {
   ];
 }
 async function refreshStatus(panel, refreshVectorCount = false) {
-  const target = element2(panel, "#story-echo-status");
-  const stageSummaryTarget = element2(panel, "#story-echo-summary");
-  const stats = element2(panel, "#story-echo-stats");
-  const inspection = element2(panel, "#story-echo-inspection");
-  const traces = element2(panel, "#story-echo-traces");
+  const target = element3(panel, "#story-echo-status");
+  const stageSummaryTarget = element3(panel, "#story-echo-summary");
+  const stats = element3(panel, "#story-echo-stats");
+  const inspection = element3(panel, "#story-echo-inspection");
+  const traces = element3(panel, "#story-echo-traces");
   try {
     const currentSettings = settingsRepository2.get();
     syncVisibility(panel, currentSettings);
@@ -10136,6 +10584,7 @@ async function refreshStatus(panel, refreshVectorCount = false) {
       stageSummaryTarget.textContent = "\u5C1A\u65E0\u9636\u6BB5\u603B\u7ED3\u3002";
       inspection.textContent = "\u5C1A\u65E0\u751F\u6210\u8BB0\u5F55\u3002";
       traces.textContent = "\u8C03\u8BD5\u6A21\u5F0F\u5173\u95ED\u6216\u5C1A\u65E0\u8F68\u8FF9\u3002";
+      stageSummaryMetadataManager.render(panel, null);
       memoryMetadataManager.render(panel, null);
       return;
     }
@@ -10181,16 +10630,17 @@ async function refreshStatus(panel, refreshVectorCount = false) {
         `\u5267\u60C5\u8BB0\u5FC6\uFF1A\u5DF2\u5173\u95ED\uFF08\u4FDD\u7559 ${state.memories.length} \u6761\uFF09`,
         `\u5411\u91CF\uFF1A${cachedVectorCountText}`
       ],
-      `\u9636\u6BB5\u603B\u7ED3\uFF1A${state.stageSummary.entries.length}\u6761 / \u8986\u76D6\u5230\u6D88\u606F ${state.stageSummary.coveredThroughMessageId}`,
+      `\u9636\u6BB5\u603B\u7ED3\uFF1A${state.stageSummary.entries.filter((entry) => !entry.deleted).length}\u6761 / \u8986\u76D6\u5230\u6D88\u606F ${state.stageSummary.coveredThroughMessageId}`,
       ...runtimeStatusText()
     ].join("\uFF5C");
     const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
-    const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);
+    const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
+    const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
     const currentStateCorrection = currentSettings.memory.enabled ? renderCurrentStateCoordinationBlock(state.memories) : "";
     stageSummaryTarget.textContent = visibleSummaries.length > 0 ? [
-      `\u5DF2\u4FDD\u5B58 ${state.stageSummary.entries.length} \u6761\uFF1B\u6B63\u5E38\u8BF7\u6C42\u643A\u5E26\u6700\u8FD1 ${visibleSummaries.length} \u6761\u3002`,
+      `\u5DF2\u4FDD\u5B58 ${activeSummaries.length} \u6761\uFF1B\u6B63\u5E38\u8BF7\u6C42\u643A\u5E26\u6700\u8FD1 ${visibleSummaries.length} \u6761\u3002`,
       ...visibleSummaries.map((entry, index) => [
-        `#${state.stageSummary.entries.length - visibleSummaries.length + index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
+        `#${activeSummaries.length - visibleSummaries.length + index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
         entry.text
       ].join("\n")),
       ...currentStateCorrection ? [`\u8BF7\u6C42\u8FD8\u4F1A\u5728\u603B\u7ED3\u540E\u9644\u52A0\u4EE5\u4E0B\u5F53\u524D\u72B6\u6001\u6821\u6B63\uFF1A
@@ -10199,6 +10649,7 @@ ${currentStateCorrection}`] : []
     stats.textContent = statsText(state);
     inspection.textContent = inspectionText(state);
     traces.textContent = tracesText(state);
+    stageSummaryMetadataManager.render(panel, state);
     memoryMetadataManager.render(panel, state);
   } catch (error) {
     const message = error instanceof Error ? error.message : "\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u5931\u8D25\u3002";
@@ -10207,6 +10658,7 @@ ${currentStateCorrection}`] : []
     stats.textContent = `\u8BFB\u53D6\u5931\u8D25\uFF1A${message}`;
     inspection.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
     traces.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
+    stageSummaryMetadataManager.render(panel, null);
     memoryMetadataManager.render(panel, null);
   }
 }
@@ -10234,6 +10686,7 @@ async function registerSettingsPanel() {
   const settings = settingsRepository2.get();
   syncForm(panel, settings);
   bindSettings(panel);
+  stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
   memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);

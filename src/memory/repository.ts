@@ -61,6 +61,38 @@ export interface StoryMemoryEdit {
   excluded: boolean;
 }
 
+export interface StageSummaryEdit {
+  text: string;
+}
+
+const STAGE_SUMMARY_HEADINGS = [
+  '【已确认剧情】',
+  '【当前状态】',
+  '【未解决线索】',
+  '【角色主张与推测】',
+  '【已失效或否定事实】',
+] as const;
+const MAX_EDITED_SUMMARY_CHARACTERS = 64_000;
+
+function normalizeStageSummaryEdit(edit: StageSummaryEdit): StageSummaryEdit {
+  const text = String(edit.text ?? '').trim();
+  if (!text) {
+    throw new Error('阶段总结正文不能为空。');
+  }
+  if (text.length > MAX_EDITED_SUMMARY_CHARACTERS) {
+    throw new Error(`阶段总结正文不能超过${MAX_EDITED_SUMMARY_CHARACTERS}个字符。`);
+  }
+  let previousIndex = -1;
+  for (const heading of STAGE_SUMMARY_HEADINGS) {
+    const index = text.indexOf(heading);
+    if (index < 0 || index <= previousIndex) {
+      throw new Error(`阶段总结缺少或打乱分级标题：${heading}`);
+    }
+    previousIndex = index;
+  }
+  return { text };
+}
+
 function editableText(value: string, field: string, maxLength: number, required = false): string {
   const normalized = String(value ?? '').trim().slice(0, maxLength);
   if (required && !normalized) {
@@ -221,10 +253,11 @@ function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
     return null;
   }
   const text = typeof value['text'] === 'string' ? value['text'].trim() : '';
+  const deleted = value['deleted'] === true;
   const sourceStartMessageId = Number(value['sourceStartMessageId']);
   const sourceEndMessageId = Number(value['sourceEndMessageId']);
   if (
-    !text ||
+    (!text && !deleted) ||
     !Number.isFinite(sourceStartMessageId) ||
     !Number.isFinite(sourceEndMessageId) ||
     sourceStartMessageId < 0 ||
@@ -233,13 +266,15 @@ function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
     return null;
   }
   return {
-    text,
+    text: deleted ? '' : text,
     sourceStartMessageId: Math.floor(sourceStartMessageId),
     sourceEndMessageId: Math.floor(sourceEndMessageId),
     sourceHash: typeof value['sourceHash'] === 'string' ? value['sourceHash'] : '',
     updatedAt: typeof value['updatedAt'] === 'string'
       ? value['updatedAt']
       : LEGACY_SUMMARY_UPDATED_AT,
+    ...(value['manuallyEdited'] === true ? { manuallyEdited: true } : {}),
+    ...(deleted ? { deleted: true } : {}),
   };
 }
 
@@ -623,6 +658,84 @@ export class MemoryRepository {
         removed.vectorHash,
       ])];
     }
+    await this.save(state);
+    return state;
+  }
+
+  async updateStageSummaryEntry(
+    sourceStartMessageId: number,
+    edit: StageSummaryEdit,
+  ): Promise<StoryEchoChatState> {
+    const state = await this.getOrCreate();
+    if (!state) {
+      throw new Error('当前没有可用聊天。');
+    }
+    const index = state.stageSummary.entries.findIndex(
+      (entry) => entry.sourceStartMessageId === sourceStartMessageId,
+    );
+    const existing = index >= 0 ? state.stageSummary.entries[index] : undefined;
+    if (!existing || existing.deleted) {
+      throw new Error('要修改的阶段总结不存在，可能已在其他页面删除或失效。');
+    }
+    const normalized = normalizeStageSummaryEdit(edit);
+    state.stageSummary.entries[index] = {
+      ...existing,
+      text: normalized.text,
+      updatedAt: new Date().toISOString(),
+      manuallyEdited: true,
+    };
+    const latest = state.stageSummary.entries.at(-1);
+    state.stageSummary = {
+      entries: state.stageSummary.entries,
+      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+      coveredThroughHash: latest?.sourceHash ?? '',
+      ...(latest ? { updatedAt: latest.updatedAt } : {}),
+    };
+    delete state.lastInspection;
+    await this.save(state);
+    return state;
+  }
+
+  /**
+   * Deleting the physical tail retreats the coverage cursor so that tail's
+   * raw source participates in later requests again. Deleting an older entry
+   * leaves a coverage tombstone: the summary stops being injected, while old
+   * raw history stays compressed and all later summaries remain valid.
+   */
+  async deleteStageSummaryEntry(sourceStartMessageId: number): Promise<StoryEchoChatState> {
+    const state = await this.getOrCreate();
+    if (!state) {
+      throw new Error('当前没有可用聊天。');
+    }
+    const index = state.stageSummary.entries.findIndex(
+      (entry) => entry.sourceStartMessageId === sourceStartMessageId,
+    );
+    if (index < 0) {
+      throw new Error('要删除的阶段总结不存在，可能已在其他页面删除或失效。');
+    }
+    const existing = state.stageSummary.entries[index]!;
+    if (existing.deleted) {
+      throw new Error('要删除的阶段总结不存在，可能已在其他页面删除或失效。');
+    }
+    const entries = [...state.stageSummary.entries];
+    if (index === entries.length - 1) {
+      entries.pop();
+    } else {
+      entries[index] = {
+        ...existing,
+        text: '',
+        deleted: true,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    const latest = entries.at(-1);
+    state.stageSummary = {
+      entries,
+      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+      coveredThroughHash: latest?.sourceHash ?? '',
+      ...(latest ? { updatedAt: latest.updatedAt } : {}),
+    };
+    delete state.lastInspection;
     await this.save(state);
     return state;
   }

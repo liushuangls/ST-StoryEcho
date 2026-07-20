@@ -67,6 +67,16 @@ describe('settings panel editable-control contract', () => {
     expect(actions).toBeLessThan(status);
   });
 
+  it('places the editable summary manager inside the historical-summary section', () => {
+    const historySection = source.indexOf('>历史阶段总结</span>');
+    const manager = source.indexOf('${stageSummaryManagerTemplate()}');
+    const modelSection = source.indexOf('>模型来源</span>');
+
+    expect(historySection).toBeGreaterThan(0);
+    expect(manager).toBeGreaterThan(historySection);
+    expect(manager).toBeLessThan(modelSection);
+  });
+
   it('uses each field default while a numeric input is temporarily empty', () => {
     const numberValueSource = source.slice(
       source.indexOf('function numberValue('),

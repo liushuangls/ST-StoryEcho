@@ -28,7 +28,8 @@ export function buildDebugReport(
       stageSummary: {
         coveredThroughMessageId: state.stageSummary.coveredThroughMessageId,
         updatedAt: state.stageSummary.updatedAt ?? null,
-        entryCount: state.stageSummary.entries.length,
+        entryCount: state.stageSummary.entries.filter((entry) => !entry.deleted).length,
+        deletedEntryCount: state.stageSummary.entries.filter((entry) => entry.deleted).length,
         entries: state.stageSummary.entries,
         currentStateCoordination: renderCurrentStateCoordinationBlock(state.memories) || null,
       },

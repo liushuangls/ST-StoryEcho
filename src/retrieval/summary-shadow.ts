@@ -38,6 +38,7 @@ function prepareSummaryEvidence(
   entries: readonly StageSummaryEntry[],
 ): PreparedSummaryEvidence[] {
   return [...entries]
+    .filter((entry) => !entry.deleted)
     .sort((left, right) => left.sourceEndMessageId - right.sourceEndMessageId)
     .flatMap((entry) => {
       const sections = summarySections(entry.text);

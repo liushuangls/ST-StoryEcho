@@ -194,6 +194,8 @@ interface StoryEchoChatState {
       sourceEndMessageId: number;
       sourceHash: string;
       updatedAt: string;
+      manuallyEdited?: boolean;
+      deleted?: boolean;
     }>;
     coveredThroughMessageId: number;
     coveredThroughHash: string;
@@ -210,7 +212,7 @@ interface StoryEchoChatState {
 }
 ```
 
-`stageSummary.entries` 保存按来源范围连续排列的独立总结条目。每个条目生成后不再被后续批次重写；`coveredThroughMessageId` 和 `coveredThroughHash` 指向最后一条成功提交的总结。0.8.x 的单份滚动总结升级时会保留为第一条兼容条目，不丢失已压缩历史。
+`stageSummary.entries` 保存按来源范围连续排列的独立总结条目。每个条目生成后不再被后续批次重写；`coveredThroughMessageId` 和 `coveredThroughHash` 指向最后一段已压缩来源。人工编辑保留来源范围和哈希。删除最新条目会移除物理尾部并回退覆盖游标；删除更老条目会保留 `deleted=true`、空正文的覆盖墓碑，注入和状态影子计算都跳过它，但裁剪仍把该来源视为已压缩。0.8.x 的单份滚动总结升级时会保留为第一条兼容条目，不丢失已压缩历史。
 
 ## 4. 权威数据与缓存
 

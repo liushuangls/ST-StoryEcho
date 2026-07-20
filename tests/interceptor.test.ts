@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MODULE_ID } from '../src/core/constants';
 import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
+import { MemoryRepository } from '../src/memory/repository';
 import { storyEchoGenerateInterceptor } from '../src/prompt/interceptor';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
@@ -301,6 +302,90 @@ describe('StoryEcho request ordering', () => {
     expect(summaries[0]?.mes).toContain('第二阶段');
     expect(summaries[1]?.mes).toContain('第三阶段');
     expect(summaries.map((message) => message.mes)).not.toContain(expect.stringContaining('第一阶段'));
+  });
+
+  it('skips a deleted older summary while keeping its raw range covered', async () => {
+    const { context, settings } = await installContext({
+      withMemory: false,
+      summaryCoveredThrough: 2,
+    });
+    settings.summary.windowSize = 5;
+    const stored = context.chatMetadata[MODULE_ID];
+    stored.stageSummary = {
+      entries: [
+        {
+          text: sectionedSummary('已删除的第一阶段'),
+          sourceStartMessageId: 0,
+          sourceEndMessageId: 0,
+          sourceHash: '',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          deleted: true,
+        },
+        {
+          text: sectionedSummary('第二阶段'),
+          sourceStartMessageId: 1,
+          sourceEndMessageId: 1,
+          sourceHash: '',
+          updatedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          text: sectionedSummary('第三阶段'),
+          sourceStartMessageId: 2,
+          sourceEndMessageId: 2,
+          sourceHash: '',
+          updatedAt: '2026-01-03T00:00:00.000Z',
+        },
+      ],
+      coveredThroughMessageId: 2,
+      coveredThroughHash: '',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    };
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    const rendered = promptChat.map((message) => message.mes).join('\n');
+    expect(rendered).not.toContain('已删除的第一阶段');
+    expect(rendered).not.toContain('greeting');
+    expect(rendered).toContain('第二阶段');
+    expect(rendered).toContain('第三阶段');
+  });
+
+  it('restores the latest deleted summary source to the next request as raw messages', async () => {
+    const { context } = await installContext({
+      withMemory: false,
+      summaryCoveredThrough: 2,
+    });
+    const stored = context.chatMetadata[MODULE_ID];
+    stored.stageSummary = {
+      entries: [
+        {
+          text: sectionedSummary('第一阶段'),
+          sourceStartMessageId: 0,
+          sourceEndMessageId: 1,
+          sourceHash: '',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          text: sectionedSummary('第二阶段'),
+          sourceStartMessageId: 2,
+          sourceEndMessageId: 2,
+          sourceHash: '',
+          updatedAt: '2026-01-02T00:00:00.000Z',
+        },
+      ],
+      coveredThroughMessageId: 2,
+      coveredThroughHash: '',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    };
+
+    await new MemoryRepository().deleteStageSummaryEntry(2);
+    const promptChat = structuredClone(sourceChat);
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(context.chatMetadata[MODULE_ID].stageSummary.coveredThroughMessageId).toBe(1);
+    expect(promptChat.map((message) => message.mes)).toContain('林雨收好了银色钥匙。');
+    expect(promptChat.some((message) => message.mes.includes('第二阶段'))).toBe(false);
   });
 
   it('excludes inferred memories and summary hypotheses from strict fact verification', async () => {

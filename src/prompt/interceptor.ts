@@ -441,16 +441,17 @@ async function prepareStoryEchoPrompt(
       ? renderMemoryBlock(selected, entityConstraints, factVerification)
       : '';
     const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
+    const activeStageSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
     const summaryPool = storyPhaseScope.boundaryMessageId !== null &&
       !storyPhaseScope.earlierPhaseQuery
-      ? state.stageSummary.entries.filter((entry) => (
+      ? activeStageSummaries.filter((entry) => (
           entry.sourceStartMessageId >= storyPhaseScope.boundaryMessageId!
         ))
-      : state.stageSummary.entries;
-    if (summaryPool.length < state.stageSummary.entries.length) {
+      : activeStageSummaries;
+    if (summaryPool.length < activeStageSummaries.length) {
       recordDebugTrace(state, settings.debug, 'retrieval', '当前剧情阶段已省略较早阶段总结。', {
         boundaryMessageId: storyPhaseScope.boundaryMessageId ?? -1,
-        excludedSummaries: state.stageSummary.entries.length - summaryPool.length,
+        excludedSummaries: activeStageSummaries.length - summaryPool.length,
       });
     }
     const summaryEntries = summaryPool.slice(-summaryWindowSize);
@@ -524,7 +525,8 @@ async function prepareStoryEchoPrompt(
       retainedSourceStart,
       removedMessages: window.removableIndices.length,
       summaryCoveredThrough: state.stageSummary.coveredThroughMessageId,
-      summaryEntriesStored: state.stageSummary.entries.length,
+      summaryEntriesStored: activeStageSummaries.length,
+      summaryEntriesDeleted: state.stageSummary.entries.length - activeStageSummaries.length,
       summaryEntriesInjected: summaryBlocks.length,
       intentVectorResults: vectorResults.intent.length,
       sceneVectorResults: vectorResults.scene.length,

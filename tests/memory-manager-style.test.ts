@@ -41,3 +41,25 @@ describe('memory manager list layout', () => {
     expect(hiddenRule).toContain('display: none;');
   });
 });
+
+describe('stage summary manager list layout', () => {
+  it('uses its own bounded scroll list and non-compressing rows', () => {
+    const listRule = rule('#story-echo-settings .story-echo-summary-list {');
+    const rowRule = rule('#story-echo-settings .story-echo-summary-row {');
+
+    expect(listRule).toContain('max-height: 18rem;');
+    expect(listRule).toContain('overflow-y: auto;');
+    expect(rowRule).toContain('flex: 0 0 auto;');
+    expect(rowRule).toContain('height: auto;');
+    expect(rowRule).toContain('max-height: none;');
+  });
+
+  it('keeps long summary previews and metadata inside the card', () => {
+    const titleRule = rule('#story-echo-settings .story-echo-summary-row-title {');
+    const metadataRule = rule('#story-echo-settings .story-echo-summary-row-meta {');
+
+    expect(titleRule).toContain('overflow-wrap: anywhere;');
+    expect(metadataRule).toContain('text-overflow: ellipsis;');
+    expect(metadataRule).toContain('white-space: nowrap;');
+  });
+});

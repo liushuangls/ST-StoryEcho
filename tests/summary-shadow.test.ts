@@ -81,4 +81,20 @@ describe('stage-summary state shadow', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
     }])).toBe(true);
   });
+
+  it('does not use a deleted summary tombstone as state evidence', () => {
+    const stale = memory({
+      source: { startMessageId: 10, endMessageId: 11, sourceHash: 'stale' },
+      stateChanges: [{ entity: '欧文', attribute: '状态', after: '被收监' }],
+    });
+
+    expect(isMemoryInvalidatedByStageSummaries(stale, [{
+      text: summary({ invalid: '欧文被收监的说法已经作废。' }),
+      sourceStartMessageId: 20,
+      sourceEndMessageId: 29,
+      sourceHash: 'deleted-correction',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      deleted: true,
+    }])).toBe(false);
+  });
 });

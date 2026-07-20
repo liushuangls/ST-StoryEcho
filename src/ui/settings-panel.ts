@@ -40,11 +40,16 @@ import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { normalizeEmbeddingsUrl, normalizeVolcengineMultimodalEmbeddingsUrl } from '../vector/url';
 import { MemoryMetadataManager, memoryManagerTemplate } from './memory-manager';
 import { notify } from './notifications';
+import {
+  StageSummaryMetadataManager,
+  stageSummaryManagerTemplate,
+} from './summary-manager';
 
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
 const memoryRepository = new MemoryRepository();
 const vectorStore = new SillyTavernVectorStore();
+const stageSummaryMetadataManager = new StageSummaryMetadataManager(memoryRepository);
 const memoryMetadataManager = new MemoryMetadataManager(
   memoryRepository,
   async (state) => settingsRepository.get().memory.enabled
@@ -242,6 +247,9 @@ function panelTemplate(): HTMLElement {
             <p class="story-echo-hint story-echo-field-wide">
               总开关开启后自动维护阶段总结。最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文；每次请求只带最近 S 条总结。
             </p>
+            <div class="story-echo-field-wide">
+              ${stageSummaryManagerTemplate()}
+            </div>
           </div>
         </details>
 
@@ -1206,6 +1214,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
       stageSummaryTarget.textContent = '尚无阶段总结。';
       inspection.textContent = '尚无生成记录。';
       traces.textContent = '调试模式关闭或尚无轨迹。';
+      stageSummaryMetadataManager.render(panel, null);
       memoryMetadataManager.render(panel, null);
       return;
     }
@@ -1259,19 +1268,20 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
             `剧情记忆：已关闭（保留 ${state.memories.length} 条）`,
             `向量：${cachedVectorCountText}`,
           ]),
-      `阶段总结：${state.stageSummary.entries.length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
+      `阶段总结：${state.stageSummary.entries.filter((entry) => !entry.deleted).length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
       ...runtimeStatusText(),
     ].join('｜');
     const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
-    const visibleSummaries = state.stageSummary.entries.slice(-summaryWindowSize);
+    const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
+    const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
     const currentStateCorrection = currentSettings.memory.enabled
       ? renderCurrentStateCoordinationBlock(state.memories)
       : '';
     stageSummaryTarget.textContent = visibleSummaries.length > 0
       ? [
-          `已保存 ${state.stageSummary.entries.length} 条；正常请求携带最近 ${visibleSummaries.length} 条。`,
+          `已保存 ${activeSummaries.length} 条；正常请求携带最近 ${visibleSummaries.length} 条。`,
           ...visibleSummaries.map((entry, index) => [
-            `#${state.stageSummary.entries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
+            `#${activeSummaries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
             entry.text,
           ].join('\n')),
           ...(currentStateCorrection
@@ -1282,6 +1292,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     stats.textContent = statsText(state);
     inspection.textContent = inspectionText(state);
     traces.textContent = tracesText(state);
+    stageSummaryMetadataManager.render(panel, state);
     memoryMetadataManager.render(panel, state);
   } catch (error) {
     const message = error instanceof Error ? error.message : '读取当前聊天状态失败。';
@@ -1290,6 +1301,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
     stats.textContent = `读取失败：${message}`;
     inspection.textContent = '读取失败。';
     traces.textContent = '读取失败。';
+    stageSummaryMetadataManager.render(panel, null);
     memoryMetadataManager.render(panel, null);
   }
 }
@@ -1320,6 +1332,7 @@ export async function registerSettingsPanel(): Promise<void> {
   const settings = settingsRepository.get();
   syncForm(panel, settings);
   bindSettings(panel);
+  stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
   memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
     void refreshStatus(panel);

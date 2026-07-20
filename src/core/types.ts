@@ -157,6 +157,13 @@ export interface StageSummaryEntry {
   sourceEndMessageId: number;
   sourceHash: string;
   updatedAt: string;
+  /** User-edited summaries keep their source range/hash but are never silently rewritten. */
+  manuallyEdited?: boolean;
+  /**
+   * A deleted non-tail entry remains as a coverage tombstone. It is never
+   * injected, but keeps its old raw source range outside later requests.
+   */
+  deleted?: boolean;
 }
 
 export interface InspectionRecord {

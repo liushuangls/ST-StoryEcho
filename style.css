@@ -406,6 +406,219 @@
   padding: 0.6rem;
 }
 
+#story-echo-settings .story-echo-summary-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-top: 0.25rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor) 74%, transparent);
+}
+
+#story-echo-settings .story-echo-summary-manager-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+#story-echo-settings .story-echo-summary-manager-heading > span,
+#story-echo-settings .story-echo-summary-count,
+#story-echo-settings .story-echo-summary-empty {
+  font-size: 0.82em;
+  line-height: 1.35;
+  opacity: 0.72;
+}
+
+#story-echo-settings .story-echo-summary-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: end;
+}
+
+#story-echo-settings .story-echo-summary-toolbar .menu_button {
+  box-sizing: border-box;
+  display: inline-flex;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 2.45rem;
+  min-width: 6.5rem;
+  margin: 0;
+  padding: 0.45rem 0.7rem;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-summary-list {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.4rem;
+  max-height: 18rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 0.08rem;
+}
+
+#story-echo-settings .story-echo-summary-row {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.18rem;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: max-content;
+  height: auto;
+  max-height: none;
+  margin: 0;
+  overflow: hidden;
+  padding: 0.55rem 0.65rem;
+  text-align: left;
+  white-space: normal;
+}
+
+#story-echo-settings .story-echo-summary-row-selected {
+  border-color: var(--SmartThemeQuoteColor);
+  background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+}
+
+#story-echo-settings .story-echo-summary-row-title {
+  display: -webkit-box;
+  overflow: hidden;
+  min-width: 0;
+  color: var(--SmartThemeBodyColor);
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+#story-echo-settings .story-echo-summary-row-meta {
+  overflow: hidden;
+  min-width: 0;
+  font-size: 0.78em;
+  line-height: 1.3;
+  opacity: 0.7;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-summary-pagination {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: center;
+}
+
+#story-echo-settings .story-echo-summary-pagination[hidden] {
+  display: none;
+}
+
+#story-echo-settings .story-echo-summary-pagination .menu_button {
+  box-sizing: border-box;
+  display: inline-flex;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0.4rem 0.65rem;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-summary-page {
+  min-width: 5.6rem;
+  font-size: 0.84em;
+  text-align: center;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-summary-editor {
+  box-sizing: border-box;
+  margin-top: 0.2rem;
+  padding: 0.75rem;
+  border: 1px dashed var(--SmartThemeBorderColor);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 34%, transparent);
+}
+
+#story-echo-settings .story-echo-summary-editor-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+
+#story-echo-settings .story-echo-summary-editor-range,
+#story-echo-settings .story-echo-summary-manual-hint {
+  margin-top: 0.15rem;
+  font-size: 0.76em;
+  line-height: 1.35;
+  opacity: 0.68;
+  word-break: break-all;
+}
+
+#story-echo-settings .story-echo-summary-manual-hint {
+  max-width: 48%;
+  text-align: right;
+}
+
+#story-echo-settings .story-echo-summary-editor textarea.text_pole {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+}
+
+#story-echo-settings .story-echo-summary-source-field {
+  margin-top: 0.65rem;
+}
+
+#story-echo-settings .story-echo-summary-source {
+  box-sizing: border-box;
+  max-height: 10rem;
+  margin: 0;
+  overflow: auto;
+  padding: 0.55rem;
+  border: 1px solid var(--SmartThemeBorderColor);
+  border-radius: 6px;
+  font-family: var(--monoFontFamily, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.82em;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+#story-echo-settings .story-echo-summary-editor-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+}
+
+#story-echo-settings .story-echo-summary-editor-actions .menu_button {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 2.55rem;
+  margin: 0;
+}
+
+#story-echo-settings .story-echo-summary-delete {
+  border-color: color-mix(in srgb, #d9534f 70%, var(--SmartThemeBorderColor));
+}
+
 #story-echo-settings .story-echo-memory-manager-body {
   display: flex;
   flex-direction: column;
@@ -674,15 +887,20 @@
   }
 
   #story-echo-settings .story-echo-memory-toolbar,
-  #story-echo-settings .story-echo-memory-editor-actions {
+  #story-echo-settings .story-echo-memory-editor-actions,
+  #story-echo-settings .story-echo-summary-toolbar,
+  #story-echo-settings .story-echo-summary-editor-actions {
     grid-template-columns: 1fr;
   }
 
-  #story-echo-settings .story-echo-memory-editor-heading {
+  #story-echo-settings .story-echo-memory-editor-heading,
+  #story-echo-settings .story-echo-summary-editor-heading,
+  #story-echo-settings .story-echo-summary-manager-heading {
     flex-direction: column;
   }
 
-  #story-echo-settings .story-echo-memory-manual-hint {
+  #story-echo-settings .story-echo-memory-manual-hint,
+  #story-echo-settings .story-echo-summary-manual-hint {
     max-width: none;
     text-align: left;
   }

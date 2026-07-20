@@ -249,3 +249,135 @@ describe('MemoryRepository manual metadata editing', () => {
       .toBe('林雨获得银色钥匙');
   });
 });
+
+describe('MemoryRepository stage summary editing', () => {
+  afterEach(() => {
+    globalThis.SillyTavern = undefined;
+  });
+
+  function sectionedSummary(confirmed: string): string {
+    return [
+      '【已确认剧情】',
+      confirmed,
+      '【当前状态】',
+      '无',
+      '【未解决线索】',
+      '无',
+      '【角色主张与推测】',
+      '无',
+      '【已失效或否定事实】',
+      '无',
+    ].join('\n');
+  }
+
+  function contextWithSummaries() {
+    const saveMetadata = vi.fn(async () => undefined);
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.stageSummary = {
+      entries: [
+        {
+          text: sectionedSummary('第一阶段。'),
+          sourceStartMessageId: 0,
+          sourceEndMessageId: 1,
+          sourceHash: 'summary-a',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          text: sectionedSummary('第二阶段。'),
+          sourceStartMessageId: 2,
+          sourceEndMessageId: 3,
+          sourceHash: 'summary-b',
+          updatedAt: '2026-01-02T00:00:00.000Z',
+        },
+      ],
+      coveredThroughMessageId: 3,
+      coveredThroughHash: 'summary-b',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    };
+    const context: SillyTavernContext = {
+      chat: [
+        { is_user: true, mes: '第一轮' },
+        { is_user: false, mes: '第一轮回复' },
+        { is_user: true, mes: '第二轮' },
+        { is_user: false, mes: '第二轮回复' },
+      ],
+      chatId: 'chat-id',
+      extensionSettings: {},
+      chatMetadata: { story_echo: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata,
+      generateRaw: vi.fn(async () => ''),
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+    return { context, saveMetadata };
+  }
+
+  it('persists a manual summary edit without changing its source coverage', async () => {
+    const { saveMetadata } = contextWithSummaries();
+    const edited = sectionedSummary('第一阶段由用户人工修正。');
+
+    const state = await new MemoryRepository().updateStageSummaryEntry(0, { text: edited });
+
+    expect(state.stageSummary.entries[0]).toMatchObject({
+      text: edited,
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 1,
+      sourceHash: 'summary-a',
+      manuallyEdited: true,
+    });
+    expect(state.stageSummary.coveredThroughMessageId).toBe(3);
+    expect(state.stageSummary.coveredThroughHash).toBe('summary-b');
+    expect(saveMetadata).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a manual summary that breaks the five-section contract', async () => {
+    const { context } = contextWithSummaries();
+
+    await expect(new MemoryRepository().updateStageSummaryEntry(0, {
+      text: '只有一段普通文本',
+    })).rejects.toThrow('阶段总结缺少或打乱分级标题');
+
+    const stored = context.chatMetadata['story_echo'] as ReturnType<typeof chatState>;
+    expect(stored.stageSummary.entries).toHaveLength(2);
+    expect(stored.stageSummary.coveredThroughMessageId).toBe(3);
+  });
+
+  it('tombstones an older summary without restoring old raw history or changing chat messages', async () => {
+    const { context, saveMetadata } = contextWithSummaries();
+    const originalChat = structuredClone(context.chat);
+
+    const state = await new MemoryRepository().deleteStageSummaryEntry(0);
+
+    expect(state.stageSummary.entries).toHaveLength(2);
+    expect(state.stageSummary.entries[0]).toMatchObject({
+      text: '',
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 1,
+      sourceHash: 'summary-a',
+      deleted: true,
+    });
+    expect(state.stageSummary.entries[1]).toMatchObject({
+      text: sectionedSummary('第二阶段。'),
+      sourceStartMessageId: 2,
+      sourceEndMessageId: 3,
+      sourceHash: 'summary-b',
+    });
+    expect(state.stageSummary.coveredThroughMessageId).toBe(3);
+    expect(state.stageSummary.coveredThroughHash).toBe('summary-b');
+    expect(context.chat).toEqual(originalChat);
+    expect(saveMetadata).toHaveBeenCalledOnce();
+  });
+
+  it('removes the latest summary and retreats coverage so its raw source participates again', async () => {
+    const { context } = contextWithSummaries();
+    const originalChat = structuredClone(context.chat);
+
+    const state = await new MemoryRepository().deleteStageSummaryEntry(2);
+
+    expect(state.stageSummary.entries).toHaveLength(1);
+    expect(state.stageSummary.coveredThroughMessageId).toBe(1);
+    expect(state.stageSummary.coveredThroughHash).toBe('summary-a');
+    expect(context.chat).toEqual(originalChat);
+  });
+});
