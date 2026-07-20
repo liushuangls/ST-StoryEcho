@@ -151,7 +151,7 @@ describe('backgroundTargetMessageId', () => {
     expect(extract.mock.calls.map(([target]) => target)).toEqual([3, 5]);
   });
 
-  it('backs off the same failed automatic extraction block without blocking later foreground safety work', async () => {
+  it('backs off the same failed automatic extraction block without retrying before cooldown', async () => {
     let now = 1_000;
     vi.spyOn(Date, 'now').mockImplementation(() => now);
     const chat = [
@@ -202,6 +202,79 @@ describe('backgroundTargetMessageId', () => {
     await scheduler.runNow();
     expect(extract).toHaveBeenCalledTimes(2);
     expect(scheduler.snapshot(now).extractionCooldownActive).toBe(false);
+  });
+
+  it('retries pending vector writes in the reply-complete background task', async () => {
+    const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.enabled = true;
+    settings.recentWindow = { size: 1, unit: 'turns' };
+    settings.extraction.automatic = true;
+    settings.summary.enabled = false;
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.indexedThroughMessageId = 1;
+    state.pendingVectorHashes = [123];
+    const context = {
+      chat,
+      chatId: 'chat-id',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'chat-id',
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    vi.spyOn(extractionService, 'reconcileHistory').mockResolvedValue(state);
+    const sync = vi.spyOn(extractionService, 'syncPendingVectors')
+      .mockImplementation(async () => {
+        state.pendingVectorHashes = [];
+        return state;
+      });
+
+    await new BackgroundProcessingScheduler().runNow();
+
+    expect(sync).toHaveBeenCalledOnce();
+    expect(state.pendingVectorHashes).toEqual([]);
+  });
+
+  it('syncs pending vectors before a failing summary task can end the background run', async () => {
+    const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.enabled = true;
+    settings.recentWindow = { size: 1, unit: 'turns' };
+    settings.extraction.automatic = false;
+    settings.summary.enabled = true;
+    settings.summary.automatic = true;
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.indexedThroughMessageId = 1;
+    state.pendingVectorHashes = [123];
+    const context = {
+      chat,
+      chatId: 'chat-id',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'chat-id',
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    vi.spyOn(extractionService, 'reconcileHistory').mockResolvedValue(state);
+    const sync = vi.spyOn(extractionService, 'syncPendingVectors')
+      .mockImplementation(async () => {
+        state.pendingVectorHashes = [];
+        return state;
+      });
+    vi.spyOn(stageSummaryService, 'processNextThrough')
+      .mockRejectedValue(new Error('summary unavailable'));
+
+    await new BackgroundProcessingScheduler().runNow();
+
+    expect(sync).toHaveBeenCalledOnce();
+    expect(state.pendingVectorHashes).toEqual([]);
   });
 
   it('invalidates the append-only shortcut after a delete or branch event', async () => {

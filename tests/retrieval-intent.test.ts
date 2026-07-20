@@ -6,6 +6,9 @@ describe('fact-verification intent', () => {
     expect(isFactVerificationQuery('不要续写，只回答当前事实：银钥匙在哪里？')).toBe(true);
     expect(isFactVerificationQuery('银色钥匙现在由谁保管？')).toBe(true);
     expect(isFactVerificationQuery('若没有已确认记录，就回答“没有已确认记录”。')).toBe(true);
+    expect(isFactVerificationQuery(
+      '做一次证据边界审计，分成已确认、已排除或作废、仍未确认三栏；不要把早期推断写成事实。',
+    )).toBe(true);
   });
 
   it('keeps ordinary continuation and speculative investigation in narrative mode', () => {

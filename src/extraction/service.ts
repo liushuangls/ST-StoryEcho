@@ -272,7 +272,10 @@ export class ExtractionService {
    * history. Derived memories are conservatively rebuilt so facts from a
    * removed branch can never leak into the current prompt.
    */
-  async reconcileHistory(state?: StoryEchoChatState): Promise<StoryEchoChatState | null> {
+  async reconcileHistory(
+    state?: StoryEchoChatState,
+    options: { purgeVectors?: boolean } = {},
+  ): Promise<StoryEchoChatState | null> {
     const current = state ?? await this.memoryRepository.getOrCreate();
     if (!current || current.indexedThroughMessageId < 0) {
       return current;
@@ -299,12 +302,16 @@ export class ExtractionService {
 
     const previousIndexedThrough = current.indexedThroughMessageId;
     const previousMemoryCount = current.memories.length;
+    const previousVectorHashes = [...new Set(current.memories.map((memory) => memory.vectorHash))];
     let purgeFailed = false;
-    try {
-      await this.vectorStore.purge(current.vectorCollectionId);
-    } catch (error) {
-      purgeFailed = true;
-      logger.warn('聊天历史变化后清理旧向量失败，后续同步将重试。', error);
+    const purgeDeferred = options.purgeVectors === false;
+    if (!purgeDeferred) {
+      try {
+        await this.vectorStore.purge(current.vectorCollectionId);
+      } catch (error) {
+        purgeFailed = true;
+        logger.warn('聊天历史变化后清理旧向量失败，后续同步将重试。', error);
+      }
     }
 
     current.indexedThroughMessageId = -1;
@@ -318,7 +325,7 @@ export class ExtractionService {
     current.memories = [];
     current.pendingRanges = [];
     current.pendingVectorHashes = [];
-    current.pendingVectorDeleteHashes = [];
+    current.pendingVectorDeleteHashes = purgeDeferred ? previousVectorHashes : [];
     current.vectorFingerprint = '';
     delete current.lastInspection;
     recordDebugTrace(current, settings.debug, 'extraction', '检测到聊天分支、编辑或删楼层，已重置剧情索引。', {
@@ -326,6 +333,7 @@ export class ExtractionService {
       currentMessageCount: context.chat.length,
       removedMemories: previousMemoryCount,
       purgeFailed,
+      purgeDeferred,
     });
     await this.memoryRepository.save(current);
     return current;
@@ -357,7 +365,6 @@ export class ExtractionService {
     if (configurationChanged) {
       const isRebuild = current.vectorFingerprint.length > 0;
       current.pendingVectorHashes = [...eligibleHashes];
-      current.pendingVectorDeleteHashes = [];
       current.metrics.vectorRebuilds += isRebuild ? 1 : 0;
       recordDebugTrace(current, settings.debug, 'vector', isRebuild
         ? 'Embedding配置变化，重建当前聊天向量集合。'
@@ -366,6 +373,9 @@ export class ExtractionService {
       });
       await this.memoryRepository.save(current);
       await this.vectorStore.purge(current.vectorCollectionId);
+      // Keep the deletion queue intact until purge succeeds. If the request
+      // fails, the reply-complete scheduler can see it and retry later.
+      current.pendingVectorDeleteHashes = [];
     } else {
       current.pendingVectorHashes = current.pendingVectorHashes.filter((hash) => eligibleHashes.has(hash));
     }

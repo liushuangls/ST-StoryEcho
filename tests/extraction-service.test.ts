@@ -44,6 +44,41 @@ describe('ExtractionService vector synchronization', () => {
     expect(saveMetadata).not.toHaveBeenCalled();
   });
 
+  it('keeps a deferred purge marker when vector cleanup fails so background can retry', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.vectorFingerprint = '';
+    state.pendingVectorDeleteHashes = [123];
+    const context = {
+      chat: [],
+      chatId: 'chat-id',
+      extensionSettings: {
+        story_echo: settings,
+        vectors: { source: 'transformers' },
+      },
+      chatMetadata: { [MODULE_ID]: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'chat-id',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('failed', { status: 500 }))
+      .mockResolvedValueOnce(new Response('OK', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const service = new ExtractionService();
+
+    await expect(service.syncPendingVectors(state)).rejects.toThrow();
+    expect(state.pendingVectorDeleteHashes).toEqual([123]);
+
+    await expect(service.syncPendingVectors(state)).resolves.toBe(state);
+    expect(state.pendingVectorDeleteHashes).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('allows a complete structured response for fact-dense five-turn chunks', async () => {
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
     const state = chatState([]);

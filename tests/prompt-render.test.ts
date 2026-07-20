@@ -158,6 +158,38 @@ describe('renderMemoryBlock', () => {
     expect(block).not.toContain('持有者：林雨');
   });
 
+  it('keeps inferred states out of the deterministic current-state ledger', () => {
+    const inferred = memory({
+      id: 'inferred-missing',
+      truthStatus: 'inferred',
+      sourceHistory: [
+        { startMessageId: 1, endMessageId: 2, sourceHash: 'old' },
+        { startMessageId: 20, endMessageId: 21, sourceHash: 'new' },
+      ],
+      stateChanges: [{ entity: '格林', attribute: '状态', after: '失踪' }],
+    });
+
+    expect(renderCurrentStateCoordinationBlock([inferred])).toBe('');
+  });
+
+  it('omits memories explicitly invalidated by later evidence', () => {
+    const stale = memory({
+      id: 'stale-detention',
+      sourceHistory: [
+        { startMessageId: 1, endMessageId: 2, sourceHash: 'old' },
+        { startMessageId: 20, endMessageId: 21, sourceHash: 'new' },
+      ],
+      stateChanges: [{ entity: '欧文', attribute: '状态', after: '被收监' }],
+    });
+
+    expect(renderCurrentStateCoordinationBlock(
+      [stale],
+      600,
+      false,
+      new Set(['stale-detention']),
+    )).toBe('');
+  });
+
   it('bounds token diagnostics for a large uniform removed prefix', () => {
     const messages = Array.from({ length: 1_000 }, () => ({ mes: '剧情'.repeat(100) }));
     const indices = messages.map((_, index) => index);

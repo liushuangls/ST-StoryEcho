@@ -397,26 +397,27 @@ function currentStateTransitionAdvances(
 export function renderCurrentStateCoordinationBlock(
   memories: StoryMemory[],
   maxTokens = 600,
-  factVerification = false,
+  _factVerification = false,
+  invalidatedMemoryIds: ReadonlySet<string> = new Set(),
 ): string {
   const candidates: CurrentStateLine[] = memories
     .filter((memory) => (
       !memory.excluded &&
       (memory.status === 'active' || memory.status === 'resolved') &&
-      (!factVerification || memory.truthStatus === 'confirmed') &&
+      memory.truthStatus === 'confirmed' &&
+      !invalidatedMemoryIds.has(memory.id) &&
       isEvolvedMemory(memory)
     ))
     .flatMap((memory) => memory.stateChanges.map((change) => {
       const knownBy = memory.knownBy.length > 0 && /知情|知晓|秘密/u.test(change.attribute)
         ? `；明确知情者：${memory.knownBy.map(clean).filter(Boolean).join('、')}`
         : '';
-      const truth = memory.truthStatus === 'confirmed' ? '' : `；事实状态：${memory.truthStatus}`;
       return {
         slot: canonicalStateSlot(change.entity, change.attribute, memory.type),
         memory,
         before: clean(change.before),
         after: clean(change.after),
-        text: `- ${clean(change.entity)} · ${clean(change.attribute)}：${clean(change.after)}${knownBy}${truth}`,
+        text: `- ${clean(change.entity)} · ${clean(change.attribute)}：${clean(change.after)}${knownBy}`,
       };
     }));
 

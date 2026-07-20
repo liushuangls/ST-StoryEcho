@@ -71,8 +71,12 @@ function stateValueSpecificTerms(value: string | undefined): string[] {
   }
   const codes = term.match(/(?:[A-Za-z]+[-_]?\d+(?:[-_][A-Za-z0-9]+)*|\d+[-_]?[A-Za-z]+)/gu) ?? [];
   const middleDotNames = term.match(/[\p{L}]{1,16}(?:[·・][\p{L}]{1,16})+/gu) ?? [];
-  const exactName = term.length <= 16 &&
-    !/(?:存放|位于|藏|转入|移入|保管|持有|交给|归还|失窃|完成|取消|未知|不明|仍在|当前|现在)/u.test(term) &&
+  // When a composite value already contains stable identifiers, checking the
+  // identifiers individually is both stricter and more accurate. Requiring the
+  // whole synthesized phrase would reject values whose source mentions the
+  // same pieces with intervening prose (for example “221B…M-7…B-3格”).
+  const exactName = codes.length === 0 && middleDotNames.length === 0 && term.length <= 16 &&
+    !/(?:存放|位于|藏|转入|移入|保管|持有|携带|随身|交给|交由|转交|归还|失窃|完成|取消|未知|不明|仍在|当前|现在)/u.test(term) &&
     likelySpecificName(term)
     ? [term]
     : [];

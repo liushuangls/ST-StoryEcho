@@ -192,6 +192,29 @@ describe('StoryEcho request ordering', () => {
     expect(promptChat).toEqual(sourceChat);
   });
 
+  it('never runs a full eligible extraction or summary batch in foreground prompt preparation', async () => {
+    const { context, settings, state } = await installContext({
+      withMemory: false,
+      summaryCoveredThrough: -1,
+    });
+    settings.extraction.automatic = true;
+    settings.extraction.targetTurnsPerChunk = 1;
+    settings.summary.enabled = true;
+    settings.summary.automatic = true;
+    settings.summary.targetTurnsPerUpdate = 1;
+    state.indexedThroughMessageId = -1;
+    state.indexedThroughHash = '';
+    state.indexedPrefixHash = '';
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(context.generateRaw).not.toHaveBeenCalled();
+    expect(context.chatMetadata[MODULE_ID].indexedThroughMessageId).toBe(-1);
+    expect(context.chatMetadata[MODULE_ID].stageSummary.coveredThroughMessageId).toBe(-1);
+    expect(promptChat).toEqual(sourceChat);
+  });
+
   it('trims only the covered prefix and keeps unsummarized raw beyond the minimum window', async () => {
     const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 0 });
     const promptChat = structuredClone(sourceChat);
@@ -286,6 +309,78 @@ describe('StoryEcho request ordering', () => {
     const injected = promptChat.map((message) => message.mes).join('\n');
     expect(injected).not.toContain('托马斯');
     expect(context.chatMetadata[MODULE_ID].lastInspection?.candidateMemoryIds).toEqual([]);
+  });
+
+  it('omits summaries from before an explicit story-phase boundary during ordinary continuation', async () => {
+    const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 2 });
+    context.chat[3] = { is_user: true, mes: '上一段剧情已经结束，接下来进入全新的雪原篇章。' };
+    context.chat[4] = { is_user: false, mes: '雪原篇章里只有一双蓝手套。' };
+    context.chat[5] = { is_user: true, mes: '我们继续向雪原深处前进。' };
+    const promptChat = structuredClone(context.chat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(promptChat.some(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
+    )).toBe(false);
+    expect(promptChat.map((message) => message.mes).join('\n')).not.toContain('林雨开始保管银色钥匙');
+    expect(promptChat.map((message) => message.mes)).toEqual([
+      '上一段剧情已经结束，接下来进入全新的雪原篇章。',
+      '雪原篇章里只有一双蓝手套。',
+      '我们继续向雪原深处前进。',
+    ]);
+  });
+
+  it('restores earlier summaries when the User explicitly asks to review an earlier phase', async () => {
+    const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 2 });
+    context.chat[3] = { is_user: true, mes: '上一段剧情已经结束，接下来进入全新的雪原篇章。' };
+    context.chat[4] = { is_user: false, mes: '雪原篇章里只有一双蓝手套。' };
+    context.chat[5] = { is_user: true, mes: '回顾上一段剧情发生的事情。' };
+    const promptChat = structuredClone(context.chat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    const summaries = promptChat.filter(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.mes).toContain('林雨开始保管银色钥匙');
+  });
+
+  it('does not perform pending vector writes in foreground prompt preparation', async () => {
+    const { context, settings, state } = await installContext({
+      withMemory: true,
+      summaryCoveredThrough: 2,
+    });
+    settings.recall.maxEvents = 0;
+    state.pendingVectorHashes = [123];
+    const promptChat = structuredClone(sourceChat);
+    const fetchMock = vi.mocked(globalThis.fetch);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.chatMetadata[MODULE_ID].pendingVectorHashes).toEqual([123]);
+    expect(context.chatMetadata[MODULE_ID].lastInspection?.warnings).toContain(
+      '部分剧情记忆尚未完成向量化，将使用可用索引和关键词召回。',
+    );
+  });
+
+  it('invalidates a changed branch locally without purging vectors in foreground', async () => {
+    const { context, state } = await installContext({
+      withMemory: true,
+      summaryCoveredThrough: 2,
+    });
+    state.indexedPrefixHash = 'hash-from-a-different-branch';
+    const promptChat = structuredClone(sourceChat);
+    const fetchMock = vi.mocked(globalThis.fetch);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(context.chatMetadata[MODULE_ID].memories).toEqual([]);
+    expect(context.chatMetadata[MODULE_ID].pendingVectorDeleteHashes).toEqual([123]);
+    expect(promptChat).toEqual(sourceChat);
   });
 
   it('isolates an unsupported legacy name from recall, disambiguation, and current-state injection', async () => {

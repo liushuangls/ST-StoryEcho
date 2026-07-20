@@ -5,7 +5,11 @@ import {
   buildStageSummaryGrounding,
   buildStageSummaryPrompt,
 } from '../src/summary/prompts';
-import { normalizeSummary, StageSummaryService } from '../src/summary/service';
+import {
+  normalizeSummary,
+  removeResolvedSummaryThreads,
+  StageSummaryService,
+} from '../src/summary/service';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState, memory } from './fixtures';
 
@@ -230,6 +234,45 @@ describe('independent stage summaries', () => {
       .toContain('【角色主张与推测】\n无');
   });
 
+  it('removes a use that was resolved in confirmed plot from unresolved clues', () => {
+    const contradictory = [
+      '【已确认剧情】',
+      '陌白利用C-8齿片打开了档案柜。',
+      '【当前状态】',
+      'C-8齿片由陌白持有。',
+      '【未解决线索】',
+      '- C-8齿片用途仍未明。',
+      '- 灰帽人的身份仍未知。',
+      '【角色主张与推测】',
+      '无',
+      '【已失效或否定事实】',
+      '无',
+    ].join('\n');
+
+    const cleaned = removeResolvedSummaryThreads(contradictory);
+
+    expect(cleaned).not.toContain('C-8齿片用途仍未明');
+    expect(cleaned).toContain('灰帽人的身份仍未知');
+    expect(normalizeSummary(contradictory, [], '', true)).toBe(cleaned);
+  });
+
+  it('keeps an unresolved use when the confirmed timeline only records a failed attempt', () => {
+    const summary = [
+      '【已确认剧情】',
+      '陌白尝试使用C-8齿片，但开启档案柜失败。',
+      '【当前状态】',
+      '无',
+      '【未解决线索】',
+      '- C-8齿片用途仍未明。',
+      '【角色主张与推测】',
+      '无',
+      '【已失效或否定事实】',
+      '无',
+    ].join('\n');
+
+    expect(removeResolvedSummaryThreads(summary)).toContain('C-8齿片用途仍未明');
+  });
+
   it('waits for a complete automatic batch and keeps the coverage cursor unchanged', async () => {
     const generateRaw = vi.fn(async () => '不应调用');
     const { state } = installContext([
@@ -323,6 +366,34 @@ describe('independent stage summaries', () => {
     const secondPrompt = String(generateRaw.mock.calls[1]?.[0]?.prompt ?? '');
     expect(secondPrompt).not.toContain('第一阶段总结');
     expect(secondPrompt).toContain('消息 4 到 7');
+  });
+
+  it('splits summary batches at an explicit story-phase boundary', async () => {
+    const generateRaw = vi.fn()
+      .mockResolvedValueOnce(sectionedSummary('山谷阶段结束。'))
+      .mockResolvedValueOnce(sectionedSummary('雪原阶段开始。'));
+    installContext([
+      { is_user: true, mes: '上一段旅程已经结束，现在开始全新的山谷篇章。' },
+      { is_user: false, mes: '旅队穿过山谷并抵达出口。' },
+      { is_user: true, mes: '旅队在出口整理行装。' },
+      { is_user: false, mes: '行装已经整理好。' },
+      { is_user: true, mes: '山谷篇章已经结束，接下来进入全新的雪原篇章。' },
+      { is_user: false, mes: '旅队踏上雪原。' },
+      { is_user: true, mes: '众人沿北方前进。' },
+      { is_user: false, mes: '远处出现一片松林。' },
+      { is_user: true, mes: '旅队在松林边扎营。' },
+      { is_user: false, mes: '营火已经点燃。' },
+    ], generateRaw, 3);
+
+    const result = await new StageSummaryService().processAllThrough(9);
+
+    expect(result.updatedChunks).toBe(2);
+    expect(result.state?.stageSummary.entries).toMatchObject([
+      { sourceStartMessageId: 0, sourceEndMessageId: 3 },
+      { sourceStartMessageId: 4, sourceEndMessageId: 9 },
+    ]);
+    expect(String(generateRaw.mock.calls[0]?.[0]?.prompt ?? '')).not.toContain('雪原篇章');
+    expect(String(generateRaw.mock.calls[1]?.[0]?.prompt ?? '')).not.toContain('旅队在出口整理行装');
   });
 
   it('discards an update when its source messages change during the request', async () => {

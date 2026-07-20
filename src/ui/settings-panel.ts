@@ -147,7 +147,7 @@ function panelTemplate(): HTMLElement {
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">自动补充历史索引</span>
-              <span class="story-echo-switch-description">窗口外满配置轮数后，AI回复后后台抽取一批；生成前仍会安全补齐</span>
+              <span class="story-echo-switch-description">窗口外满配置轮数后，AI回复完成再在后台抽取；未处理原文继续保留</span>
             </div>
             <div class="story-echo-toggle">
               <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
@@ -217,7 +217,7 @@ function panelTemplate(): HTMLElement {
             <div class="story-echo-switch-row story-echo-field-wide">
               <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">自动更新阶段总结</span>
-              <span class="story-echo-switch-description">达到一批后在AI回复后后台更新；生成前仍会补一批，失败则保留原文</span>
+              <span class="story-echo-switch-description">达到一批后在AI回复完成后后台更新；生成前不等待，未总结原文继续保留</span>
               </div>
               <div class="story-echo-toggle">
                 <input id="story-echo-summary-automatic" class="story-echo-toggle-input" type="checkbox">

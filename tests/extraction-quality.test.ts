@@ -234,4 +234,49 @@ describe('memory candidate quality gate', () => {
     expect(result.rejected).toEqual([]);
     expect(result.accepted[0]?.stateChanges[0]?.after).toBe('2026');
   });
+
+  it('grounds stable identifiers separately inside a composite location value', () => {
+    const result = assessMemoryCandidates([candidate({
+      sourceMessageIds: [153],
+      evidenceRole: 'user',
+      event: 'M-7仍留在221B的墙体保险柜B-3格。',
+      entities: ['M-7'],
+      aliases: [],
+      stateChanges: [{
+        entity: 'M-7',
+        attribute: '位置',
+        before: '',
+        after: '221B墙体保险柜B-3格',
+      }],
+    })], '', [153], [{
+      is_user: true,
+      mes: '我们不把真文件带出221B：M-7仍留在墙体保险柜B-3格。',
+    }], 153);
+
+    expect(result.rejected).toEqual([]);
+    expect(result.accepted[0]?.stateChanges[0]?.after).toBe('221B墙体保险柜B-3格');
+  });
+
+  it('does not treat a first-person carried-state phrase as an invented full name', () => {
+    const result = assessMemoryCandidates([candidate({
+      sourceMessageIds: [154],
+      evidenceRole: 'user',
+      event: '诱饵M-7D由刘爽随身携带。',
+      entities: ['M-7D'],
+      aliases: [],
+      stateChanges: [{
+        entity: 'M-7D',
+        attribute: '持有者',
+        before: '',
+        after: '刘爽随身携带',
+      }],
+    })], '', [154], [{
+      is_user: true,
+      name: '刘爽',
+      mes: '诱饵M-7D由我随身携带。',
+    }], 154);
+
+    expect(result.rejected).toEqual([]);
+    expect(result.accepted[0]?.stateChanges[0]?.after).toBe('刘爽随身携带');
+  });
 });

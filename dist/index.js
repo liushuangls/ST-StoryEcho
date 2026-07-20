@@ -39,6 +39,149 @@ function emitDiagnosticsUpdated() {
   }
 }
 
+// src/core/uuid.ts
+function fillRandomBytes(bytes) {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    cryptoApi.getRandomValues(bytes);
+    return;
+  }
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Math.floor(Math.random() * 256);
+  }
+}
+function byteToHex(byte) {
+  return byte.toString(16).padStart(2, "0");
+}
+function createUuid() {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === "function") {
+    return cryptoApi.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  fillRandomBytes(bytes);
+  bytes[6] = (bytes[6] ?? 0) & 15 | 64;
+  bytes[8] = (bytes[8] ?? 0) & 63 | 128;
+  const hex = Array.from(bytes, byteToHex);
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join("")
+  ].join("-");
+}
+
+// src/debug/metrics.ts
+var ACTIONS = [
+  "CREATE",
+  "MERGE",
+  "UPDATE",
+  "RESOLVE",
+  "SUPERSEDE",
+  "IGNORE"
+];
+var MAX_DEBUG_TRACES = 50;
+function createMetrics() {
+  return {
+    summaryUpdates: 0,
+    summaryFailures: 0,
+    summaryMessagesCovered: 0,
+    extractionChunks: 0,
+    extractionFailures: 0,
+    candidatesExtracted: 0,
+    referenceContextBuilds: 0,
+    referenceContextPartialFailures: 0,
+    referenceContextTokens: 0,
+    referenceWorldInfoEntries: 0,
+    consolidationCalls: 0,
+    consolidationFailures: 0,
+    actions: {
+      CREATE: 0,
+      MERGE: 0,
+      UPDATE: 0,
+      RESOLVE: 0,
+      SUPERSEDE: 0,
+      IGNORE: 0
+    },
+    vectorQueries: 0,
+    vectorQueryFailures: 0,
+    vectorSyncFailures: 0,
+    vectorItemsInserted: 0,
+    vectorItemsDeleted: 0,
+    vectorRebuilds: 0,
+    queryRewriteRequests: 0,
+    queryRewriteFailures: 0,
+    queryRewriteCacheHits: 0,
+    generationAttempts: 0,
+    generationsTrimmed: 0,
+    generationsDeferred: 0,
+    messagesRemoved: 0,
+    memoriesInjected: 0,
+    estimatedRemovedTokens: 0,
+    estimatedInjectedTokens: 0,
+    totalSummaryMs: 0,
+    totalExtractionMs: 0,
+    totalConsolidationMs: 0,
+    totalRetrievalMs: 0,
+    totalQueryRewriteMs: 0
+  };
+}
+function finiteCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+function normalizeMetrics(value) {
+  const source = typeof value === "object" && value !== null ? value : {};
+  const actionSource = typeof source.actions === "object" && source.actions !== null ? source.actions : {};
+  const metrics = createMetrics();
+  for (const key of Object.keys(metrics)) {
+    if (key === "actions" || key === "lastSummaryAt" || key === "lastExtractionAt" || key === "lastGenerationAt") {
+      continue;
+    }
+    metrics[key] = finiteCount(source[key]);
+  }
+  for (const action of ACTIONS) {
+    metrics.actions[action] = finiteCount(actionSource[action]);
+  }
+  if (typeof source.lastExtractionAt === "string") {
+    metrics.lastExtractionAt = source.lastExtractionAt;
+  }
+  if (typeof source.lastSummaryAt === "string") {
+    metrics.lastSummaryAt = source.lastSummaryAt;
+  }
+  if (typeof source.lastGenerationAt === "string") {
+    metrics.lastGenerationAt = source.lastGenerationAt;
+  }
+  return metrics;
+}
+function incrementAction(metrics, operation) {
+  metrics.actions[operation] += 1;
+}
+function recordDebugTrace(state, enabled, stage, message, details) {
+  if (!enabled) {
+    return;
+  }
+  const boundedDetails = details ? Object.fromEntries(Object.entries(details).map(([key, value]) => [
+    key,
+    typeof value === "string" ? value.slice(0, 4e3) : value
+  ])) : void 0;
+  state.debugTraces.push({
+    id: createUuid(),
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    stage,
+    message,
+    ...boundedDetails ? { details: boundedDetails } : {}
+  });
+  if (state.debugTraces.length > MAX_DEBUG_TRACES) {
+    state.debugTraces.splice(0, state.debugTraces.length - MAX_DEBUG_TRACES);
+  }
+}
+function resetDiagnostics(state) {
+  state.metrics = createMetrics();
+  state.debugTraces = [];
+  delete state.lastInspection;
+}
+
 // src/core/hash.ts
 function stableNumericHash(value) {
   let hash = 2166136261;
@@ -247,149 +390,6 @@ function storyMessages(messages) {
     ...message,
     mes: storyContent(message)
   }));
-}
-
-// src/core/uuid.ts
-function fillRandomBytes(bytes) {
-  const cryptoApi = globalThis.crypto;
-  if (typeof cryptoApi?.getRandomValues === "function") {
-    cryptoApi.getRandomValues(bytes);
-    return;
-  }
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Math.floor(Math.random() * 256);
-  }
-}
-function byteToHex(byte) {
-  return byte.toString(16).padStart(2, "0");
-}
-function createUuid() {
-  const cryptoApi = globalThis.crypto;
-  if (typeof cryptoApi?.randomUUID === "function") {
-    return cryptoApi.randomUUID();
-  }
-  const bytes = new Uint8Array(16);
-  fillRandomBytes(bytes);
-  bytes[6] = (bytes[6] ?? 0) & 15 | 64;
-  bytes[8] = (bytes[8] ?? 0) & 63 | 128;
-  const hex = Array.from(bytes, byteToHex);
-  return [
-    hex.slice(0, 4).join(""),
-    hex.slice(4, 6).join(""),
-    hex.slice(6, 8).join(""),
-    hex.slice(8, 10).join(""),
-    hex.slice(10, 16).join("")
-  ].join("-");
-}
-
-// src/debug/metrics.ts
-var ACTIONS = [
-  "CREATE",
-  "MERGE",
-  "UPDATE",
-  "RESOLVE",
-  "SUPERSEDE",
-  "IGNORE"
-];
-var MAX_DEBUG_TRACES = 50;
-function createMetrics() {
-  return {
-    summaryUpdates: 0,
-    summaryFailures: 0,
-    summaryMessagesCovered: 0,
-    extractionChunks: 0,
-    extractionFailures: 0,
-    candidatesExtracted: 0,
-    referenceContextBuilds: 0,
-    referenceContextPartialFailures: 0,
-    referenceContextTokens: 0,
-    referenceWorldInfoEntries: 0,
-    consolidationCalls: 0,
-    consolidationFailures: 0,
-    actions: {
-      CREATE: 0,
-      MERGE: 0,
-      UPDATE: 0,
-      RESOLVE: 0,
-      SUPERSEDE: 0,
-      IGNORE: 0
-    },
-    vectorQueries: 0,
-    vectorQueryFailures: 0,
-    vectorSyncFailures: 0,
-    vectorItemsInserted: 0,
-    vectorItemsDeleted: 0,
-    vectorRebuilds: 0,
-    queryRewriteRequests: 0,
-    queryRewriteFailures: 0,
-    queryRewriteCacheHits: 0,
-    generationAttempts: 0,
-    generationsTrimmed: 0,
-    generationsDeferred: 0,
-    messagesRemoved: 0,
-    memoriesInjected: 0,
-    estimatedRemovedTokens: 0,
-    estimatedInjectedTokens: 0,
-    totalSummaryMs: 0,
-    totalExtractionMs: 0,
-    totalConsolidationMs: 0,
-    totalRetrievalMs: 0,
-    totalQueryRewriteMs: 0
-  };
-}
-function finiteCount(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
-}
-function normalizeMetrics(value) {
-  const source = typeof value === "object" && value !== null ? value : {};
-  const actionSource = typeof source.actions === "object" && source.actions !== null ? source.actions : {};
-  const metrics = createMetrics();
-  for (const key of Object.keys(metrics)) {
-    if (key === "actions" || key === "lastSummaryAt" || key === "lastExtractionAt" || key === "lastGenerationAt") {
-      continue;
-    }
-    metrics[key] = finiteCount(source[key]);
-  }
-  for (const action of ACTIONS) {
-    metrics.actions[action] = finiteCount(actionSource[action]);
-  }
-  if (typeof source.lastExtractionAt === "string") {
-    metrics.lastExtractionAt = source.lastExtractionAt;
-  }
-  if (typeof source.lastSummaryAt === "string") {
-    metrics.lastSummaryAt = source.lastSummaryAt;
-  }
-  if (typeof source.lastGenerationAt === "string") {
-    metrics.lastGenerationAt = source.lastGenerationAt;
-  }
-  return metrics;
-}
-function incrementAction(metrics, operation) {
-  metrics.actions[operation] += 1;
-}
-function recordDebugTrace(state, enabled, stage, message, details) {
-  if (!enabled) {
-    return;
-  }
-  const boundedDetails = details ? Object.fromEntries(Object.entries(details).map(([key, value]) => [
-    key,
-    typeof value === "string" ? value.slice(0, 4e3) : value
-  ])) : void 0;
-  state.debugTraces.push({
-    id: createUuid(),
-    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-    stage,
-    message,
-    ...boundedDetails ? { details: boundedDetails } : {}
-  });
-  if (state.debugTraces.length > MAX_DEBUG_TRACES) {
-    state.debugTraces.splice(0, state.debugTraces.length - MAX_DEBUG_TRACES);
-  }
-}
-function resetDiagnostics(state) {
-  state.metrics = createMetrics();
-  state.debugTraces = [];
-  delete state.lastInspection;
 }
 
 // src/consolidation/identity.ts
@@ -2579,7 +2579,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 6;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.15.0";
+var EXTENSION_VERSION = "0.16.0";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -3250,16 +3250,15 @@ function currentStateTransitionAdvances(newer, older) {
   const previous = normalizedSearchText(older.after);
   return newer.memory.truthStatus === "confirmed" && newer.memory.source.endMessageId > older.memory.source.endMessageId && before.length >= 2 && previous.length >= 2 && (before === previous || before.includes(previous) || previous.includes(before));
 }
-function renderCurrentStateCoordinationBlock(memories, maxTokens = 600, factVerification = false) {
-  const candidates = memories.filter((memory) => !memory.excluded && (memory.status === "active" || memory.status === "resolved") && (!factVerification || memory.truthStatus === "confirmed") && isEvolvedMemory(memory)).flatMap((memory) => memory.stateChanges.map((change) => {
+function renderCurrentStateCoordinationBlock(memories, maxTokens = 600, _factVerification = false, invalidatedMemoryIds = /* @__PURE__ */ new Set()) {
+  const candidates = memories.filter((memory) => !memory.excluded && (memory.status === "active" || memory.status === "resolved") && memory.truthStatus === "confirmed" && !invalidatedMemoryIds.has(memory.id) && isEvolvedMemory(memory)).flatMap((memory) => memory.stateChanges.map((change) => {
     const knownBy = memory.knownBy.length > 0 && /知情|知晓|秘密/u.test(change.attribute) ? `\uFF1B\u660E\u786E\u77E5\u60C5\u8005\uFF1A${memory.knownBy.map(clean).filter(Boolean).join("\u3001")}` : "";
-    const truth = memory.truthStatus === "confirmed" ? "" : `\uFF1B\u4E8B\u5B9E\u72B6\u6001\uFF1A${memory.truthStatus}`;
     return {
       slot: canonicalStateSlot(change.entity, change.attribute, memory.type),
       memory,
       before: clean(change.before),
       after: clean(change.after),
-      text: `- ${clean(change.entity)} \xB7 ${clean(change.attribute)}\uFF1A${clean(change.after)}${knownBy}${truth}`
+      text: `- ${clean(change.entity)} \xB7 ${clean(change.attribute)}\uFF1A${clean(change.after)}${knownBy}`
     };
   }));
   const bySlot = /* @__PURE__ */ new Map();
@@ -5399,7 +5398,7 @@ function stateValueSpecificTerms(value) {
   }
   const codes = term.match(/(?:[A-Za-z]+[-_]?\d+(?:[-_][A-Za-z0-9]+)*|\d+[-_]?[A-Za-z]+)/gu) ?? [];
   const middleDotNames = term.match(/[\p{L}]{1,16}(?:[·・][\p{L}]{1,16})+/gu) ?? [];
-  const exactName = term.length <= 16 && !/(?:存放|位于|藏|转入|移入|保管|持有|交给|归还|失窃|完成|取消|未知|不明|仍在|当前|现在)/u.test(term) && likelySpecificName(term) ? [term] : [];
+  const exactName = codes.length === 0 && middleDotNames.length === 0 && term.length <= 16 && !/(?:存放|位于|藏|转入|移入|保管|持有|携带|随身|交给|交由|转交|归还|失窃|完成|取消|未知|不明|仍在|当前|现在)/u.test(term) && likelySpecificName(term) ? [term] : [];
   return [.../* @__PURE__ */ new Set([...codes, ...middleDotNames, ...exactName])];
 }
 function termIsGrounded(term, evidenceText, assistantSpeakerNames) {
@@ -5951,7 +5950,7 @@ var ExtractionService = class {
    * history. Derived memories are conservatively rebuilt so facts from a
    * removed branch can never leak into the current prompt.
    */
-  async reconcileHistory(state) {
+  async reconcileHistory(state, options = {}) {
     const current = state ?? await this.memoryRepository.getOrCreate();
     if (!current || current.indexedThroughMessageId < 0) {
       return current;
@@ -5971,12 +5970,16 @@ var ExtractionService = class {
     }
     const previousIndexedThrough = current.indexedThroughMessageId;
     const previousMemoryCount = current.memories.length;
+    const previousVectorHashes = [...new Set(current.memories.map((memory) => memory.vectorHash))];
     let purgeFailed = false;
-    try {
-      await this.vectorStore.purge(current.vectorCollectionId);
-    } catch (error) {
-      purgeFailed = true;
-      logger.warn("\u804A\u5929\u5386\u53F2\u53D8\u5316\u540E\u6E05\u7406\u65E7\u5411\u91CF\u5931\u8D25\uFF0C\u540E\u7EED\u540C\u6B65\u5C06\u91CD\u8BD5\u3002", error);
+    const purgeDeferred = options.purgeVectors === false;
+    if (!purgeDeferred) {
+      try {
+        await this.vectorStore.purge(current.vectorCollectionId);
+      } catch (error) {
+        purgeFailed = true;
+        logger.warn("\u804A\u5929\u5386\u53F2\u53D8\u5316\u540E\u6E05\u7406\u65E7\u5411\u91CF\u5931\u8D25\uFF0C\u540E\u7EED\u540C\u6B65\u5C06\u91CD\u8BD5\u3002", error);
+      }
     }
     current.indexedThroughMessageId = -1;
     current.indexedThroughHash = "";
@@ -5989,14 +5992,15 @@ var ExtractionService = class {
     current.memories = [];
     current.pendingRanges = [];
     current.pendingVectorHashes = [];
-    current.pendingVectorDeleteHashes = [];
+    current.pendingVectorDeleteHashes = purgeDeferred ? previousVectorHashes : [];
     current.vectorFingerprint = "";
     delete current.lastInspection;
     recordDebugTrace(current, settings.debug, "extraction", "\u68C0\u6D4B\u5230\u804A\u5929\u5206\u652F\u3001\u7F16\u8F91\u6216\u5220\u697C\u5C42\uFF0C\u5DF2\u91CD\u7F6E\u5267\u60C5\u7D22\u5F15\u3002", {
       previousIndexedThrough,
       currentMessageCount: context.chat.length,
       removedMemories: previousMemoryCount,
-      purgeFailed
+      purgeFailed,
+      purgeDeferred
     });
     await this.memoryRepository.save(current);
     return current;
@@ -6021,13 +6025,13 @@ var ExtractionService = class {
     if (configurationChanged) {
       const isRebuild = current.vectorFingerprint.length > 0;
       current.pendingVectorHashes = [...eligibleHashes];
-      current.pendingVectorDeleteHashes = [];
       current.metrics.vectorRebuilds += isRebuild ? 1 : 0;
       recordDebugTrace(current, settings.debug, "vector", isRebuild ? "Embedding\u914D\u7F6E\u53D8\u5316\uFF0C\u91CD\u5EFA\u5F53\u524D\u804A\u5929\u5411\u91CF\u96C6\u5408\u3002" : "\u521D\u59CB\u5316\u5F53\u524D\u804A\u5929\u5411\u91CF\u96C6\u5408\u3002", {
         eligibleMemories: eligible.length
       });
       await this.memoryRepository.save(current);
       await this.vectorStore.purge(current.vectorCollectionId);
+      current.pendingVectorDeleteHashes = [];
     } else {
       current.pendingVectorHashes = current.pendingVectorHashes.filter((hash) => eligibleHashes.has(hash));
     }
@@ -6427,6 +6431,117 @@ function removeMessagesAtIndices(messages, indices) {
   messages.length = writeIndex;
 }
 
+// src/retrieval/story-phase.ts
+var PHASE_NOUN = "(?:\u5267\u60C5(?:\u9636\u6BB5|\u7EBF)?|\u6545\u4E8B(?:\u9636\u6BB5|\u7EBF)?|\u7BC7\u7AE0|\u7AE0\u8282|\u4EFB\u52A1|\u59D4\u6258|\u65C5\u7A0B|\u5192\u9669|\u9636\u6BB5|\u4E3B\u7EBF|\u652F\u7EBF|\u4E8B\u4EF6|\u6848\u4EF6|\u6848\u5B50|\u7AE0|\u6848)";
+var STORY_SCALE_NOUN = "(?:\u5267\u60C5(?:\u9636\u6BB5|\u7EBF)?|\u6545\u4E8B(?:\u9636\u6BB5|\u7EBF)?|\u7BC7\u7AE0|\u7AE0\u8282|\u65C5\u7A0B|\u5192\u9669|\u9636\u6BB5|\u4E3B\u7EBF|\u6848\u4EF6|\u6848\u5B50|\u7AE0|\u6848)";
+var CLOSED = "(?:\u5DF2(?:\u7ECF)?|\u521A|\u6B63\u5F0F)?(?:\u7ED3\u675F|\u5B8C\u6210|\u544A\u4E00\u6BB5\u843D|\u6536\u5C3E|\u843D\u5E55|\u5B8C\u7ED3|\u5B8C(?:\u4E86)?|\u89E3\u51B3|\u7ED3(?:\u6848)?)";
+var STARTED = "(?:\u5F00\u59CB|\u8FDB\u5165|\u5207\u6362(?:\u5230|\u81F3)?|\u8F6C\u5165|\u5F00\u542F|\u5C55\u5F00|\u542F\u52A8|\u63A5\u624B|\u63A5\u5230|\u63A5\u53D7|\u627F\u63A5)";
+var NEW_PHASE = `(?:\u4E00\u6BB5|\u4E00\u4E2A|\u4E00\u9879|\u4E00\u573A|\u4E00\u5B97|\u4E00\u8D77|\u4E00\u6869)?(?:\u5168\u65B0(?:\u7684)?|\u65B0\u7684?|\u4E0B\u4E00(?:\u6BB5|\u4E2A|\u9879|\u573A|\u7AE0)?|\u53E6\u4E00(?:\u6BB5|\u4E2A|\u9879|\u573A|\u5B97|\u8D77|\u6869)?)[^\uFF0C\u3002\uFF01\uFF1F\uFF1B\\n]{0,12}${PHASE_NOUN}`;
+var NEW_STORY_SCALE_PHASE = `(?:\u4E00\u6BB5|\u4E00\u4E2A|\u4E00\u573A|\u4E00\u5B97|\u4E00\u8D77|\u4E00\u6869)?(?:\u5168\u65B0(?:\u7684)?|\u65B0\u7684?|\u4E0B\u4E00(?:\u6BB5|\u4E2A|\u573A|\u7AE0)?|\u53E6\u4E00(?:\u6BB5|\u4E2A|\u573A|\u5B97|\u8D77|\u6869)?)[^\uFF0C\u3002\uFF01\uFF1F\uFF1B\\n]{0,12}${STORY_SCALE_NOUN}`;
+var NEW_INDEPENDENT_PHASE = `(?:\u4E00\u6BB5|\u4E00\u4E2A|\u4E00\u9879|\u4E00\u573A|\u4E00\u5B97|\u4E00\u8D77|\u4E00\u6869)?(?:\u5168\u65B0(?:\u7684)?|\u65B0\u7684?|\u4E0B\u4E00(?:\u6BB5|\u4E2A|\u9879|\u573A|\u7AE0)?|\u53E6\u4E00(?:\u6BB5|\u4E2A|\u9879|\u573A|\u5B97|\u8D77|\u6869)?)[^\uFF0C\u3002\uFF01\uFF1F\uFF1B\\n]{0,12}(?:\u72EC\u7ACB(?:\u7684)?|\u4E0E\u6B64\u524D\u65E0\u5173(?:\u7684)?)[^\uFF0C\u3002\uFF01\uFF1F\uFF1B\\n]{0,8}${PHASE_NOUN}`;
+var PREVIOUS_PHASE = `(?:\u4E0A\u4E00(?:\u6BB5|\u4E2A|\u9879|\u573A|\u7AE0)?|\u524D\u4E00(?:\u6BB5|\u4E2A|\u9879|\u573A|\u7AE0)?|\u6B64\u524D(?:\u7684)?|\u4E4B\u524D(?:\u7684)?|\u539F(?:\u672C|\u6765)(?:\u7684)?|\u65E7(?:\u7684)?)${PHASE_NOUN}`;
+var EXPLICIT_STORY_PHASE_BOUNDARY = [
+  new RegExp(`${PREVIOUS_PHASE}.{0,16}${CLOSED}.{0,36}${STARTED}.{0,16}${NEW_PHASE}`, "u"),
+  new RegExp(`${PHASE_NOUN}.{0,16}${CLOSED}.{0,36}${STARTED}.{0,16}${NEW_PHASE}`, "u"),
+  /第[一二三四五六七八九十百千万\d]+(?:章|节|幕|卷).{0,16}(?:结束|完成|落幕|完结|到此为止).{0,32}第[一二三四五六七八九十百千万\d]+(?:章|节|幕|卷).{0,12}(?:开始|开启|展开)/u,
+  new RegExp(`${STARTED}.{0,12}(?:${NEW_STORY_SCALE_PHASE}|${NEW_INDEPENDENT_PHASE})`, "u"),
+  new RegExp(`(?:${NEW_STORY_SCALE_PHASE}|${NEW_INDEPENDENT_PHASE}).{0,12}(?:\u5DF2(?:\u7ECF)?|\u6B63\u5F0F)?(?:\u5F00\u59CB|\u5F00\u542F|\u5C55\u5F00|\u542F\u52A8)`, "u"),
+  new RegExp(`(?:\u8FD9\u662F|\u8FD9\u5C06\u662F).{0,6}(?:${NEW_STORY_SCALE_PHASE}|${NEW_INDEPENDENT_PHASE})`, "u")
+];
+var EARLIER_STORY_PHASE_QUERY = [
+  new RegExp(`${PREVIOUS_PHASE}.{0,32}(?:\u8C01|\u4EC0\u4E48|\u54EA|\u56DE\u987E|\u590D\u76D8|\u603B\u7ED3|\u8FFD\u6EAF|\u56DE\u5FC6|\u8BB0\u5F97|\u7ED3\u8BBA|\u7ED3\u679C|\u8BC1\u636E|\u7EBF\u7D22|\u53D1\u751F|\u60C5\u51B5|\u72B6\u6001|\u4F4D\u7F6E|\u4E0B\u843D|\u5982\u4F55)`, "u"),
+  new RegExp(`(?:\u8C01|\u4EC0\u4E48|\u54EA|\u56DE\u987E|\u590D\u76D8|\u603B\u7ED3|\u8FFD\u6EAF|\u56DE\u5FC6|\u8BB0\u5F97|\u7ED3\u8BBA|\u7ED3\u679C|\u8BC1\u636E|\u7EBF\u7D22|\u60C5\u51B5|\u72B6\u6001|\u4F4D\u7F6E|\u4E0B\u843D).{0,32}${PREVIOUS_PHASE}`, "u"),
+  /(?:回顾|复盘|总结|追溯|回忆|记得).{0,20}(?:以前|之前|此前|较早|过去|上一段|前一段)(?:发生)?(?:的)?(?:剧情|故事|经历|事情|内容)/u
+];
+var HYPOTHETICAL_CUE = /(?:如果|假如|假设|若(?:是)?|等到|待到)/u;
+var NEGATED_TRANSITION = /(?:尚未|还没(?:有)?|没有|并未|不是|并非|不要|别|不应|不能).{0,20}(?:结束|完成|告一段落|收尾|落幕|完结|解决|开始|进入|切换|转入|开启|展开|启动|接手|接到|接受|承接)/u;
+function sentenceContext(value, matchIndex, matchLength) {
+  const prefix = value.slice(0, matchIndex);
+  const sentenceStart = Math.max(
+    prefix.lastIndexOf("\u3002"),
+    prefix.lastIndexOf("\uFF01"),
+    prefix.lastIndexOf("\uFF1F"),
+    prefix.lastIndexOf("\n")
+  ) + 1;
+  return value.slice(sentenceStart, matchIndex + matchLength);
+}
+function isExplicitStoryPhaseBoundary(value) {
+  return EXPLICIT_STORY_PHASE_BOUNDARY.some((pattern) => {
+    const match = pattern.exec(value);
+    if (!match) {
+      return false;
+    }
+    const context = sentenceContext(value, match.index, match[0].length);
+    return !HYPOTHETICAL_CUE.test(context) && !NEGATED_TRANSITION.test(context);
+  });
+}
+function asksForEarlierStoryPhase(value) {
+  return EARLIER_STORY_PHASE_QUERY.some((pattern) => pattern.test(value));
+}
+function memoryTerms2(memory) {
+  return [.../* @__PURE__ */ new Set([
+    ...memory.entities,
+    ...memory.aliases,
+    ...memory.stateChanges.map((change) => change.entity)
+  ])].map(normalizeIdentityText).filter((term) => term.length >= 2);
+}
+function currentStoryPhaseStart(messages, currentInputMessageId) {
+  const end = Math.min(messages.length - 1, Math.max(0, Math.floor(currentInputMessageId)));
+  for (let index = end; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.is_user && !message.is_system && isExplicitStoryPhaseBoundary(message.mes)) {
+      return index;
+    }
+  }
+  return null;
+}
+function firstStoryPhaseBoundary(messages, startMessageId, endMessageId) {
+  const start = Math.max(0, Math.floor(startMessageId));
+  const end = Math.min(messages.length - 1, Math.floor(endMessageId));
+  if (start > end) {
+    return null;
+  }
+  for (let index = start; index <= end; index += 1) {
+    const message = messages[index];
+    if (message?.is_user && !message.is_system && isExplicitStoryPhaseBoundary(message.mes)) {
+      return index;
+    }
+  }
+  return null;
+}
+function scopeMemoriesToCurrentStoryPhase(memories, messages, currentInputMessageId) {
+  const boundaryMessageId = currentStoryPhaseStart(messages, currentInputMessageId);
+  const currentInput = messages[currentInputMessageId]?.mes ?? "";
+  const earlierPhaseQuery = asksForEarlierStoryPhase(currentInput);
+  if (boundaryMessageId === null || earlierPhaseQuery) {
+    return {
+      boundaryMessageId,
+      memories,
+      excludedMemoryIds: [],
+      earlierPhaseQuery
+    };
+  }
+  const normalizedQuery = normalizeIdentityText(currentInput);
+  const currentPhaseTerms = new Set(memories.filter((memory) => memory.source.endMessageId >= boundaryMessageId).flatMap(memoryTerms2));
+  const kept = [];
+  const excludedMemoryIds = [];
+  for (const memory of memories) {
+    const terms = memoryTerms2(memory);
+    const explicitlyRequestedOlderEntity = terms.some((term) => normalizedQuery.includes(term) && !currentPhaseTerms.has(term));
+    if (memory.source.endMessageId >= boundaryMessageId || memory.pinned || memory.manuallyEdited || explicitlyRequestedOlderEntity) {
+      kept.push(memory);
+    } else {
+      excludedMemoryIds.push(memory.id);
+    }
+  }
+  return {
+    boundaryMessageId,
+    memories: kept,
+    excludedMemoryIds,
+    earlierPhaseQuery
+  };
+}
+
 // src/summary/prompts.ts
 var STAGE_SUMMARY_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u4E2A\u4E25\u683C\u7684\u957F\u7BC7\u89D2\u8272\u626E\u6F14\u5267\u60C5\u9636\u6BB5\u603B\u7ED3\u5668\u3002
 
@@ -6451,7 +6566,8 @@ var STAGE_SUMMARY_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u4E2A\u4E25\u683C\u7684\u9
 \u3010\u672A\u89E3\u51B3\u7EBF\u7D22\u3011\u53EA\u5199\u539F\u6587\u660E\u786E\u7559\u4E0B\u3001\u5C1A\u672A\u89E3\u51B3\u7684\u95EE\u9898\u6216\u4EFB\u52A1\u3002
 \u3010\u89D2\u8272\u4E3B\u5F20\u4E0E\u63A8\u6D4B\u3011\u53EA\u5199\u786E\u5B9E\u5F71\u54CD\u540E\u7EED\u884C\u52A8\u7684\u89D2\u8272\u8BF4\u6CD5\u3001\u63A8\u65AD\u3001\u6000\u7591\u6216\u672A\u8BC1\u5B9E\u89E3\u91CA\uFF0C\u5E76\u660E\u786E\u6807\u6210\u8C01\u7684\u4E3B\u5F20/\u63A8\u6D4B\u3002
 \u3010\u5DF2\u5931\u6548\u6216\u5426\u5B9A\u4E8B\u5B9E\u3011\u53EA\u5199\u672C\u6279\u4E2D\u88AB\u540E\u6587\u660E\u786E\u66FF\u4EE3\u3001\u5426\u5B9A\u6216\u7EA0\u6B63\u7684\u65E7\u8BF4\u6CD5\uFF1B\u4E0D\u5F97\u628A\u5B83\u4EEC\u7EE7\u7EED\u5199\u8FDB\u5DF2\u786E\u8BA4\u5267\u60C5\u3001\u5F53\u524D\u72B6\u6001\u6216\u672A\u89E3\u51B3\u7EBF\u7D22\u3002
-14. Assistant\u7684\u63A8\u65AD\u3001\u53CD\u95EE\u3001\u5047\u8BBE\u548C\u201C\u53EF\u80FD/\u8BF4\u660E/\u610F\u5473\u7740\u201D\u7B49\u63A8\u7406\u4E0D\u5F97\u8FDB\u5165\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011\u6216\u3010\u5F53\u524D\u72B6\u6001\u3011\uFF1B\u5373\u4F7F\u8BED\u6C14\u80AF\u5B9A\uFF0C\u4E5F\u53EA\u80FD\u8FDB\u5165\u3010\u89D2\u8272\u4E3B\u5F20\u4E0E\u63A8\u6D4B\u3011\u3002`;
+14. Assistant\u7684\u63A8\u65AD\u3001\u53CD\u95EE\u3001\u5047\u8BBE\u548C\u201C\u53EF\u80FD/\u8BF4\u660E/\u610F\u5473\u7740\u201D\u7B49\u63A8\u7406\u4E0D\u5F97\u8FDB\u5165\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011\u6216\u3010\u5F53\u524D\u72B6\u6001\u3011\uFF1B\u5373\u4F7F\u8BED\u6C14\u80AF\u5B9A\uFF0C\u4E5F\u53EA\u80FD\u8FDB\u5165\u3010\u89D2\u8272\u4E3B\u5F20\u4E0E\u63A8\u6D4B\u3011\u3002
+15. \u8F93\u51FA\u524D\u9010\u6761\u590D\u6838\u3010\u672A\u89E3\u51B3\u7EBF\u7D22\u3011\uFF1A\u540C\u4E00\u5B9E\u4F53\u7684\u540C\u4E00\u5C5E\u6027\u82E5\u5DF2\u5728\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011\u6216\u3010\u5F53\u524D\u72B6\u6001\u3011\u5F97\u5230\u7B54\u6848\uFF08\u4F8B\u5982\u5DF2\u7ECF\u660E\u786E\u7528\u9014\u3001\u4F4D\u7F6E\u3001\u6301\u6709\u8005\u3001\u8EAB\u4EFD\u6216\u771F\u4F2A\uFF09\uFF0C\u4E0D\u5F97\u518D\u5199\u6210\u201C\u672A\u77E5/\u672A\u660E/\u5F85\u786E\u8BA4\u201D\u3002`;
 function currentVersionSourceIdsInRange(memory, sourceStartMessageId, sourceEndMessageId) {
   const currentVersionIds = memory.sourceMessageIds.filter((messageId) => messageId >= memory.source.startMessageId && messageId <= memory.source.endMessageId);
   if (currentVersionIds.length === 0 || currentVersionIds.some((messageId) => messageId < sourceStartMessageId || messageId > sourceEndMessageId)) {
@@ -6544,6 +6660,33 @@ var REQUIRED_SUMMARY_HEADINGS = [
   "\u3010\u89D2\u8272\u4E3B\u5F20\u4E0E\u63A8\u6D4B\u3011",
   "\u3010\u5DF2\u5931\u6548\u6216\u5426\u5B9A\u4E8B\u5B9E\u3011"
 ];
+var UNRESOLVED_CUE = /(?:仍|尚|还)?(?:未知|未明|不清楚|未确认|待确认|有待查明)/u;
+var SUMMARY_SENTENCE = /[^。.!！?？；;\n]+/gu;
+var SUMMARY_STABLE_IDENTIFIER = /(?:[A-Za-z]+[-_]?\d+(?:[-_][A-Za-z0-9]+)*|\d+[-_]?[A-Za-z]+)/gu;
+var NEGATED_RESOLUTION = /(?:未|没有|并未|无法|不能|不可).{0,6}(?:确认|查明|使用|利用|用于|用来|找到|确定)/u;
+var UNRESOLVED_RESOLUTION_RESULT = /(?:不在|未在|没有找到|尚未找到)|(?:(?:使用|利用).{0,30}(?:失败|未成功|没有成功|没有结果|仍未|未知|未明))|(?:(?:下落|位置|身份|用途|真伪).{0,8}(?:仍|尚|还)?(?:未知|未明|未确认))/u;
+var UNRESOLVED_ATTRIBUTES = [
+  {
+    cue: /(?:用途|作用)/u,
+    resolved: /(?:用途(?:是|为)|用于|用来|可用于|使用|利用|凭借).{0,36}(?:打开|开启|解锁|进入|启动|验证|证明|定位|追踪|交换|识别)?/u
+  },
+  {
+    cue: /(?:位置|地点|下落|去向)/u,
+    resolved: /(?:位于|在|藏于|藏在|存放于|存放在|移到|转移到|交到)/u
+  },
+  {
+    cue: /(?:持有者|保管者|归属)/u,
+    resolved: /(?:由.{0,16}(?:持有|保管|携带)|交给|交由|归还给|归属)/u
+  },
+  {
+    cue: /(?:身份|姓名|真名)/u,
+    resolved: /(?:身份(?:是|为)|名叫|姓名(?:是|为)|真名(?:是|为)|就是)/u
+  },
+  {
+    cue: /(?:真伪|真假)/u,
+    resolved: /(?:确认为|证实为|是真|是伪|伪造|真品|赝品)/u
+  }
+];
 function sourcePayload2(messages, sourceStartMessageId) {
   return JSON.stringify(messages.map((message, offset) => ({
     messageId: sourceStartMessageId + offset,
@@ -6555,6 +6698,65 @@ function sourcePayload2(messages, sourceStartMessageId) {
 }
 function escapedRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function normalizedSummaryTerm(value) {
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+function sectionBodies(summary) {
+  const positions = REQUIRED_SUMMARY_HEADINGS.map((heading) => summary.indexOf(heading));
+  if (positions.some((position) => position < 0)) {
+    return null;
+  }
+  return REQUIRED_SUMMARY_HEADINGS.map((heading, index) => ({
+    heading,
+    body: summary.slice(
+      positions[index] + heading.length,
+      positions[index + 1] ?? summary.length
+    ).trim()
+  }));
+}
+function unresolvedSubjects(line, attributeCue) {
+  const identifiers = line.match(SUMMARY_STABLE_IDENTIFIER) ?? [];
+  const attributeIndex = line.search(attributeCue);
+  const prefix = attributeIndex > 0 ? line.slice(Math.max(0, attributeIndex - 32), attributeIndex).replace(/^[\s\-*•·：:，,；;。.!！?？]+/u, "").replace(/(?:的)$/u, "").trim() : "";
+  return [.../* @__PURE__ */ new Set([...identifiers, ...prefix.length >= 2 ? [prefix] : []])].map(normalizedSummaryTerm).filter((term) => term.length >= 2);
+}
+function unresolvedLineWasResolved(line, resolvedText) {
+  if (!UNRESOLVED_CUE.test(line)) {
+    return false;
+  }
+  const rule = UNRESOLVED_ATTRIBUTES.find(({ cue }) => cue.test(line));
+  if (!rule) {
+    return false;
+  }
+  const subjects = unresolvedSubjects(line, rule.cue);
+  if (subjects.length === 0) {
+    return false;
+  }
+  return (resolvedText.match(SUMMARY_SENTENCE) ?? []).some((sentence2) => {
+    const normalizedSentence = normalizedSummaryTerm(sentence2);
+    return subjects.some((subject) => normalizedSentence.includes(subject)) && !NEGATED_RESOLUTION.test(sentence2) && !UNRESOLVED_RESOLUTION_RESULT.test(sentence2) && rule.resolved.test(sentence2);
+  });
+}
+function removeResolvedSummaryThreads(summary) {
+  const sections = sectionBodies(summary);
+  if (!sections) {
+    return summary;
+  }
+  const resolvedText = sections.filter(({ heading }) => heading === "\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011" || heading === "\u3010\u5F53\u524D\u72B6\u6001\u3011").map(({ body }) => body).join("\n");
+  let removedThread = false;
+  const rebuilt = sections.map(({ heading, body }) => {
+    if (heading !== "\u3010\u672A\u89E3\u51B3\u7EBF\u7D22\u3011") {
+      return `${heading}
+${body || "\u65E0"}`;
+    }
+    const originalLines = body.split("\n").map((line) => line.trim()).filter(Boolean);
+    const lines2 = originalLines.filter((line) => !unresolvedLineWasResolved(line, resolvedText));
+    removedThread ||= lines2.length < originalLines.length;
+    return `${heading}
+${lines2.length > 0 ? lines2.join("\n") : "\u65E0"}`;
+  });
+  return removedThread ? rebuilt.join("\n") : summary;
 }
 function summaryIdentity(context) {
   const character = Number.isInteger(context.characterId) ? context.characters?.[context.characterId] : void 0;
@@ -6582,10 +6784,11 @@ function normalizeSummary(raw, sourceMessages = [], userUiPersona = "", requireS
   const sourceText2 = sourceMessages.map((message) => storyContent(message)).join("\n");
   const persona = userUiPersona.trim();
   const identitySafe = persona.length >= 2 && !sourceText2.includes(persona) ? withoutWrapper.replace(new RegExp(escapedRegExp(persona), "gu"), "\u7528\u6237\u89D2\u8272") : withoutWrapper;
-  if (identitySafe.length > MAX_STORED_SUMMARY_CHARACTERS) {
+  const consistencySafe = requireSections ? removeResolvedSummaryThreads(identitySafe) : identitySafe;
+  if (consistencySafe.length > MAX_STORED_SUMMARY_CHARACTERS) {
     throw new Error("\u9636\u6BB5\u603B\u7ED3\u6A21\u578B\u8FD4\u56DE\u5185\u5BB9\u8FC7\u957F\u3002");
   }
-  return identitySafe;
+  return consistencySafe;
 }
 function assertChatOwner2(state) {
   if (getCurrentChatId() !== state.ownerChatId) {
@@ -6640,23 +6843,30 @@ var StageSummaryService = class {
     }
     try {
       while (start <= maximumEnd && updatedChunks < options.maxChunks) {
-        const chunk = planNextChunk(
+        const plannedChunk = planNextChunk(
           context.chat,
           start,
           maximumEnd,
           settings.summary.targetTurnsPerUpdate,
           MAX_SUMMARY_SOURCE_CHARACTERS
         );
-        if (!chunk) {
+        if (!plannedChunk) {
           break;
         }
+        const boundaryMessageId = firstStoryPhaseBoundary(
+          context.chat,
+          plannedChunk.startMessageId + 1,
+          plannedChunk.endMessageId
+        );
+        const splitBeforeBoundary = boundaryMessageId !== null && boundaryMessageId > plannedChunk.startMessageId;
+        const chunk = splitBeforeBoundary ? { ...plannedChunk, endMessageId: boundaryMessageId - 1 } : plannedChunk;
         const snapshot = context.chat.slice(chunk.startMessageId, chunk.endMessageId + 1).map((message) => ({
           is_user: message.is_user,
           is_system: Boolean(message.is_system),
           ...message.name ? { name: message.name } : {},
           mes: message.mes
         }));
-        const hasFullTurnBatch = countCompletedTurns(snapshot) >= settings.summary.targetTurnsPerUpdate;
+        const hasFullTurnBatch = countCompletedTurns(snapshot) >= settings.summary.targetTurnsPerUpdate || splitBeforeBoundary && snapshot.some((message) => !message.is_system && storyContent(message).length > 0);
         if (!hasFullTurnBatch) {
           break;
         }
@@ -6687,6 +6897,12 @@ var StageSummaryService = class {
           throw new Error("\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u6E90\u6D88\u606F\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u4E22\u5F03\u672C\u6B21\u7ED3\u679C\u3002");
         }
         const text2 = normalizeSummary(raw, snapshot, identity.userUiPersona, true);
+        const identitySafeWithoutConsistency = normalizeSummary(
+          raw,
+          snapshot,
+          identity.userUiPersona
+        );
+        const withoutPersonaSanitization = normalizeSummary(raw, snapshot, "", true);
         const commitChat = getContext().chat;
         const commitHash = await sha256(sourcePayload2(
           commitChat.slice(chunk.startMessageId, chunk.endMessageId + 1),
@@ -6718,7 +6934,8 @@ var StageSummaryService = class {
           range: `${chunk.startMessageId}-${chunk.endMessageId}`,
           summaryCharacters: text2.length,
           summaryEntries: state.stageSummary.entries.length,
-          personaLabelSanitized: text2 !== normalizeSummary(raw, snapshot),
+          personaLabelSanitized: text2 !== withoutPersonaSanitization,
+          summaryConsistencyAdjusted: text2 !== identitySafeWithoutConsistency,
           authoritativeFactCharacters: authoritativeFacts.length
         });
         await this.memoryRepository.save(state);
@@ -6809,7 +7026,7 @@ var BackgroundProcessingScheduler = class {
     };
     const eventName = eventTypes?.["MESSAGE_RECEIVED"];
     if (!eventSource || !eventName) {
-      logger.warn("\u5F53\u524DSillyTavern\u672A\u63D0\u4F9B\u56DE\u590D\u5B8C\u6210\u4E8B\u4EF6\uFF0C\u81EA\u52A8\u62BD\u53D6\u4ECD\u4F1A\u5728\u751F\u6210\u524D\u5B89\u5168\u8865\u9F50\u3002");
+      logger.warn("\u5F53\u524DSillyTavern\u672A\u63D0\u4F9B\u56DE\u590D\u5B8C\u6210\u4E8B\u4EF6\uFF1B\u81EA\u52A8\u6574\u7406\u65E0\u6CD5\u8C03\u5EA6\uFF0C\u8BF7\u4F7F\u7528\u201C\u5904\u7406\u7A97\u53E3\u5916\u5386\u53F2\u201D\u3002");
       return;
     }
     const handler = () => {
@@ -6993,7 +7210,7 @@ var BackgroundProcessingScheduler = class {
               failures,
               nextRetryAt: Date.now() + delayMs
             };
-            logger.warn(`\u81EA\u52A8\u62BD\u53D6\u5931\u8D25\uFF0C\u5DF2\u9000\u907F ${delayMs}ms\uFF1B\u624B\u52A8\u5904\u7406\u4E0E\u751F\u6210\u524D\u5B89\u5168\u8865\u9F50\u4E0D\u53D7\u5F71\u54CD\u3002`, error);
+            logger.warn(`\u81EA\u52A8\u62BD\u53D6\u5931\u8D25\uFF0C\u5DF2\u9000\u907F ${delayMs}ms\uFF1B\u624B\u52A8\u5904\u7406\u4E0D\u53D7\u5F71\u54CD\u3002`, error);
           }
         }
         if (this.historyRevision !== extractionRevision) {
@@ -7013,6 +7230,18 @@ var BackgroundProcessingScheduler = class {
           indexedThroughMessageId: state.indexedThroughMessageId,
           indexedPrefixHash: state.indexedPrefixHash
         };
+      }
+    }
+    if (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0) {
+      try {
+        state = await extractionService.syncPendingVectors(state) ?? state;
+      } catch (error) {
+        state.metrics.vectorSyncFailures += 1;
+        recordDebugTrace(state, settings.debug, "vector", "\u540E\u53F0\u540C\u6B65\u5F85\u5904\u7406\u5411\u91CF\u5931\u8D25\uFF0C\u5C06\u5728\u540E\u7EED\u56DE\u590D\u91CD\u8BD5\u3002", {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        await this.memoryRepository.save(state);
+        logger.warn("\u540E\u53F0\u540C\u6B65\u5F85\u5904\u7406\u5411\u91CF\u5931\u8D25\uFF0C\u5C06\u5728\u540E\u7EED\u56DE\u590D\u91CD\u8BD5\u3002", error);
       }
     }
     if (settings.summary.enabled && settings.summary.automatic && state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
@@ -7097,12 +7326,13 @@ function hasSourceOutsideWindow(memory, retainedStartIndex) {
 var STRICT_FACT_CUE = /(?:只(?:回答|列出|给出)|不要(?:续写|发挥|推测|猜测|补充)|已确认(?:的|记录|事实)|当前事实|事实核验|核验|复核|准确回答|若没有.{0,12}(?:没有|未知|不确定)|没有已确认记录)/u;
 var CURRENT_FACT_QUESTION = /(?:(?:当前|现在|目前|最新|具体).{0,16}(?:位置|地点|藏在|位于|持有者|保管者|知情者|状态|关系|结果|是谁|是什么|在哪里|何处|由谁|谁(?:持有|保管|知道|知情)))|(?:(?:位置|地点|持有者|保管者|知情者|状态).{0,12}(?:分别|各自|具体|当前|现在))/u;
 var CLOSED_ANSWER_CUE = /(?:分别在哪里|谁是唯一知情者|只回答位置和姓名|是什么颜色|是否完成|有没有已确认记录)/u;
+var AUDIT_BOUNDARY_CUE = /(?:(?:事实|证据).{0,8}(?:边界|审计|核对|状态|分类))|(?:(?:已确认|已排除|已作废|未确认).{0,24}(?:三栏|分类|回答|列出))|(?:不要把.{0,12}(?:推断|推测).{0,12}(?:事实|已确认))/u;
 function isFactVerificationQuery(value) {
   const query = value.trim();
   if (!query) {
     return false;
   }
-  return STRICT_FACT_CUE.test(query) || CLOSED_ANSWER_CUE.test(query) || CURRENT_FACT_QUESTION.test(query) && /[?？]|(?:回答|告诉|确认)/u.test(query);
+  return STRICT_FACT_CUE.test(query) || AUDIT_BOUNDARY_CUE.test(query) || CLOSED_ANSWER_CUE.test(query) || CURRENT_FACT_QUESTION.test(query) && /[?？]|(?:回答|告诉|确认)/u.test(query);
 }
 
 // src/retrieval/recent-shadow.ts
@@ -7130,7 +7360,7 @@ function memoryKinds(memory) {
   const fallback = logicalKeyKind(memory);
   return [...new Set(fallback ? [...kinds, fallback] : kinds)];
 }
-function memoryTerms2(memory) {
+function memoryTerms3(memory) {
   return [.../* @__PURE__ */ new Set([
     ...memory.entities,
     ...memory.aliases,
@@ -7144,7 +7374,7 @@ function kindIsAsserted(text2, kind) {
   return KIND_CUES[kind]?.test(text2) ?? ASSERTIVE_UPDATE_CUE.test(text2);
 }
 function isShadowedByRecentUserFact(memory, messages, startMessageId, endMessageId) {
-  const terms = memoryTerms2(memory);
+  const terms = memoryTerms3(memory);
   const kinds = memoryKinds(memory);
   if (terms.length === 0 || kinds.length === 0) {
     return false;
@@ -7297,6 +7527,68 @@ var QueryRewriteService = class {
   }
 };
 var queryRewriteService = new QueryRewriteService();
+
+// src/retrieval/summary-shadow.ts
+var SUMMARY_HEADINGS2 = [
+  "\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011",
+  "\u3010\u5F53\u524D\u72B6\u6001\u3011",
+  "\u3010\u672A\u89E3\u51B3\u7EBF\u7D22\u3011",
+  "\u3010\u89D2\u8272\u4E3B\u5F20\u4E0E\u63A8\u6D4B\u3011",
+  "\u3010\u5DF2\u5931\u6548\u6216\u5426\u5B9A\u4E8B\u5B9E\u3011"
+];
+function summarySections(summary) {
+  const positions = SUMMARY_HEADINGS2.map((heading) => summary.indexOf(heading));
+  if (positions.some((position, index) => position < 0 || index > 0 && position <= positions[index - 1])) {
+    return /* @__PURE__ */ new Map();
+  }
+  return new Map(SUMMARY_HEADINGS2.map((heading, index) => {
+    const start = positions[index] + heading.length;
+    const end = positions[index + 1] ?? summary.length;
+    return [heading, summary.slice(start, end).trim()];
+  }));
+}
+function sectionSupportsState(section, entity, after) {
+  return entity.length >= 2 && after.length >= 2 && section.includes(entity) && section.includes(after);
+}
+function prepareSummaryEvidence(entries) {
+  return [...entries].sort((left, right) => left.sourceEndMessageId - right.sourceEndMessageId).flatMap((entry) => {
+    const sections = summarySections(entry.text);
+    return sections.size === 0 ? [] : [{
+      sourceEndMessageId: entry.sourceEndMessageId,
+      confirmed: normalizeIdentityText(
+        `${sections.get("\u3010\u5DF2\u786E\u8BA4\u5267\u60C5\u3011") ?? ""}
+${sections.get("\u3010\u5F53\u524D\u72B6\u6001\u3011") ?? ""}`
+      ),
+      invalid: normalizeIdentityText(sections.get("\u3010\u5DF2\u5931\u6548\u6216\u5426\u5B9A\u4E8B\u5B9E\u3011") ?? "")
+    }];
+  });
+}
+function memoryIsInvalidated(memory, entries) {
+  if (memory.stateChanges.length === 0) {
+    return false;
+  }
+  const invalidated = memory.stateChanges.map(() => false);
+  for (const entry of entries) {
+    if (entry.sourceEndMessageId < memory.source.endMessageId) {
+      continue;
+    }
+    for (const [index, change] of memory.stateChanges.entries()) {
+      const entity = normalizeIdentityText(change.entity);
+      const after = normalizeIdentityText(change.after);
+      if (sectionSupportsState(entry.confirmed, entity, after)) {
+        invalidated[index] = false;
+      }
+      if (sectionSupportsState(entry.invalid, entity, after)) {
+        invalidated[index] = true;
+      }
+    }
+  }
+  return invalidated.some(Boolean);
+}
+function invalidatedMemoryIdsByStageSummaries(memories, entries) {
+  const prepared = prepareSummaryEvidence(entries);
+  return new Set(memories.filter((memory) => memoryIsInvalidated(memory, prepared)).map((memory) => memory.id));
+}
 
 // src/retrieval/ranker.ts
 var MIN_RECALL_RANK_SCORE = 2;
@@ -7478,34 +7770,12 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
     if (!state) {
       return;
     }
-    state = await extractionService.reconcileHistory(state);
+    state = await extractionService.reconcileHistory(state, { purgeVectors: false });
     if (!state) {
       return;
     }
     const warnings = [];
     const desiredCoveredThrough = minimumSourceWindow.retainedStartIndex - 1;
-    if (state.indexedThroughMessageId < desiredCoveredThrough && settings.extraction.automatic) {
-      try {
-        state = await extractionService.processNextThrough(desiredCoveredThrough);
-      } catch (error) {
-        warnings.push("\u751F\u6210\u524D\u8865\u5145\u5267\u60C5\u7D22\u5F15\u5931\u8D25\uFF0C\u672A\u8986\u76D6\u539F\u6587\u5C06\u7EE7\u7EED\u4FDD\u7559\u3002");
-        logger.warn("\u751F\u6210\u524D\u8865\u5145\u5267\u60C5\u7D22\u5F15\u5931\u8D25\u3002", error);
-        state = memoryRepository.getExisting() ?? state;
-      }
-    }
-    if (!state) {
-      return;
-    }
-    if (settings.summary.enabled && settings.summary.automatic && state.stageSummary.coveredThroughMessageId < desiredCoveredThrough) {
-      try {
-        const result = await stageSummaryService.processNextThrough(desiredCoveredThrough);
-        state = result.state ?? state;
-      } catch (error) {
-        warnings.push("\u751F\u6210\u524D\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3\u5931\u8D25\uFF0C\u672A\u603B\u7ED3\u539F\u6587\u5C06\u7EE7\u7EED\u4FDD\u7559\u3002");
-        logger.warn("\u751F\u6210\u524D\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3\u5931\u8D25\u3002", error);
-        state = memoryRepository.getExisting() ?? state;
-      }
-    }
     state.metrics.generationAttempts += 1;
     if (state.indexedThroughMessageId < desiredCoveredThrough) {
       warnings.push(
@@ -7561,18 +7831,8 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
       emitDiagnosticsUpdated();
       return;
     }
-    try {
-      const synchronized = await extractionService.syncPendingVectors(state);
-      if (synchronized) {
-        state = synchronized;
-      }
-    } catch (error) {
-      state.metrics.vectorSyncFailures += 1;
-      recordDebugTrace(state, settings.debug, "vector", "\u751F\u6210\u524D\u540C\u6B65\u5411\u91CF\u5931\u8D25\u3002", {
-        error: error instanceof Error ? error.message : String(error)
-      });
+    if (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0) {
       warnings.push("\u90E8\u5206\u5267\u60C5\u8BB0\u5FC6\u5C1A\u672A\u5B8C\u6210\u5411\u91CF\u5316\uFF0C\u5C06\u4F7F\u7528\u53EF\u7528\u7D22\u5F15\u548C\u5173\u952E\u8BCD\u53EC\u56DE\u3002");
-      logger.warn("\u540C\u6B65\u5F85\u5904\u7406\u5411\u91CF\u5931\u8D25\u3002", error);
     }
     const currentInput = chat[window.currentInputIndex];
     const factVerification = isFactVerificationQuery(currentInput?.mes ?? "");
@@ -7586,8 +7846,37 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
       }
       return true;
     });
-    const windowExternalMemories = suppressStaleAtomicStates(groundedMemories.filter(
-      (memory) => !memory.excluded && memory.status !== "invalid" && memory.status !== "superseded" && hasSourceOutsideWindow(memory, retainedSourceStart)
+    const storyPhaseScope = scopeMemoriesToCurrentStoryPhase(
+      groundedMemories,
+      sourceChat,
+      minimumSourceWindow.currentInputIndex
+    );
+    if (storyPhaseScope.excludedMemoryIds.length > 0) {
+      recordDebugTrace(state, settings.debug, "retrieval", "\u5F53\u524D\u5267\u60C5\u9636\u6BB5\u5DF2\u9694\u79BB\u8F83\u65E9\u9636\u6BB5\u8BB0\u5FC6\u3002", {
+        boundaryMessageId: storyPhaseScope.boundaryMessageId ?? -1,
+        excludedMemories: storyPhaseScope.excludedMemoryIds.length
+      });
+    }
+    const invalidatedIds = invalidatedMemoryIdsByStageSummaries(
+      storyPhaseScope.memories,
+      state.stageSummary.entries
+    );
+    if (invalidatedIds.size > 0) {
+      recordDebugTrace(state, settings.debug, "retrieval", "\u9636\u6BB5\u603B\u7ED3\u4E2D\u7684\u660E\u786E\u5426\u5B9A\u5DF2\u906E\u853D\u65E7\u72B6\u6001\u8BB0\u5FC6\u3002", {
+        memoryIds: [...invalidatedIds].join(","),
+        count: invalidatedIds.size
+      });
+    }
+    const activeScopedMemories = storyPhaseScope.memories.filter((memory) => !memory.excluded && memory.status !== "invalid" && memory.status !== "superseded" && !invalidatedIds.has(memory.id));
+    const shadowedMemories = activeScopedMemories.filter((memory) => isShadowedByRecentUserFact(
+      memory,
+      sourceChat,
+      retainedSourceStart,
+      minimumSourceWindow.currentInputIndex
+    ));
+    const shadowedIds = new Set(shadowedMemories.map((memory) => memory.id));
+    const windowExternalMemories = suppressStaleAtomicStates(activeScopedMemories.filter(
+      (memory) => !shadowedIds.has(memory.id) && hasSourceOutsideWindow(memory, retainedSourceStart)
     ));
     if (ungroundedMemoryNames.size > 0) {
       recordDebugTrace(state, settings.debug, "retrieval", "\u5DF2\u9694\u79BB\u7F3A\u5C11\u6E90\u697C\u5C42\u8BC1\u636E\u7684\u65E7\u7248\u8BB0\u5FC6\u3002", {
@@ -7595,14 +7884,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
         count: ungroundedMemoryNames.size
       });
     }
-    const shadowedMemories = windowExternalMemories.filter((memory) => isShadowedByRecentUserFact(
-      memory,
-      sourceChat,
-      retainedSourceStart,
-      minimumSourceWindow.currentInputIndex
-    ));
-    const shadowedIds = new Set(shadowedMemories.map((memory) => memory.id));
-    const eligibleMemories = windowExternalMemories.filter((memory) => !shadowedIds.has(memory.id) && (!factVerification || memory.truthStatus === "confirmed"));
+    const eligibleMemories = windowExternalMemories.filter((memory) => !factVerification || memory.truthStatus === "confirmed");
     const recallEnabled = settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
     if (shadowedMemories.length > 0) {
       recordDebugTrace(state, settings.debug, "retrieval", "\u8FD1\u671F\u7528\u6237\u4E8B\u5B9E\u5DF2\u906E\u853D\u51B2\u7A81\u7684\u8F83\u65E9\u8BB0\u5FC6\u3002", {
@@ -7695,19 +7977,31 @@ ${currentInput?.mes ?? ""}`,
       eligibleMemories
     );
     const entityConstraints = recallEnabled ? buildEntityDisambiguationConstraints(
-      groundedMemories.filter((memory) => !memory.excluded && memory.status !== "invalid" && memory.status !== "superseded" && (!factVerification || memory.truthStatus === "confirmed")),
+      activeScopedMemories.filter((memory) => !shadowedIds.has(memory.id) && (!factVerification || memory.truthStatus === "confirmed")),
       currentInput?.mes ?? ""
     ) : [];
     const recallBlock = selected.length > 0 || entityConstraints.length > 0 ? renderMemoryBlock(selected, entityConstraints, factVerification) : "";
     const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
-    const summaryEntries = settings.summary.enabled ? state.stageSummary.entries.slice(-summaryWindowSize) : [];
+    const summaryPool = storyPhaseScope.boundaryMessageId !== null && !storyPhaseScope.earlierPhaseQuery ? state.stageSummary.entries.filter((entry) => entry.sourceStartMessageId >= storyPhaseScope.boundaryMessageId) : state.stageSummary.entries;
+    if (summaryPool.length < state.stageSummary.entries.length) {
+      recordDebugTrace(state, settings.debug, "retrieval", "\u5F53\u524D\u5267\u60C5\u9636\u6BB5\u5DF2\u7701\u7565\u8F83\u65E9\u9636\u6BB5\u603B\u7ED3\u3002", {
+        boundaryMessageId: storyPhaseScope.boundaryMessageId ?? -1,
+        excludedSummaries: state.stageSummary.entries.length - summaryPool.length
+      });
+    }
+    const summaryEntries = settings.summary.enabled ? summaryPool.slice(-summaryWindowSize) : [];
     const summaryBlocks = summaryEntries.map((entry) => renderStageSummaryBlock(
       entry.text,
       entry.sourceStartMessageId,
       entry.sourceEndMessageId,
       factVerification
     )).filter(Boolean);
-    const currentStateBlock = summaryEntries.length > 0 ? renderCurrentStateCoordinationBlock(groundedMemories, 600, factVerification) : "";
+    const currentStateBlock = summaryEntries.length > 0 ? renderCurrentStateCoordinationBlock(
+      activeScopedMemories.filter((memory) => !shadowedIds.has(memory.id)),
+      600,
+      factVerification,
+      invalidatedIds
+    ) : "";
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
     const estimatedSummaryTokens = summaryBlocks.reduce(
       (total, block) => total + estimateTokens(block),
@@ -8780,7 +9074,7 @@ function panelTemplate() {
           <div class="story-echo-switch-row story-echo-field-wide">
             <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">\u81EA\u52A8\u8865\u5145\u5386\u53F2\u7D22\u5F15</span>
-              <span class="story-echo-switch-description">\u7A97\u53E3\u5916\u6EE1\u914D\u7F6E\u8F6E\u6570\u540E\uFF0CAI\u56DE\u590D\u540E\u540E\u53F0\u62BD\u53D6\u4E00\u6279\uFF1B\u751F\u6210\u524D\u4ECD\u4F1A\u5B89\u5168\u8865\u9F50</span>
+              <span class="story-echo-switch-description">\u7A97\u53E3\u5916\u6EE1\u914D\u7F6E\u8F6E\u6570\u540E\uFF0CAI\u56DE\u590D\u5B8C\u6210\u518D\u5728\u540E\u53F0\u62BD\u53D6\uFF1B\u672A\u5904\u7406\u539F\u6587\u7EE7\u7EED\u4FDD\u7559</span>
             </div>
             <div class="story-echo-toggle">
               <input id="story-echo-auto-extract" class="story-echo-toggle-input" type="checkbox">
@@ -8850,7 +9144,7 @@ function panelTemplate() {
             <div class="story-echo-switch-row story-echo-field-wide">
               <div class="story-echo-switch-copy">
               <span class="story-echo-switch-title">\u81EA\u52A8\u66F4\u65B0\u9636\u6BB5\u603B\u7ED3</span>
-              <span class="story-echo-switch-description">\u8FBE\u5230\u4E00\u6279\u540E\u5728AI\u56DE\u590D\u540E\u540E\u53F0\u66F4\u65B0\uFF1B\u751F\u6210\u524D\u4ECD\u4F1A\u8865\u4E00\u6279\uFF0C\u5931\u8D25\u5219\u4FDD\u7559\u539F\u6587</span>
+              <span class="story-echo-switch-description">\u8FBE\u5230\u4E00\u6279\u540E\u5728AI\u56DE\u590D\u5B8C\u6210\u540E\u540E\u53F0\u66F4\u65B0\uFF1B\u751F\u6210\u524D\u4E0D\u7B49\u5F85\uFF0C\u672A\u603B\u7ED3\u539F\u6587\u7EE7\u7EED\u4FDD\u7559</span>
               </div>
               <div class="story-echo-toggle">
                 <input id="story-echo-summary-automatic" class="story-echo-toggle-input" type="checkbox">

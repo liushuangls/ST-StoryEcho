@@ -22,16 +22,17 @@ import {
   withRewrittenRetrievalQuery,
 } from '../retrieval/query-builder';
 import { hasSourceOutsideWindow } from '../retrieval/eligibility';
+import { scopeMemoriesToCurrentStoryPhase } from '../retrieval/story-phase';
 import { isFactVerificationQuery } from '../retrieval/intent';
 import { isShadowedByRecentUserFact } from '../retrieval/recent-shadow';
 import { queryRewriteService } from '../retrieval/query-rewriter';
+import { invalidatedMemoryIdsByStageSummaries } from '../retrieval/summary-shadow';
 import {
   rankMemories,
   suppressStaleAtomicStates,
   type RetrievalVectorResults,
 } from '../retrieval/ranker';
 import { SettingsRepository } from '../settings/repository';
-import { stageSummaryService } from '../summary/service';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import type { VectorQueryResult } from '../vector/adapter';
 import { resolveVectorConfig } from '../vector/config';
@@ -166,43 +167,16 @@ async function prepareStoryEchoPrompt(
     if (!state) {
       return;
     }
-    state = await extractionService.reconcileHistory(state);
+    state = await extractionService.reconcileHistory(state, { purgeVectors: false });
     if (!state) {
       return;
     }
 
     const warnings: string[] = [];
     const desiredCoveredThrough = minimumSourceWindow.retainedStartIndex - 1;
-    if (state.indexedThroughMessageId < desiredCoveredThrough && settings.extraction.automatic) {
-      try {
-        state = await extractionService.processNextThrough(desiredCoveredThrough);
-      } catch (error) {
-        warnings.push('生成前补充剧情索引失败，未覆盖原文将继续保留。');
-        logger.warn('生成前补充剧情索引失败。', error);
-        state = memoryRepository.getExisting() ?? state;
-      }
-    }
-    if (!state) {
-      return;
-    }
-
-    if (
-      settings.summary.enabled &&
-      settings.summary.automatic &&
-      state.stageSummary.coveredThroughMessageId < desiredCoveredThrough
-    ) {
-      try {
-        const result = await stageSummaryService.processNextThrough(desiredCoveredThrough);
-        state = result.state ?? state;
-      } catch (error) {
-        warnings.push('生成前更新阶段总结失败，未总结原文将继续保留。');
-        logger.warn('生成前更新阶段总结失败。', error);
-        state = memoryRepository.getExisting() ?? state;
-      }
-    }
-
-    // Automatic background work reloads chat metadata. Count the generation
-    // only after both hand-offs so the increment cannot be overwritten.
+    // Extraction, summarization and vector writes are intentionally never run
+    // here. If their cursors lag, safeSourceRetainedStart keeps every uncovered
+    // raw message. The reply-complete scheduler catches up in the background.
     state.metrics.generationAttempts += 1;
 
     if (state.indexedThroughMessageId < desiredCoveredThrough) {
@@ -265,18 +239,8 @@ async function prepareStoryEchoPrompt(
       return;
     }
 
-    try {
-      const synchronized = await extractionService.syncPendingVectors(state);
-      if (synchronized) {
-        state = synchronized;
-      }
-    } catch (error) {
-      state.metrics.vectorSyncFailures += 1;
-      recordDebugTrace(state, settings.debug, 'vector', '生成前同步向量失败。', {
-        error: error instanceof Error ? error.message : String(error),
-      });
+    if (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0) {
       warnings.push('部分剧情记忆尚未完成向量化，将使用可用索引和关键词召回。');
-      logger.warn('同步待处理向量失败。', error);
     }
 
     const currentInput = chat[window.currentInputIndex];
@@ -293,11 +257,45 @@ async function prepareStoryEchoPrompt(
       }
       return true;
     });
-    const windowExternalMemories = suppressStaleAtomicStates(groundedMemories.filter(
+    const storyPhaseScope = scopeMemoriesToCurrentStoryPhase(
+      groundedMemories,
+      sourceChat,
+      minimumSourceWindow.currentInputIndex,
+    );
+    if (storyPhaseScope.excludedMemoryIds.length > 0) {
+      recordDebugTrace(state, settings.debug, 'retrieval', '当前剧情阶段已隔离较早阶段记忆。', {
+        boundaryMessageId: storyPhaseScope.boundaryMessageId ?? -1,
+        excludedMemories: storyPhaseScope.excludedMemoryIds.length,
+      });
+    }
+    const invalidatedIds = invalidatedMemoryIdsByStageSummaries(
+      storyPhaseScope.memories,
+      state.stageSummary.entries,
+    );
+    if (invalidatedIds.size > 0) {
+      recordDebugTrace(state, settings.debug, 'retrieval', '阶段总结中的明确否定已遮蔽旧状态记忆。', {
+        memoryIds: [...invalidatedIds].join(','),
+        count: invalidatedIds.size,
+      });
+    }
+    const activeScopedMemories = storyPhaseScope.memories.filter((memory) => (
+      !memory.excluded &&
+      memory.status !== 'invalid' &&
+      memory.status !== 'superseded' &&
+      !invalidatedIds.has(memory.id)
+    ));
+    const shadowedMemories = activeScopedMemories.filter((memory) => (
+      isShadowedByRecentUserFact(
+        memory,
+        sourceChat,
+        retainedSourceStart,
+        minimumSourceWindow.currentInputIndex,
+      )
+    ));
+    const shadowedIds = new Set(shadowedMemories.map((memory) => memory.id));
+    const windowExternalMemories = suppressStaleAtomicStates(activeScopedMemories.filter(
       (memory) =>
-        !memory.excluded &&
-        memory.status !== 'invalid' &&
-        memory.status !== 'superseded' &&
+        !shadowedIds.has(memory.id) &&
         hasSourceOutsideWindow(memory, retainedSourceStart),
     ));
     if (ungroundedMemoryNames.size > 0) {
@@ -308,17 +306,7 @@ async function prepareStoryEchoPrompt(
         count: ungroundedMemoryNames.size,
       });
     }
-    const shadowedMemories = windowExternalMemories.filter((memory) => (
-      isShadowedByRecentUserFact(
-        memory,
-        sourceChat,
-        retainedSourceStart,
-        minimumSourceWindow.currentInputIndex,
-      )
-    ));
-    const shadowedIds = new Set(shadowedMemories.map((memory) => memory.id));
     const eligibleMemories = windowExternalMemories.filter((memory) => (
-      !shadowedIds.has(memory.id) &&
       (!factVerification || memory.truthStatus === 'confirmed')
     ));
     const recallEnabled = settings.recall.maxEvents > 0 && settings.recall.maxTokens > 0;
@@ -430,10 +418,8 @@ async function prepareStoryEchoPrompt(
     );
     const entityConstraints = recallEnabled
       ? buildEntityDisambiguationConstraints(
-        groundedMemories.filter((memory) => (
-          !memory.excluded &&
-          memory.status !== 'invalid' &&
-          memory.status !== 'superseded' &&
+        activeScopedMemories.filter((memory) => (
+          !shadowedIds.has(memory.id) &&
           (!factVerification || memory.truthStatus === 'confirmed')
         )),
         currentInput?.mes ?? '',
@@ -443,8 +429,20 @@ async function prepareStoryEchoPrompt(
       ? renderMemoryBlock(selected, entityConstraints, factVerification)
       : '';
     const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
+    const summaryPool = storyPhaseScope.boundaryMessageId !== null &&
+      !storyPhaseScope.earlierPhaseQuery
+      ? state.stageSummary.entries.filter((entry) => (
+          entry.sourceStartMessageId >= storyPhaseScope.boundaryMessageId!
+        ))
+      : state.stageSummary.entries;
+    if (summaryPool.length < state.stageSummary.entries.length) {
+      recordDebugTrace(state, settings.debug, 'retrieval', '当前剧情阶段已省略较早阶段总结。', {
+        boundaryMessageId: storyPhaseScope.boundaryMessageId ?? -1,
+        excludedSummaries: state.stageSummary.entries.length - summaryPool.length,
+      });
+    }
     const summaryEntries = settings.summary.enabled
-      ? state.stageSummary.entries.slice(-summaryWindowSize)
+      ? summaryPool.slice(-summaryWindowSize)
       : [];
     const summaryBlocks = summaryEntries.map((entry) => renderStageSummaryBlock(
       entry.text,
@@ -453,7 +451,12 @@ async function prepareStoryEchoPrompt(
       factVerification,
     )).filter(Boolean);
     const currentStateBlock = summaryEntries.length > 0
-      ? renderCurrentStateCoordinationBlock(groundedMemories, 600, factVerification)
+      ? renderCurrentStateCoordinationBlock(
+          activeScopedMemories.filter((memory) => !shadowedIds.has(memory.id)),
+          600,
+          factVerification,
+          invalidatedIds,
+        )
       : '';
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
     const estimatedSummaryTokens = summaryBlocks.reduce(

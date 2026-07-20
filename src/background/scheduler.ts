@@ -1,6 +1,7 @@
 import { logger } from '../core/logger';
 import type { StoryEchoSettings, TavernChatMessage } from '../core/types';
 import { emitDiagnosticsUpdated } from '../debug/events';
+import { recordDebugTrace } from '../debug/metrics';
 import { extractionService } from '../extraction/service';
 import { recordExtractionCooldownSkip } from '../llm/structured-diagnostics';
 import { MemoryRepository } from '../memory/repository';
@@ -114,7 +115,7 @@ export class BackgroundProcessingScheduler {
     };
     const eventName = eventTypes?.['MESSAGE_RECEIVED'];
     if (!eventSource || !eventName) {
-      logger.warn('当前SillyTavern未提供回复完成事件，自动抽取仍会在生成前安全补齐。');
+      logger.warn('当前SillyTavern未提供回复完成事件；自动整理无法调度，请使用“处理窗口外历史”。');
       return;
     }
 
@@ -327,7 +328,7 @@ export class BackgroundProcessingScheduler {
               failures,
               nextRetryAt: Date.now() + delayMs,
             };
-            logger.warn(`自动抽取失败，已退避 ${delayMs}ms；手动处理与生成前安全补齐不受影响。`, error);
+            logger.warn(`自动抽取失败，已退避 ${delayMs}ms；手动处理不受影响。`, error);
           }
         }
         if (this.historyRevision !== extractionRevision) {
@@ -350,6 +351,18 @@ export class BackgroundProcessingScheduler {
           indexedThroughMessageId: state.indexedThroughMessageId,
           indexedPrefixHash: state.indexedPrefixHash,
         };
+      }
+    }
+    if (state.pendingVectorHashes.length > 0 || state.pendingVectorDeleteHashes.length > 0) {
+      try {
+        state = await extractionService.syncPendingVectors(state) ?? state;
+      } catch (error) {
+        state.metrics.vectorSyncFailures += 1;
+        recordDebugTrace(state, settings.debug, 'vector', '后台同步待处理向量失败，将在后续回复重试。', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await this.memoryRepository.save(state);
+        logger.warn('后台同步待处理向量失败，将在后续回复重试。', error);
       }
     }
     if (
