@@ -14,7 +14,6 @@ import {
   boundedSkeletonSourceEntries,
   normalizeStorySkeletonText,
   pendingArchivedStageSummaryEntries,
-  repairGeneratedStorySkeletonSections,
   storySkeletonIsUsable,
   storySkeletonSourceHash,
   storySkeletonUpdateDue,
@@ -192,8 +191,7 @@ export class StorySkeletonService {
           throw new Error('全局剧情骨架生成期间来源或人工编辑发生变化，已丢弃本次结果。');
         }
 
-        const repaired = repairGeneratedStorySkeletonSections(raw);
-        const text = normalizeStorySkeletonText(repaired, settings.summary.skeletonMaxTokens);
+        const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
         const updatedAt = new Date().toISOString();
         state = live;
         state.storySkeleton = {
@@ -213,7 +211,6 @@ export class StorySkeletonService {
           sourceEntries: sourceEntries.length,
           skeletonCharacters: text.length,
           skeletonMaxTokens: settings.summary.skeletonMaxTokens,
-          sectionRepaired: repaired !== raw,
         });
         await this.memoryRepository.save(state);
         updatedChunks += 1;

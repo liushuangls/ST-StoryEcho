@@ -11,11 +11,11 @@ import { resolveVectorConfig, vectorConfigFingerprint } from '../src/vector/conf
 import { chatState, memory } from './fixtures';
 
 function sectionedSummary(value: string): string {
-  return `【已确认剧情】\n${value}\n【当前状态】\n无\n【未解决线索】\n无\n【角色主张与推测】\n无\n【已失效或否定事实】\n无`;
+  return value;
 }
 
 function storySkeleton(value: string): string {
-  return `【核心设定与身份】\n${value}\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无`;
+  return value;
 }
 
 afterEach(() => {
@@ -89,7 +89,7 @@ async function installContext(options: {
 }
 
 describe('StoryEcho request ordering', () => {
-  it('injects summary before recent raw and recall immediately before the unchanged current User', async () => {
+  it('omits free-form summaries during fact verification and keeps recall before the unchanged User', async () => {
     const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
     const promptChat = structuredClone(sourceChat);
     const currentInput = promptChat.at(-1)!;
@@ -99,18 +99,12 @@ describe('StoryEcho request ordering', () => {
 
     expect(promptChat.map((message) => message.extra?.['story_echo_injection_kind'] ?? message.mes))
       .toEqual([
-        'summary',
         '我们去院中喝水。',
         '院中很安静。',
         'recall',
         '银色钥匙现在由谁保管？',
       ]);
-    const summary = promptChat[0]!;
-    const recall = promptChat[3]!;
-    expect(summary).toMatchObject({
-      is_system: true,
-      extra: { type: 'narrator', story_echo_injection_kind: 'summary' },
-    });
+    const recall = promptChat[2]!;
     expect(recall).toMatchObject({
       is_system: true,
       extra: { type: 'narrator', story_echo_injection_kind: 'recall' },
@@ -124,7 +118,7 @@ describe('StoryEcho request ordering', () => {
     expect(context.chat).toEqual(sourceChat);
   });
 
-  it('places evolved current-state corrections after summaries and before recent raw', async () => {
+  it('places evolved current-state corrections before recent raw during fact verification', async () => {
     const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
     const stored = context.chatMetadata[MODULE_ID];
     const current = stored.memories[0]!;
@@ -138,14 +132,13 @@ describe('StoryEcho request ordering', () => {
 
     expect(promptChat.map((message) => message.extra?.['story_echo_injection_kind'] ?? message.mes))
       .toEqual([
-        'summary',
         'state',
         '我们去院中喝水。',
         '院中很安静。',
         'recall',
         '银色钥匙现在由谁保管？',
       ]);
-    expect(promptChat[1]?.mes).toContain('<story_echo_current_state>');
+    expect(promptChat[0]?.mes).toContain('<story_echo_current_state>');
     expect(context.chat).toEqual(sourceChat);
   });
 
@@ -174,6 +167,7 @@ describe('StoryEcho request ordering', () => {
     settings.memory.enabled = false;
     state.pendingVectorHashes = [123];
     const promptChat = structuredClone(sourceChat);
+    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
     const fetchMock = vi.mocked(globalThis.fetch);
 
     await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
@@ -245,6 +239,7 @@ describe('StoryEcho request ordering', () => {
   it('trims only the covered prefix and keeps unsummarized raw beyond the minimum window', async () => {
     const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 0 });
     const promptChat = structuredClone(sourceChat);
+    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
 
     await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
 
@@ -255,7 +250,7 @@ describe('StoryEcho request ordering', () => {
         '林雨收好了银色钥匙。',
         '我们去院中喝水。',
         '院中很安静。',
-        '银色钥匙现在由谁保管？',
+        '我们继续在院中交谈。',
       ]);
     const stored = context.chatMetadata[MODULE_ID];
     expect(stored.lastInspection?.removedMessageCount).toBe(1);
@@ -298,6 +293,7 @@ describe('StoryEcho request ordering', () => {
       updatedAt: '2026-01-03T00:00:00.000Z',
     };
     const promptChat = structuredClone(sourceChat);
+    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
 
     await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
 
@@ -353,6 +349,7 @@ describe('StoryEcho request ordering', () => {
       sourceHash: await storySkeletonSourceHash(reconciled.stageSummary.entries, 0),
     };
     const promptChat = structuredClone(sourceChat);
+    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
 
     await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
 
@@ -407,6 +404,7 @@ describe('StoryEcho request ordering', () => {
       updatedAt: '2026-01-03T00:00:00.000Z',
     };
     const promptChat = structuredClone(sourceChat);
+    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
 
     await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
 
@@ -458,24 +456,17 @@ describe('StoryEcho request ordering', () => {
     const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
     const stored = context.chatMetadata[MODULE_ID];
     stored.memories[0]!.truthStatus = 'inferred';
-    stored.stageSummary.entries[0]!.text = [
-      '【已确认剧情】',
-      '众人在院中喝水。',
-      '【当前状态】',
-      '无',
-      '【未解决线索】',
-      '无',
-      '【角色主张与推测】',
-      '福尔摩斯猜测托马斯持有银色钥匙。',
-      '【已失效或否定事实】',
-      '无',
-    ].join('\n');
+    stored.stageSummary.entries[0]!.text =
+      '众人在院中喝水；福尔摩斯猜测托马斯持有银色钥匙，但这一说法尚未证实。';
     const promptChat = structuredClone(sourceChat);
 
     await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
 
     expect(promptChat.some(
       (message) => message.extra?.['story_echo_injection_kind'] === 'recall',
+    )).toBe(false);
+    expect(promptChat.some(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
     )).toBe(false);
     const injected = promptChat.map((message) => message.mes).join('\n');
     expect(injected).not.toContain('托马斯');

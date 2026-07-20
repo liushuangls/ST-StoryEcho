@@ -35,6 +35,9 @@ describe('buildExtractionPrompt', () => {
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('AI对用户身份的猜测不是稳定事实');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('位置和持有/保管人永远是两个不同槽');
     expect(EXTRACTION_SYSTEM_PROMPT).toContain('name只是SillyTavern界面说话者标签');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('不要套用预设题材');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('修炼、突破、历练与日常成长主要进入episodes/stateFacts');
+    expect(EXTRACTION_SYSTEM_PROMPT).toContain('普通未知信息不得自动变成clue');
   });
 
   it('places controlled reference context before the evidence messages', () => {

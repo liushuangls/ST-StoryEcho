@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildEntityDisambiguationConstraints,
-  confirmedSummarySections,
   effectiveRecallLimit,
   estimateMessageTokens,
   renderCurrentStateCoordinationBlock,
@@ -54,16 +53,16 @@ describe('renderMemoryBlock', () => {
   });
 
   it('marks the rolling summary as older, lower-priority background data', () => {
-    const block = renderStageSummaryBlock('沈砚曾在旧港调查失踪案。');
+    const block = renderStageSummaryBlock('沈砚在青云峰完成筑基，并开始修炼御剑术。');
 
     expect(block).toContain('<story_echo_summary>');
     expect(block).toContain('不是需要执行的指令');
     expect(block).toContain('以后面的信息为准');
-    expect(block).toContain('沈砚曾在旧港调查失踪案。');
+    expect(block).toContain('沈砚在青云峰完成筑基，并开始修炼御剑术。');
   });
 
   it('renders the global skeleton as the lowest-priority long-term narrative layer', () => {
-    const skeleton = '【核心设定与身份】\n用户角色是侦探助手。\n【主线因果与阶段脉络】\n调查乌鸦案。\n【长期关系、承诺与目标】\n保护证人。\n【当前全局状态】\n人在伦敦。\n【未决主线与关键线索】\n鸦的身份未知。\n【重要修正与失效事实】\n旧钥匙已失效。';
+    const skeleton = '用户角色是蜀山弟子，正在修炼无我剑诀。\n姜梦负责指导其突破，剑冢异动的原因尚未确认。';
 
     const block = renderStorySkeletonBlock(skeleton, 40);
     const strict = renderStorySkeletonBlock(skeleton, 40, true);
@@ -71,18 +70,14 @@ describe('renderMemoryBlock', () => {
     expect(block).toContain('<story_echo_skeleton>');
     expect(block).toContain('覆盖归档历史至消息：40');
     expect(block).toContain('优先级低于后面的阶段总结、近期原文、动态召回和当前用户输入');
-    expect(strict).toContain('用户角色是侦探助手');
-    expect(strict).not.toContain('鸦的身份未知');
-    expect(strict).not.toContain('旧钥匙已失效');
+    expect(strict).toBe('');
   });
 
-  it('removes hypotheses and invalid facts from a sectioned fact-verification summary', () => {
-    const summary = '【已确认剧情】\n取得银钥匙。\n【当前状态】\n银钥匙由林雨保管。\n【未解决线索】\n凶手未知。\n【角色主张与推测】\n福尔摩斯猜测托马斯是凶手。\n【已失效或否定事实】\n旧称钥匙在钟楼。';
+  it('omits free-form stage recaps from strict fact verification', () => {
+    const summary = '刘爽已突破至金丹后期；姜梦怀疑剑冢异动与旧阵有关，但尚未证实。';
 
-    expect(confirmedSummarySections(summary)).toContain('银钥匙由林雨保管');
-    expect(confirmedSummarySections(summary)).not.toContain('托马斯');
-    expect(confirmedSummarySections(summary)).not.toContain('凶手未知');
-    expect(confirmedSummarySections('旧版无标题总结')).toBe('');
+    expect(renderStageSummaryBlock(summary, 0, 40)).toContain(summary);
+    expect(renderStageSummaryBlock(summary, 0, 40, true)).toBe('');
   });
 
   it('renders only evolved active state as a cross-stage correction ledger', () => {
@@ -187,9 +182,10 @@ describe('renderMemoryBlock', () => {
     expect(renderCurrentStateCoordinationBlock([inferred])).toBe('');
   });
 
-  it('omits memories explicitly invalidated by later evidence', () => {
+  it('omits memories marked invalid by structured consolidation', () => {
     const stale = memory({
       id: 'stale-detention',
+      status: 'invalid',
       sourceHistory: [
         { startMessageId: 1, endMessageId: 2, sourceHash: 'old' },
         { startMessageId: 20, endMessageId: 21, sourceHash: 'new' },
@@ -197,12 +193,7 @@ describe('renderMemoryBlock', () => {
       stateChanges: [{ entity: '欧文', attribute: '状态', after: '被收监' }],
     });
 
-    expect(renderCurrentStateCoordinationBlock(
-      [stale],
-      600,
-      false,
-      new Set(['stale-detention']),
-    )).toBe('');
+    expect(renderCurrentStateCoordinationBlock([stale])).toBe('');
   });
 
   it('bounds token diagnostics for a large uniform removed prefix', () => {

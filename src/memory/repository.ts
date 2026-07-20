@@ -71,13 +71,6 @@ export interface StorySkeletonEdit {
   text: string;
 }
 
-const STAGE_SUMMARY_HEADINGS = [
-  '【已确认剧情】',
-  '【当前状态】',
-  '【未解决线索】',
-  '【角色主张与推测】',
-  '【已失效或否定事实】',
-] as const;
 const MAX_EDITED_SUMMARY_CHARACTERS = 64_000;
 
 function normalizeStageSummaryEdit(edit: StageSummaryEdit): StageSummaryEdit {
@@ -87,14 +80,6 @@ function normalizeStageSummaryEdit(edit: StageSummaryEdit): StageSummaryEdit {
   }
   if (text.length > MAX_EDITED_SUMMARY_CHARACTERS) {
     throw new Error(`阶段总结正文不能超过${MAX_EDITED_SUMMARY_CHARACTERS}个字符。`);
-  }
-  let previousIndex = -1;
-  for (const heading of STAGE_SUMMARY_HEADINGS) {
-    const index = text.indexOf(heading);
-    if (index < 0 || index <= previousIndex) {
-      throw new Error(`阶段总结缺少或打乱分级标题：${heading}`);
-    }
-    previousIndex = index;
   }
   return { text };
 }

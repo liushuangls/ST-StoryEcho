@@ -4,6 +4,7 @@ import type { StageSummaryEntry, StoryEchoSettings, TavernChatMessage } from '..
 import { MemoryRepository } from '../src/memory/repository';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { StorySkeletonService } from '../src/summary/skeleton-service';
+import { STORY_SKELETON_SYSTEM_PROMPT } from '../src/summary/skeleton-prompts';
 import {
   storySkeletonIsUsable,
   storySkeletonSourceHash,
@@ -12,25 +13,16 @@ import { chatState } from './fixtures';
 
 function skeletonText(core = '用户角色与姜梦共同推进蜀山主线。'): string {
   return [
-    '【核心设定与身份】',
     core,
-    '【主线因果与阶段脉络】',
-    '用户角色开始修炼无我剑诀。',
-    '【长期关系、承诺与目标】',
-    '用户角色承诺继续修炼。',
-    '【当前全局状态】',
-    '用户角色仍在蜀山。',
-    '【未决主线与关键线索】',
-    '剑冢异动原因未知。',
-    '【重要修正与失效事实】',
-    '无',
+    '用户角色在蜀山修炼无我剑诀，并承诺继续完成姜梦安排的功课。',
+    '当前用户角色仍在蜀山；剑冢异动的原因尚未确认。',
   ].join('\n');
 }
 
 function stageEntry(index: number): StageSummaryEntry {
   const start = index * 2;
   return {
-    text: `【已确认剧情】\n第${index + 1}阶段完成。\n【当前状态】\n状态${index + 1}\n【未解决线索】\n线索${index + 1}\n【角色主张与推测】\n无\n【已失效或否定事实】\n无`,
+    text: `第${index + 1}阶段完成，当前状态更新为状态${index + 1}；下一阶段仍需推进目标${index + 1}。`,
     sourceStartMessageId: start,
     sourceEndMessageId: start + 1,
     sourceHash: `stage-source-${index}`,
@@ -79,6 +71,13 @@ afterEach(() => {
 });
 
 describe('global story skeleton lifecycle', () => {
+  it('keeps a genre-adaptive long-term plot spine with cultivation progression', () => {
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('不要套用预设题材、卷宗式分类或固定栏目');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情优先修炼体系、境界与突破');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('可以按时间、因果、人物成长、关系或势力线自然分段');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('重大因果和成长轨迹');
+  });
+
   it('first builds when the S+1 stage summary becomes archived', async () => {
     const generateRaw = vi.fn(async () => skeletonText());
     const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
@@ -170,8 +169,10 @@ describe('global story skeleton lifecycle', () => {
     expect(result.state?.storySkeleton.manuallyEdited).toBe(true);
     expect(generateRaw).toHaveBeenCalledWith(expect.objectContaining({ responseLength: 10_000 }));
     await expect(repository.updateStorySkeleton({ text: '' })).rejects.toThrow(/不能为空/);
-    await expect(repository.updateStorySkeleton({ text: '缺少六段标题' }))
-      .rejects.toThrow(/缺少或打乱分级标题/);
+    const natural = await repository.updateStorySkeleton({
+      text: '刘爽继续在蜀山修炼；姜梦是长期同行与指导者。',
+    });
+    expect(natural.storySkeleton.text).toBe('刘爽继续在蜀山修炼；姜梦是长期同行与指导者。');
   });
 
   it('marks an existing skeleton stale when a lowered configured cap no longer fits it', async () => {

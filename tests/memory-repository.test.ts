@@ -261,18 +261,7 @@ describe('MemoryRepository stage summary editing', () => {
   });
 
   function sectionedSummary(confirmed: string): string {
-    return [
-      '【已确认剧情】',
-      confirmed,
-      '【当前状态】',
-      '无',
-      '【未解决线索】',
-      '无',
-      '【角色主张与推测】',
-      '无',
-      '【已失效或否定事实】',
-      '无',
-    ].join('\n');
+    return confirmed;
   }
 
   function contextWithSummaries() {
@@ -340,7 +329,7 @@ describe('MemoryRepository stage summary editing', () => {
     const { context } = contextWithSummaries();
     const stored = context.chatMetadata['story_echo'] as ReturnType<typeof chatState>;
     stored.storySkeleton = {
-      text: '【核心设定与身份】\n旧骨架\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无',
+      text: '旧骨架：用户角色正在蜀山修炼。',
       coveredThroughMessageId: 1,
       sourceHash: 'skeleton-source',
     };
@@ -356,11 +345,11 @@ describe('MemoryRepository stage summary editing', () => {
     const { context } = contextWithSummaries();
     const stored = context.chatMetadata['story_echo'] as ReturnType<typeof chatState>;
     stored.storySkeleton = {
-      text: '【核心设定与身份】\n旧骨架\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无',
+      text: '旧骨架：用户角色正在蜀山修炼。',
       coveredThroughMessageId: 1,
       sourceHash: 'skeleton-source',
     };
-    const edited = '【核心设定与身份】\n人工骨架\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无';
+    const edited = '人工骨架：用户角色修炼无我剑诀，姜梦负责指导。';
     const repository = new MemoryRepository();
 
     const state = await repository.updateStorySkeleton({ text: edited });
@@ -376,12 +365,16 @@ describe('MemoryRepository stage summary editing', () => {
       .toBe(edited);
   });
 
-  it('rejects a manual summary that breaks the five-section contract', async () => {
+  it('accepts a free-form manual summary and still rejects blank content', async () => {
     const { context } = contextWithSummaries();
 
-    await expect(new MemoryRepository().updateStageSummaryEntry(0, {
+    const state = await new MemoryRepository().updateStageSummaryEntry(0, {
       text: '只有一段普通文本',
-    })).rejects.toThrow('阶段总结缺少或打乱分级标题');
+    });
+    expect(state.stageSummary.entries[0]?.text).toBe('只有一段普通文本');
+    await expect(new MemoryRepository().updateStageSummaryEntry(0, {
+      text: '   ',
+    })).rejects.toThrow('阶段总结正文不能为空');
 
     const stored = context.chatMetadata['story_echo'] as ReturnType<typeof chatState>;
     expect(stored.stageSummary.entries).toHaveLength(2);

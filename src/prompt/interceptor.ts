@@ -26,7 +26,6 @@ import { scopeMemoriesToCurrentStoryPhase } from '../retrieval/story-phase';
 import { isFactVerificationQuery } from '../retrieval/intent';
 import { isShadowedByRecentUserFact } from '../retrieval/recent-shadow';
 import { queryRewriteService } from '../retrieval/query-rewriter';
-import { invalidatedMemoryIdsByStageSummaries } from '../retrieval/summary-shadow';
 import {
   rankMemories,
   suppressStaleAtomicStates,
@@ -285,21 +284,10 @@ async function prepareStoryEchoPrompt(
         excludedMemories: storyPhaseScope.excludedMemoryIds.length,
       });
     }
-    const invalidatedIds = invalidatedMemoryIdsByStageSummaries(
-      storyPhaseScope.memories,
-      state.stageSummary.entries,
-    );
-    if (invalidatedIds.size > 0) {
-      recordDebugTrace(state, settings.debug, 'retrieval', '阶段总结中的明确否定已遮蔽旧状态记忆。', {
-        memoryIds: [...invalidatedIds].join(','),
-        count: invalidatedIds.size,
-      });
-    }
     const activeScopedMemories = storyPhaseScope.memories.filter((memory) => (
       !memory.excluded &&
       memory.status !== 'invalid' &&
-      memory.status !== 'superseded' &&
-      !invalidatedIds.has(memory.id)
+      memory.status !== 'superseded'
     ));
     const shadowedMemories = activeScopedMemories.filter((memory) => (
       isShadowedByRecentUserFact(
@@ -487,7 +475,6 @@ async function prepareStoryEchoPrompt(
           activeScopedMemories.filter((memory) => !shadowedIds.has(memory.id)),
           600,
           factVerification,
-          invalidatedIds,
         )
       : '';
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);

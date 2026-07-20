@@ -85,7 +85,7 @@ export function stageSummaryManagerTemplate(): string {
             <textarea id="story-echo-skeleton-text" class="text_pole" rows="16" maxlength="96000" disabled placeholder="最近阶段总结超过 S 条后自动生成"></textarea>
           </label>
           <p class="story-echo-hint">
-            新聊天在第 S+1 条阶段总结归档时首次生成；已有长聊天打开并稳定约 3 秒后自动补建。平时每累计 3 条待归档总结或约 3000 Token 更新一次；更新成功前，待合并总结仍会随请求携带。编辑时必须保留六个分级标题；空白内容不能保存，界面不提供删除操作。
+            新聊天在第 S+1 条阶段总结归档时首次生成；已有长聊天打开并稳定约 3 秒后自动补建。平时每累计 3 条待归档总结或约 3000 Token 更新一次；更新成功前，待合并总结仍会随请求携带。正文可按剧情需要自由分段；空白内容不能保存，界面不提供删除操作。
           </p>
           <div class="story-echo-summary-editor-actions">
             <button id="story-echo-skeleton-save" class="menu_button story-echo-action-primary" type="button" disabled>
@@ -140,7 +140,7 @@ export function stageSummaryManagerTemplate(): string {
           <pre id="story-echo-summary-source" class="story-echo-summary-source"></pre>
         </div>
         <p class="story-echo-hint">
-          请保留五个分级标题。删除绝不修改或删除聊天原文：删除最新一条会回退覆盖位置，让该段原文重新参与后续请求；删除更老的条目只停用该总结，不重新发送很老的原文，也不影响后续总结。
+          正文可按剧情需要自由分段，保存时只校验非空和长度。删除绝不修改或删除聊天原文：删除最新一条会回退覆盖位置，让该段原文重新参与后续请求；删除更老的条目只停用该总结，不重新发送很老的原文，也不影响后续总结。
         </p>
         <div class="story-echo-summary-editor-actions">
           <button id="story-echo-summary-save" class="menu_button story-echo-action-primary" type="button">

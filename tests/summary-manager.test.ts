@@ -11,7 +11,7 @@ import {
 
 function summary(index: number): StageSummaryEntry {
   return {
-    text: `【已确认剧情】\n阶段${index}\n【当前状态】\n无\n【未解决线索】\n无\n【角色主张与推测】\n无\n【已失效或否定事实】\n无`,
+    text: `阶段${index}的关键剧情与当前状态。`,
     sourceStartMessageId: index * 10,
     sourceEndMessageId: index * 10 + 9,
     sourceHash: `hash-${index}`,
@@ -63,6 +63,8 @@ describe('stage summary manager pagination and template', () => {
     expect(template).toContain('id="story-echo-skeleton-update"');
     expect(template).not.toContain('id="story-echo-skeleton-delete"');
     expect(template).toContain('可编辑、不可删除');
+    expect(template).toContain('正文可按剧情需要自由分段');
+    expect(template).not.toContain('必须保留六个分级标题');
     expect(template).toContain('id="story-echo-summary-search"');
     expect(template).toContain('id="story-echo-summary-list"');
     expect(template).toContain('aria-label="阶段总结分页"');
@@ -72,5 +74,6 @@ describe('stage summary manager pagination and template', () => {
     expect(template).toContain('绝不修改或删除聊天原文');
     expect(template).toContain('删除最新一条会回退覆盖位置');
     expect(template).toContain('删除更老的条目只停用该总结');
+    expect(template).not.toContain('请保留五个分级标题');
   });
 });

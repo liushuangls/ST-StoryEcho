@@ -4,6 +4,7 @@ import { EXTRACTION_SYSTEM_PROMPT } from '../src/extraction/prompts';
 import { renderMemoryBlock, renderStageSummaryBlock } from '../src/prompt/render';
 import { QUERY_REWRITE_SYSTEM_PROMPT } from '../src/retrieval/query-rewriter';
 import { STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { STORY_SKELETON_SYSTEM_PROMPT } from '../src/summary/skeleton-prompts';
 import { memory } from './fixtures';
 
 const CASE_SPECIFIC_LANGUAGE = /(?:旧案|新案|案件|案情|结案)/u;
@@ -17,24 +18,16 @@ describe('genre-neutral LLM prompts', () => {
       aliases: [],
       stateChanges: [],
     })]);
-    const summaryBlock = renderStageSummaryBlock([
-      '【已确认剧情】',
-      '旅队已抵达北城。',
-      '【当前状态】',
-      '旅队位于北城。',
-      '【未解决线索】',
-      '无',
-      '【角色主张与推测】',
-      '无',
-      '【已失效或否定事实】',
-      '无',
-    ].join('\n'));
+    const summaryBlock = renderStageSummaryBlock(
+      '旅队已抵达北城并准备休整，下一步计划尚未确定。',
+    );
 
     const fixedPromptText = [
       EXTRACTION_SYSTEM_PROMPT,
       CONSOLIDATION_SYSTEM_PROMPT,
       QUERY_REWRITE_SYSTEM_PROMPT,
       STAGE_SUMMARY_SYSTEM_PROMPT,
+      STORY_SKELETON_SYSTEM_PROMPT,
       recallBlock,
       summaryBlock,
     ].join('\n');

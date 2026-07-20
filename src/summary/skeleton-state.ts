@@ -1,7 +1,6 @@
 import { sha256 } from '../core/hash';
 import type { StageSummaryEntry, StoryEchoChatState } from '../core/types';
 import { estimateTokens } from '../prompt/render';
-import { STORY_SKELETON_HEADINGS } from './skeleton-prompts';
 
 export const SKELETON_UPDATE_ENTRY_THRESHOLD = 3;
 export const SKELETON_UPDATE_TOKEN_THRESHOLD = 3_000;
@@ -112,49 +111,5 @@ export function normalizeStorySkeletonText(raw: string, maxTokens: number): stri
   if (text.length > MAX_STORED_SKELETON_CHARACTERS || estimateTokens(text) > maxTokens) {
     throw new Error(`全局剧情骨架不能超过 ${maxTokens} Token。`);
   }
-  let previousIndex = -1;
-  for (const heading of STORY_SKELETON_HEADINGS) {
-    const index = text.indexOf(heading);
-    if (index < 0 || index <= previousIndex) {
-      throw new Error(`全局剧情骨架缺少或打乱分级标题：${heading}`);
-    }
-    previousIndex = index;
-  }
   return text;
-}
-
-/** Narrowly repair one omitted empty interior section, matching stage-summary tolerance. */
-export function repairGeneratedStorySkeletonSections(raw: string): string {
-  const positions = STORY_SKELETON_HEADINGS.map((heading) => raw.indexOf(heading));
-  const missing = positions
-    .map((position, index) => ({ position, index }))
-    .filter(({ position }) => position < 0);
-  if (missing.length !== 1) {
-    return raw;
-  }
-  const missingIndex = missing[0]!.index;
-  if (missingIndex === 0 || missingIndex === STORY_SKELETON_HEADINGS.length - 1) {
-    return raw;
-  }
-  let previousPosition = -1;
-  for (const position of positions) {
-    if (position < 0) {
-      continue;
-    }
-    if (position <= previousPosition) {
-      return raw;
-    }
-    previousPosition = position;
-  }
-  const nextHeading = STORY_SKELETON_HEADINGS[missingIndex + 1]!;
-  const insertionPoint = raw.indexOf(nextHeading);
-  if (insertionPoint < 0) {
-    return raw;
-  }
-  return [
-    raw.slice(0, insertionPoint).trimEnd(),
-    STORY_SKELETON_HEADINGS[missingIndex],
-    '无',
-    raw.slice(insertionPoint).trimStart(),
-  ].join('\n');
 }

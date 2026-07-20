@@ -17,41 +17,6 @@ import {
 
 const MAX_SUMMARY_SOURCE_CHARACTERS = 64_000;
 const MAX_STORED_SUMMARY_CHARACTERS = 64_000;
-export const REQUIRED_SUMMARY_HEADINGS = [
-  '【已确认剧情】',
-  '【当前状态】',
-  '【未解决线索】',
-  '【角色主张与推测】',
-  '【已失效或否定事实】',
-] as const;
-
-const UNRESOLVED_CUE = /(?:仍|尚|还)?(?:未知|未明|不清楚|未确认|待确认|有待查明)/u;
-const SUMMARY_SENTENCE = /[^。.!！?？；;\n]+/gu;
-const SUMMARY_STABLE_IDENTIFIER = /(?:[A-Za-z]+[-_]?\d+(?:[-_][A-Za-z0-9]+)*|\d+[-_]?[A-Za-z]+)/gu;
-const NEGATED_RESOLUTION = /(?:未|没有|并未|无法|不能|不可).{0,6}(?:确认|查明|使用|利用|用于|用来|找到|确定)/u;
-const UNRESOLVED_RESOLUTION_RESULT = /(?:不在|未在|没有找到|尚未找到)|(?:(?:使用|利用).{0,30}(?:失败|未成功|没有成功|没有结果|仍未|未知|未明))|(?:(?:下落|位置|身份|用途|真伪).{0,8}(?:仍|尚|还)?(?:未知|未明|未确认))/u;
-const UNRESOLVED_ATTRIBUTES = [
-  {
-    cue: /(?:用途|作用)/u,
-    resolved: /(?:用途(?:是|为)|用于|用来|可用于|使用|利用|凭借).{0,36}(?:打开|开启|解锁|进入|启动|验证|证明|定位|追踪|交换|识别)?/u,
-  },
-  {
-    cue: /(?:位置|地点|下落|去向)/u,
-    resolved: /(?:位于|在|藏于|藏在|存放于|存放在|移到|转移到|交到)/u,
-  },
-  {
-    cue: /(?:持有者|保管者|归属)/u,
-    resolved: /(?:由.{0,16}(?:持有|保管|携带)|交给|交由|归还给|归属)/u,
-  },
-  {
-    cue: /(?:身份|姓名|真名)/u,
-    resolved: /(?:身份(?:是|为)|名叫|姓名(?:是|为)|真名(?:是|为)|就是)/u,
-  },
-  {
-    cue: /(?:真伪|真假)/u,
-    resolved: /(?:确认为|证实为|是真|是伪|伪造|真品|赝品)/u,
-  },
-] as const;
 
 export interface StageSummaryProgress {
   startMessageId: number;
@@ -83,84 +48,6 @@ function escapedRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function normalizedSummaryTerm(value: string): string {
-  return value.normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-}
-
-function sectionBodies(summary: string): Array<{ heading: string; body: string }> | null {
-  const positions = REQUIRED_SUMMARY_HEADINGS.map((heading) => summary.indexOf(heading));
-  if (positions.some((position) => position < 0)) {
-    return null;
-  }
-  return REQUIRED_SUMMARY_HEADINGS.map((heading, index) => ({
-    heading,
-    body: summary.slice(
-      positions[index]! + heading.length,
-      positions[index + 1] ?? summary.length,
-    ).trim(),
-  }));
-}
-
-function unresolvedSubjects(line: string, attributeCue: RegExp): string[] {
-  const identifiers = line.match(SUMMARY_STABLE_IDENTIFIER) ?? [];
-  const attributeIndex = line.search(attributeCue);
-  const prefix = attributeIndex > 0
-    ? line.slice(Math.max(0, attributeIndex - 32), attributeIndex)
-      .replace(/^[\s\-*•·：:，,；;。.!！?？]+/u, '')
-      .replace(/(?:的)$/u, '')
-      .trim()
-    : '';
-  return [...new Set([...identifiers, ...(prefix.length >= 2 ? [prefix] : [])])]
-    .map(normalizedSummaryTerm)
-    .filter((term) => term.length >= 2);
-}
-
-function unresolvedLineWasResolved(line: string, resolvedText: string): boolean {
-  if (!UNRESOLVED_CUE.test(line)) {
-    return false;
-  }
-  const rule = UNRESOLVED_ATTRIBUTES.find(({ cue }) => cue.test(line));
-  if (!rule) {
-    return false;
-  }
-  const subjects = unresolvedSubjects(line, rule.cue);
-  if (subjects.length === 0) {
-    return false;
-  }
-  return (resolvedText.match(SUMMARY_SENTENCE) ?? []).some((sentence) => {
-    const normalizedSentence = normalizedSummaryTerm(sentence);
-    return subjects.some((subject) => normalizedSentence.includes(subject)) &&
-      !NEGATED_RESOLUTION.test(sentence) &&
-      !UNRESOLVED_RESOLUTION_RESULT.test(sentence) &&
-      rule.resolved.test(sentence);
-  });
-}
-
-/** Remove only a clearly resolved attribute accidentally repeated as unresolved. */
-export function removeResolvedSummaryThreads(summary: string): string {
-  const sections = sectionBodies(summary);
-  if (!sections) {
-    return summary;
-  }
-  const resolvedText = sections
-    .filter(({ heading }) => heading === '【已确认剧情】' || heading === '【当前状态】')
-    .map(({ body }) => body)
-    .join('\n');
-  let removedThread = false;
-  const rebuilt = sections.map(({ heading, body }) => {
-    if (heading !== '【未解决线索】') {
-      return `${heading}\n${body || '无'}`;
-    }
-    const originalLines = body.split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const lines = originalLines.filter((line) => !unresolvedLineWasResolved(line, resolvedText));
-    removedThread ||= lines.length < originalLines.length;
-    return `${heading}\n${lines.length > 0 ? lines.join('\n') : '无'}`;
-  });
-  return removedThread ? rebuilt.join('\n') : summary;
-}
-
 function summaryIdentity(context: SillyTavernContext): {
   userUiPersona: string;
   assistantCharacter: string;
@@ -178,7 +65,6 @@ export function normalizeSummary(
   raw: string,
   sourceMessages: TavernChatMessage[] = [],
   userUiPersona = '',
-  requireSections = false,
 ): string {
   const withoutFence = raw
     .trim()
@@ -193,71 +79,15 @@ export function normalizeSummary(
   if (!withoutWrapper) {
     throw new Error('阶段总结模型返回了空内容。');
   }
-  if (requireSections) {
-    let previousIndex = -1;
-    for (const heading of REQUIRED_SUMMARY_HEADINGS) {
-      const index = withoutWrapper.indexOf(heading);
-      if (index < 0 || index <= previousIndex) {
-        throw new Error(`阶段总结缺少或打乱分级标题：${heading}`);
-      }
-      previousIndex = index;
-    }
-  }
   const sourceText = sourceMessages.map((message) => storyContent(message)).join('\n');
   const persona = userUiPersona.trim();
   const identitySafe = persona.length >= 2 && !sourceText.includes(persona)
     ? withoutWrapper.replace(new RegExp(escapedRegExp(persona), 'gu'), '用户角色')
     : withoutWrapper;
-  const consistencySafe = requireSections
-    ? removeResolvedSummaryThreads(identitySafe)
-    : identitySafe;
-  if (consistencySafe.length > MAX_STORED_SUMMARY_CHARACTERS) {
+  if (identitySafe.length > MAX_STORED_SUMMARY_CHARACTERS) {
     throw new Error('阶段总结模型返回内容过长。');
   }
-  return consistencySafe;
-}
-
-/**
- * Recover the common provider mistake where exactly one empty interior section
- * is omitted. Keep this deliberately narrow: missing edge sections, multiple
- * missing sections, and reordered headings still fail strict validation.
- */
-export function repairGeneratedSummarySections(raw: string): string {
-  const positions = REQUIRED_SUMMARY_HEADINGS.map((heading) => raw.indexOf(heading));
-  const missing = positions
-    .map((position, index) => ({ position, index }))
-    .filter(({ position }) => position < 0);
-  if (missing.length !== 1) {
-    return raw;
-  }
-
-  const missingIndex = missing[0]!.index;
-  if (missingIndex === 0 || missingIndex === REQUIRED_SUMMARY_HEADINGS.length - 1) {
-    return raw;
-  }
-
-  let previousPosition = -1;
-  for (const position of positions) {
-    if (position < 0) {
-      continue;
-    }
-    if (position <= previousPosition) {
-      return raw;
-    }
-    previousPosition = position;
-  }
-
-  const nextHeading = REQUIRED_SUMMARY_HEADINGS[missingIndex + 1]!;
-  const insertionPoint = raw.indexOf(nextHeading);
-  if (insertionPoint < 0) {
-    return raw;
-  }
-  return [
-    raw.slice(0, insertionPoint).trimEnd(),
-    REQUIRED_SUMMARY_HEADINGS[missingIndex],
-    '无',
-    raw.slice(insertionPoint).trimStart(),
-  ].join('\n');
+  return identitySafe;
 }
 
 function assertChatOwner(state: StoryEchoChatState): void {
@@ -489,14 +319,8 @@ export class StageSummaryService {
         if (currentHash !== snapshotHash) {
           throw new Error('阶段总结期间源消息发生变化，已丢弃本次结果。');
         }
-        const repairedRaw = repairGeneratedSummarySections(raw);
-        const text = normalizeSummary(repairedRaw, snapshot, identity.userUiPersona, true);
-        const identitySafeWithoutConsistency = normalizeSummary(
-          repairedRaw,
-          snapshot,
-          identity.userUiPersona,
-        );
-        const withoutPersonaSanitization = normalizeSummary(repairedRaw, snapshot, '', true);
+        const text = normalizeSummary(raw, snapshot, identity.userUiPersona);
+        const withoutPersonaSanitization = normalizeSummary(raw, snapshot, '');
         // Read the live chat again instead of trusting the context object
         // captured before the LLM call. SillyTavern can replace the chat array
         // when a message is edited or a branch is switched while generation is
@@ -534,8 +358,6 @@ export class StageSummaryService {
           summaryCharacters: text.length,
           summaryEntries: state.stageSummary.entries.length,
           personaLabelSanitized: text !== withoutPersonaSanitization,
-          summaryConsistencyAdjusted: text !== identitySafeWithoutConsistency,
-          summarySectionRepaired: repairedRaw !== raw,
           authoritativeFactCharacters: authoritativeFacts.length,
         });
         await this.memoryRepository.save(state);

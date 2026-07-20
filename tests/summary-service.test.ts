@@ -4,29 +4,17 @@ import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import {
   buildStageSummaryGrounding,
   buildStageSummaryPrompt,
+  STAGE_SUMMARY_SYSTEM_PROMPT,
 } from '../src/summary/prompts';
 import {
   normalizeSummary,
-  repairGeneratedSummarySections,
-  removeResolvedSummaryThreads,
   StageSummaryService,
 } from '../src/summary/service';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState, memory } from './fixtures';
 
 function sectionedSummary(confirmed: string): string {
-  return [
-    '【已确认剧情】',
-    confirmed,
-    '【当前状态】',
-    '无',
-    '【未解决线索】',
-    '无',
-    '【角色主张与推测】',
-    '无',
-    '【已失效或否定事实】',
-    '无',
-  ].join('\n');
+  return confirmed;
 }
 
 afterEach(() => {
@@ -58,6 +46,13 @@ function installContext(
 }
 
 describe('independent stage summaries', () => {
+  it('adapts to cultivation and other plot genres instead of assuming a case file', () => {
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不要套用预设题材、卷宗式分类或固定栏目');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修仙或玄幻剧情优先写清境界、功法术法');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('可以自由分段');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修炼、学习、赠礼、照料、同行');
+  });
+
   it('advances independently of the extraction cursor in summary-only mode', async () => {
     const generateRaw = vi.fn(async () => sectionedSummary('第一轮已经完成。'));
     const installed = installContext([
@@ -260,62 +255,15 @@ describe('independent stage summaries', () => {
     ], '刘爽')).toContain('刘爽');
   });
 
-  it('requires every authority section for newly generated summaries', () => {
-    expect(() => normalizeSummary('只有一段普通总结。', [], '', true))
-      .toThrow(/缺少或打乱分级标题/);
-    expect(normalizeSummary(sectionedSummary('用户角色进入贝克街。'), [], '', true))
-      .toContain('【角色主张与推测】\n无');
-  });
-
-  it('repairs exactly one omitted interior section in a generated summary', () => {
-    const missingClaims = sectionedSummary('用户角色进入贝克街。')
-      .replace('【角色主张与推测】\n无\n', '');
-    const repaired = repairGeneratedSummarySections(missingClaims);
-
-    expect(repaired).toContain('【未解决线索】\n无\n【角色主张与推测】\n无\n【已失效或否定事实】');
-    expect(normalizeSummary(repaired, [], '', true)).toBe(repaired);
-    expect(repairGeneratedSummarySections(
-      '【已确认剧情】\n有\n【已失效或否定事实】\n无',
-    )).not.toContain('【角色主张与推测】');
-  });
-
-  it('removes a use that was resolved in confirmed plot from unresolved clues', () => {
-    const contradictory = [
-      '【已确认剧情】',
-      '陌白利用C-8齿片打开了档案柜。',
-      '【当前状态】',
-      'C-8齿片由陌白持有。',
-      '【未解决线索】',
-      '- C-8齿片用途仍未明。',
-      '- 灰帽人的身份仍未知。',
-      '【角色主张与推测】',
-      '无',
-      '【已失效或否定事实】',
-      '无',
-    ].join('\n');
-
-    const cleaned = removeResolvedSummaryThreads(contradictory);
-
-    expect(cleaned).not.toContain('C-8齿片用途仍未明');
-    expect(cleaned).toContain('灰帽人的身份仍未知');
-    expect(normalizeSummary(contradictory, [], '', true)).toBe(cleaned);
-  });
-
-  it('keeps an unresolved use when the confirmed timeline only records a failed attempt', () => {
+  it('accepts natural multi-paragraph recaps without adding or requiring headings', () => {
     const summary = [
-      '【已确认剧情】',
-      '陌白尝试使用C-8齿片，但开启档案柜失败。',
-      '【当前状态】',
-      '无',
-      '【未解决线索】',
-      '- C-8齿片用途仍未明。',
-      '【角色主张与推测】',
-      '无',
-      '【已失效或否定事实】',
-      '无',
+      '刘爽在姜梦指点下掌握了无我剑诀的收束要领，并突破至金丹中期。',
+      '',
+      '两人的师徒关系更亲近；剑冢异动仍未解释，姜梦要求刘爽不要靠近。',
     ].join('\n');
 
-    expect(removeResolvedSummaryThreads(summary)).toContain('C-8齿片用途仍未明');
+    expect(normalizeSummary(`<story_echo_summary>\n${summary}\n</story_echo_summary>`)).toBe(summary);
+    expect(normalizeSummary(summary)).not.toContain('【已确认剧情】');
   });
 
   it('waits for a complete automatic batch and keeps the coverage cursor unchanged', async () => {
@@ -362,10 +310,9 @@ describe('independent stage summaries', () => {
     expect(generateRaw.mock.calls[0]?.[0]).toMatchObject({ responseLength: 1_600 });
   });
 
-  it('stores a provider summary after repairing one omitted empty interior section', async () => {
-    const incomplete = sectionedSummary('第一轮已经完成。')
-      .replace('【角色主张与推测】\n无\n', '');
-    const generateRaw = vi.fn(async () => incomplete);
+  it('stores a provider free-form recap unchanged', async () => {
+    const recap = '刘爽完成第一轮修炼，境界保持稳定。\n姜梦准备继续指导剑诀。';
+    const generateRaw = vi.fn(async () => recap);
     installContext([
       { is_user: true, mes: 'u1' },
       { is_user: false, mes: 'a1' },
@@ -374,8 +321,7 @@ describe('independent stage summaries', () => {
     const result = await new StageSummaryService().processNextThrough(1);
 
     expect(result.updatedChunks).toBe(1);
-    expect(result.state?.stageSummary.entries[0]?.text)
-      .toContain('【角色主张与推测】\n无');
+    expect(result.state?.stageSummary.entries[0]?.text).toBe(recap);
     expect(result.state?.metrics.summaryFailures).toBe(0);
   });
 
