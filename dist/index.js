@@ -9129,6 +9129,17 @@ function panelTemplate() {
           </div>
         </div>
 
+        <div class="story-echo-switch-row story-echo-switch-primary">
+          <div class="story-echo-switch-copy">
+            <span class="story-echo-switch-title">\u542F\u7528\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE</span>
+            <span class="story-echo-switch-description">\u81EA\u52A8\u63D0\u53D6\u7A97\u53E3\u5916\u5267\u60C5\u3001\u751F\u6210\u5411\u91CF\uFF0C\u5E76\u5728\u9700\u8981\u65F6\u52A8\u6001\u53EC\u56DE\u6CE8\u5165</span>
+          </div>
+          <div class="story-echo-toggle">
+            <input id="story-echo-memory-enabled" class="story-echo-toggle-input" type="checkbox">
+            <label class="story-echo-toggle-label" for="story-echo-memory-enabled" aria-label="\u542F\u7528\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE"></label>
+          </div>
+        </div>
+
         <details class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
@@ -9167,17 +9178,6 @@ function panelTemplate() {
           </p>
           </div>
         </details>
-
-        <div class="story-echo-switch-row story-echo-switch-primary">
-          <div class="story-echo-switch-copy">
-            <span class="story-echo-switch-title">\u542F\u7528\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE</span>
-            <span class="story-echo-switch-description">\u81EA\u52A8\u63D0\u53D6\u7A97\u53E3\u5916\u5267\u60C5\u3001\u751F\u6210\u5411\u91CF\uFF0C\u5E76\u5728\u9700\u8981\u65F6\u52A8\u6001\u53EC\u56DE\u6CE8\u5165</span>
-          </div>
-          <div class="story-echo-toggle">
-            <input id="story-echo-memory-enabled" class="story-echo-toggle-input" type="checkbox">
-            <label class="story-echo-toggle-label" for="story-echo-memory-enabled" aria-label="\u542F\u7528\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE"></label>
-          </div>
-        </div>
 
         <details class="story-echo-section story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">

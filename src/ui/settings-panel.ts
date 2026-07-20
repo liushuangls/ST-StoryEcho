@@ -107,6 +107,17 @@ function panelTemplate(): HTMLElement {
           </div>
         </div>
 
+        <div class="story-echo-switch-row story-echo-switch-primary">
+          <div class="story-echo-switch-copy">
+            <span class="story-echo-switch-title">启用剧情记忆与召回</span>
+            <span class="story-echo-switch-description">自动提取窗口外剧情、生成向量，并在需要时动态召回注入</span>
+          </div>
+          <div class="story-echo-toggle">
+            <input id="story-echo-memory-enabled" class="story-echo-toggle-input" type="checkbox">
+            <label class="story-echo-toggle-label" for="story-echo-memory-enabled" aria-label="启用剧情记忆与召回"></label>
+          </div>
+        </div>
+
         <details class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
@@ -145,17 +156,6 @@ function panelTemplate(): HTMLElement {
           </p>
           </div>
         </details>
-
-        <div class="story-echo-switch-row story-echo-switch-primary">
-          <div class="story-echo-switch-copy">
-            <span class="story-echo-switch-title">启用剧情记忆与召回</span>
-            <span class="story-echo-switch-description">自动提取窗口外剧情、生成向量，并在需要时动态召回注入</span>
-          </div>
-          <div class="story-echo-toggle">
-            <input id="story-echo-memory-enabled" class="story-echo-toggle-input" type="checkbox">
-            <label class="story-echo-toggle-label" for="story-echo-memory-enabled" aria-label="启用剧情记忆与召回"></label>
-          </div>
-        </div>
 
         <details class="story-echo-section story-echo-collapsible" data-story-echo-memory-only>
           <summary class="story-echo-section-summary">

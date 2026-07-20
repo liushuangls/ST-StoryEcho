@@ -47,6 +47,16 @@ const EDITABLE_CONTROLS: Readonly<Record<string, 'input' | 'change'>> = {
 };
 
 describe('settings panel editable-control contract', () => {
+  it('places both feature switches together above the collapsible settings', () => {
+    const masterSwitch = source.indexOf('id="story-echo-enabled"');
+    const memorySwitch = source.indexOf('id="story-echo-memory-enabled"');
+    const contextWindow = source.indexOf('>上下文窗口</span>');
+
+    expect(masterSwitch).toBeGreaterThan(0);
+    expect(memorySwitch).toBeGreaterThan(masterSwitch);
+    expect(memorySwitch).toBeLessThan(contextWindow);
+  });
+
   it('places the memory metadata manager above the action and status blocks', () => {
     const manager = source.indexOf('${memoryManagerTemplate()}');
     const actions = source.indexOf('<div class="story-echo-actions story-echo-actions-primary"');
