@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     targetTurnsPerUpdate: 10,
     windowSize: 4,
     maxTokens: 1_600,
+    skeletonMaxTokens: 5_000,
   },
   recall: {
     maxEvents: 3,

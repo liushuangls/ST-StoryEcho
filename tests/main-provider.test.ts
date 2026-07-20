@@ -26,6 +26,17 @@ describe('MainLlmProvider', () => {
     });
   });
 
+  it('allows a 10000-token skeleton budget but clamps larger internal requests', async () => {
+    const generateRaw = vi.fn().mockResolvedValue('OK');
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ generateRaw }),
+    });
+
+    await new MainLlmProvider().complete({ system: 'system', prompt: 'prompt', maxTokens: 20_000 });
+
+    expect(generateRaw).toHaveBeenCalledWith(expect.objectContaining({ responseLength: 10_000 }));
+  });
+
   it('removes an echoed internal request marker from the returned content', async () => {
     const generateRaw = vi.fn(async (options: { prompt: string }) => {
       const marker = options.prompt.match(/\[story_echo_internal_.+\]$/)?.[0] ?? '';

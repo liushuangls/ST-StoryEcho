@@ -49,6 +49,21 @@ describe('OpenAiCompatibleProvider', () => {
     });
   });
 
+  it('allows a 10000-token skeleton budget but clamps larger custom requests', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200 }));
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'model-name';
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    await provider.complete({ system: 'system', prompt: 'prompt', maxTokens: 20_000 });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.max_tokens).toBe(10_000);
+  });
+
   it('passes a strict schema in the format expected by SillyTavern', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: '{}' } }],

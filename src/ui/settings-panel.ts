@@ -33,6 +33,11 @@ import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../promp
 import { selectRecentWindow } from '../prompt/window';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
+import { storySkeletonService } from '../summary/skeleton-service';
+import {
+  pendingArchivedStageSummaryEntries,
+  storySkeletonIsUsable,
+} from '../summary/skeleton-state';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { resolveVectorConfig } from '../vector/config';
 import { resolveEmbeddingClient } from '../vector/embedding-providers';
@@ -105,7 +110,7 @@ function panelTemplate(): HTMLElement {
         <div class="story-echo-switch-row story-echo-switch-primary">
           <div class="story-echo-switch-copy">
             <span class="story-echo-switch-title">启用 StoryEcho 上下文管理</span>
-            <span class="story-echo-switch-description">使用 LLM 维护最小原文窗口与历史阶段总结</span>
+            <span class="story-echo-switch-description">使用 LLM 维护最小原文窗口、阶段总结与全局剧情骨架</span>
           </div>
           <div class="story-echo-toggle">
             <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
@@ -226,8 +231,8 @@ function panelTemplate(): HTMLElement {
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-book-open" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">历史阶段总结</span>
-                <span class="story-echo-section-summary-description">总结间隔 N、携带窗口 S 与输出预算</span>
+                <span class="story-echo-section-summary-title">历史总结与全局骨架</span>
+                <span class="story-echo-section-summary-description">总结间隔 N、携带窗口 S 与两级输出预算</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -245,8 +250,12 @@ function panelTemplate(): HTMLElement {
               <span>每条总结最大输出 Token</span>
               <input id="story-echo-summary-max-tokens" class="text_pole" type="number" min="128" max="8192" step="128">
             </label>
+            <label class="story-echo-field">
+              <span>全局剧情骨架最大 Token</span>
+              <input id="story-echo-skeleton-max-tokens" class="text_pole" type="number" min="512" max="10000" step="128">
+            </label>
             <p class="story-echo-hint story-echo-field-wide">
-              总开关开启后自动维护阶段总结。最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文；每次请求只带最近 S 条总结。
+              总开关开启后自动维护阶段总结。最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文。较老总结会汇入始终携带的全局剧情骨架，请求同时携带最近 S 条阶段总结；骨架默认上限为 5000 Token，可在 512～10000 之间调整。
             </p>
             <div class="story-echo-field-wide">
               ${stageSummaryManagerTemplate()}
@@ -481,8 +490,8 @@ function panelTemplate(): HTMLElement {
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
         ${promptStatsCardTemplate()}
         <details class="story-echo-diagnostics">
-          <summary>当前阶段总结</summary>
-          <pre id="story-echo-summary">尚无阶段总结。</pre>
+          <summary>当前骨架与阶段总结</summary>
+          <pre id="story-echo-summary">尚无全局骨架或阶段总结。</pre>
         </details>
         <details class="story-echo-diagnostics" open>
           <summary>测试统计</summary>
@@ -496,7 +505,7 @@ function panelTemplate(): HTMLElement {
           <summary>最近调试轨迹</summary>
           <pre id="story-echo-traces">调试模式关闭或尚无轨迹。</pre>
         </details>
-        <p class="story-echo-hint">调试报告不包含API Key，但会包含有界抽取参考预览、阶段总结、检索查询和被召回的剧情文本。</p>
+        <p class="story-echo-hint">调试报告不包含API Key，但会包含全局剧情骨架、有界抽取参考预览、阶段总结、检索查询和被召回的剧情文本。</p>
       </div>
     </div>
   `;
@@ -578,6 +587,8 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
     String(settings.summary.windowSize);
   element<HTMLInputElement>(panel, '#story-echo-summary-max-tokens').value =
     String(settings.summary.maxTokens);
+  element<HTMLInputElement>(panel, '#story-echo-skeleton-max-tokens').value =
+    String(settings.summary.skeletonMaxTokens);
   element<HTMLInputElement>(panel, '#story-echo-max-events').value = String(settings.recall.maxEvents);
   element<HTMLInputElement>(panel, '#story-echo-max-tokens').value = String(settings.recall.maxTokens);
   element<HTMLInputElement>(panel, '#story-echo-threshold').value = String(settings.recall.scoreThreshold);
@@ -662,7 +673,7 @@ function bindSettings(panel: HTMLElement): void {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 4));
       settings.summary.windowSize = Math.min(100, Math.max(1, value));
     });
-    void refreshStatus(panel);
+    scheduleDerivedUpdate();
   });
 
   element<HTMLInputElement>(panel, '#story-echo-summary-max-tokens').addEventListener('input', (event) => {
@@ -670,6 +681,14 @@ function bindSettings(panel: HTMLElement): void {
       const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 1_600));
       settings.summary.maxTokens = Math.min(8_192, Math.max(128, value));
     });
+  });
+
+  element<HTMLInputElement>(panel, '#story-echo-skeleton-max-tokens').addEventListener('input', (event) => {
+    settingsRepository.update((settings) => {
+      const value = Math.floor(numberValue(event.currentTarget as HTMLInputElement, 5_000));
+      settings.summary.skeletonMaxTokens = Math.min(10_000, Math.max(512, value));
+    });
+    scheduleDerivedUpdate();
   });
 
   element<HTMLInputElement>(panel, '#story-echo-max-events').addEventListener('input', (event) => {
@@ -985,8 +1004,12 @@ function bindSettings(panel: HTMLElement): void {
         const summaryResult = await stageSummaryService.processAllThrough(target, (progress) => {
           status.textContent = `正在更新阶段总结：消息 ${progress.startMessageId}～${progress.endMessageId} / ${progress.targetEndMessageId}……`;
         });
+        const skeletonResult = await storySkeletonService.processAllPending((progress) => {
+          status.textContent = `正在更新全局剧情骨架：已合并到消息 ${progress.sourceEndMessageId}，剩余 ${progress.pendingEntries} 条阶段总结……`;
+        });
         return {
           summaryChunks: summaryResult.updatedChunks,
+          skeletonChunks: skeletonResult.updatedChunks,
           extractionAdvanced: indexedAfter > indexedBefore,
         };
       });
@@ -994,8 +1017,8 @@ function bindSettings(panel: HTMLElement): void {
         notify.info('当前没有窗口外历史需要处理。');
         return;
       }
-      if (processed.summaryChunks > 0) {
-        notify.success(`窗口外历史处理完成，已生成 ${processed.summaryChunks} 条阶段总结；不足所配置批次的尾部原文会继续保留。`);
+      if (processed.summaryChunks > 0 || processed.skeletonChunks > 0) {
+        notify.success(`窗口外历史处理完成：生成 ${processed.summaryChunks} 条阶段总结，更新全局剧情骨架 ${processed.skeletonChunks} 次；不足所配置批次的尾部原文会继续保留。`);
       } else if (processed.extractionAdvanced) {
         notify.info('窗口外剧情记忆已处理；历史尚不足一个阶段总结批次，尾部原文会继续保留。');
       } else {
@@ -1106,6 +1129,9 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
   const averageSummary = metrics.summaryUpdates > 0
     ? Math.round(metrics.totalSummaryMs / metrics.summaryUpdates)
     : 0;
+  const averageSkeleton = metrics.skeletonUpdates > 0
+    ? Math.round(metrics.totalSkeletonMs / metrics.skeletonUpdates)
+    : 0;
   const averageConsolidation = metrics.consolidationCalls > 0
     ? Math.round(metrics.totalConsolidationMs / metrics.consolidationCalls)
     : 0;
@@ -1124,6 +1150,7 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
   const queue = storyEchoTaskCoordinator.snapshot();
   return [
     `记忆：active ${statusCount('active')} / resolved ${statusCount('resolved')} / superseded ${statusCount('superseded')} / invalid ${statusCount('invalid')}`,
+    `全局骨架：更新${metrics.skeletonUpdates}次，失败${metrics.skeletonFailures}次，平均${averageSkeleton}ms/次`,
     `阶段总结：更新${metrics.summaryUpdates}次，失败${metrics.summaryFailures}次，覆盖${metrics.summaryMessagesCovered}条消息，平均${averageSummary}ms/次`,
     `抽取：${metrics.extractionChunks}块，${metrics.candidatesExtracted}候选，失败${metrics.extractionFailures}次，平均${averageExtraction}ms/块`,
     `抽取参考：构建${metrics.referenceContextBuilds}次，部分失败${metrics.referenceContextPartialFailures}次，累计${metrics.referenceContextTokens} Token，命中世界书${metrics.referenceWorldInfoEntries}条`,
@@ -1136,7 +1163,7 @@ function statsText(state: NonNullable<ReturnType<MemoryRepository['getExisting']
     `向量：查询${metrics.vectorQueries}次，查询失败${metrics.vectorQueryFailures}次，同步失败${metrics.vectorSyncFailures}次，写入${metrics.vectorItemsInserted}，删除${metrics.vectorItemsDeleted}，重建${metrics.vectorRebuilds}次`,
     `上下文：尝试${metrics.generationAttempts}次，裁剪${metrics.generationsTrimmed}次，延迟裁剪${metrics.generationsDeferred}次，移除${metrics.messagesRemoved}条原文，注入${metrics.memoriesInjected}条记忆`,
     `估算Token：移除${metrics.estimatedRemovedTokens}，注入${metrics.estimatedInjectedTokens}，累计净节省${estimatedNetSaved}`,
-    `最近：总结 ${metrics.lastSummaryAt ?? '无'} / 抽取 ${metrics.lastExtractionAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
+    `最近：骨架 ${metrics.lastSkeletonAt ?? '无'} / 总结 ${metrics.lastSummaryAt ?? '无'} / 抽取 ${metrics.lastExtractionAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
     `调试轨迹：${state.debugTraces.length}/50`,
   ].join('\n');
 }
@@ -1226,7 +1253,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
         ...runtimeStatusText(),
       ].join('｜');
       stats.textContent = '尚无统计数据。';
-      stageSummaryTarget.textContent = '尚无阶段总结。';
+      stageSummaryTarget.textContent = '尚无全局骨架或阶段总结。';
       inspection.textContent = '尚无生成记录。';
       traces.textContent = '调试模式关闭或尚无轨迹。';
       stageSummaryMetadataManager.render(panel, null);
@@ -1268,7 +1295,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
         ))
       : 0;
     target.textContent = [
-      currentSettings.memory.enabled ? '模式：上下文总结 + 剧情记忆' : '模式：仅上下文窗口 + 阶段总结',
+      currentSettings.memory.enabled ? '模式：全局骨架 + 阶段总结 + 剧情记忆' : '模式：上下文窗口 + 全局骨架 + 阶段总结',
       ...(currentSettings.memory.enabled
         ? [
             `剧情事件：${state.memories.length}`,
@@ -1284,17 +1311,36 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
             `向量：${cachedVectorCountText}`,
           ]),
       `阶段总结：${state.stageSummary.entries.filter((entry) => !entry.deleted).length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
+      `全局骨架：${state.storySkeleton.text
+        ? state.storySkeleton.stale
+          ? '待重建（当前不注入）'
+          : `覆盖到消息 ${state.storySkeleton.coveredThroughMessageId}`
+        : '尚未生成'}`,
       ...runtimeStatusText(),
     ].join('｜');
     const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
     const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
     const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
+    const pendingArchived = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
+    const skeletonUsable = storySkeletonIsUsable(state);
     const currentStateCorrection = currentSettings.memory.enabled
       ? renderCurrentStateCoordinationBlock(state.memories)
       : '';
-    stageSummaryTarget.textContent = visibleSummaries.length > 0
+    stageSummaryTarget.textContent = skeletonUsable || activeSummaries.length > 0
       ? [
-          `已保存 ${activeSummaries.length} 条；正常请求携带最近 ${visibleSummaries.length} 条。`,
+          skeletonUsable
+            ? `全局剧情骨架（覆盖到消息 ${state.storySkeleton.coveredThroughMessageId}）：\n${state.storySkeleton.text}`
+            : state.storySkeleton.text
+              ? '全局剧情骨架来源已失效，重建成功前不会注入。'
+              : '全局剧情骨架尚未生成。',
+          ...(pendingArchived.length > 0 ? [
+            `待汇入骨架但当前仍会直接携带的阶段总结 ${pendingArchived.length} 条：`,
+            ...pendingArchived.map((entry) => [
+              `消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
+              entry.text,
+            ].join('\n')),
+          ] : []),
+          `已保存 ${activeSummaries.length} 条；一般请求另携带最近 ${visibleSummaries.length} 条。`,
           ...visibleSummaries.map((entry, index) => [
             `#${activeSummaries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
             entry.text,
@@ -1303,7 +1349,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
             ? [`请求还会在总结后附加以下当前状态校正：\n${currentStateCorrection}`]
             : []),
         ].join('\n\n')
-      : '尚无阶段总结。';
+      : '尚无全局骨架或阶段总结。';
     stats.textContent = statsText(state);
     inspection.textContent = inspectionText(state);
     traces.textContent = tracesText(state);

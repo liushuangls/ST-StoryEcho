@@ -141,6 +141,12 @@ function normalizeSettings(settings: StoryEchoSettings): void {
     8_192,
     DEFAULT_SETTINGS.summary.maxTokens,
   );
+  settings.summary.skeletonMaxTokens = boundedInteger(
+    settings.summary.skeletonMaxTokens,
+    512,
+    10_000,
+    DEFAULT_SETTINGS.summary.skeletonMaxTokens,
+  );
   settings.recall.maxEvents = boundedInteger(
     settings.recall.maxEvents,
     0,

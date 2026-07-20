@@ -2,6 +2,7 @@ import type { StageSummaryEntry, StoryEchoChatState } from '../core/types';
 import { MemoryRepository } from '../memory/repository';
 import { getCurrentChatId } from '../platform/sillytavern';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
+import { storySkeletonService } from '../summary/skeleton-service';
 import { paginateItems } from './memory-manager';
 import { notify } from './notifications';
 
@@ -63,6 +64,31 @@ function sourceText(entry: StageSummaryEntry): string {
 export function stageSummaryManagerTemplate(): string {
   return `
     <div class="story-echo-summary-manager">
+      <div class="story-echo-summary-editor story-echo-skeleton-editor">
+        <div class="story-echo-summary-editor-heading">
+          <div>
+            <strong>全局剧情骨架</strong>
+            <div id="story-echo-skeleton-status" class="story-echo-summary-editor-range">达到归档条件后自动生成</div>
+          </div>
+          <span class="story-echo-summary-manual-hint">可编辑、不可删除；人工修改会成为后续更新基线</span>
+        </div>
+        <label class="story-echo-field">
+          <span>骨架正文</span>
+          <textarea id="story-echo-skeleton-text" class="text_pole" rows="16" maxlength="96000" disabled placeholder="最近阶段总结超过 S 条后自动生成"></textarea>
+        </label>
+        <p class="story-echo-hint">
+          新聊天在第 S+1 条阶段总结归档时首次生成；已有长聊天打开并稳定约 3 秒后自动补建。平时每累计 3 条待归档总结或约 3000 Token 更新一次；更新成功前，待合并总结仍会随请求携带。编辑时必须保留六个分级标题；空白内容不能保存，界面不提供删除操作。
+        </p>
+        <div class="story-echo-summary-editor-actions">
+          <button id="story-echo-skeleton-save" class="menu_button story-echo-action-primary" type="button" disabled>
+            <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>保存骨架修改</span>
+          </button>
+          <button id="story-echo-skeleton-update" class="menu_button" type="button">
+            <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>立即更新骨架</span>
+          </button>
+        </div>
+      </div>
+
       <div class="story-echo-summary-manager-heading">
         <strong>已生成的阶段总结</strong>
         <span>保存在当前聊天元数据中</span>
@@ -142,6 +168,9 @@ export class StageSummaryMetadataManager {
   private editorRevision = 0;
   private currentPage = 1;
   private renderedChatUuid = '';
+  private skeletonDirty = false;
+  private skeletonRevision = 0;
+  private populatedSkeletonUpdatedAt: string | null = null;
 
   constructor(private readonly repository: MemoryRepository) {}
 
@@ -154,6 +183,73 @@ export class StageSummaryMetadataManager {
     };
     editorText.addEventListener('input', markDirty);
     editorText.addEventListener('change', markDirty);
+    const skeletonText = element<HTMLTextAreaElement>(panel, '#story-echo-skeleton-text');
+    const markSkeletonDirty = (): void => {
+      this.skeletonDirty = true;
+      this.skeletonRevision += 1;
+    };
+    skeletonText.addEventListener('input', markSkeletonDirty);
+    skeletonText.addEventListener('change', markSkeletonDirty);
+
+    element<HTMLButtonElement>(panel, '#story-echo-skeleton-save').addEventListener('click', async (event) => {
+      const state = this.repository.getExisting();
+      if (!state?.storySkeleton.text) {
+        return;
+      }
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try {
+        const requestedChatId = getCurrentChatId();
+        const text = skeletonText.value;
+        const submittedRevision = this.skeletonRevision;
+        await storyEchoTaskCoordinator.enqueueManual('保存全局剧情骨架', async () => {
+          if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+            throw new Error('等待保存骨架期间聊天已切换，已取消修改。');
+          }
+          return this.repository.updateStorySkeleton({ text });
+        });
+        if (this.skeletonRevision === submittedRevision) {
+          this.skeletonDirty = false;
+        }
+        await onChanged();
+        notify.success('全局剧情骨架已保存，并将作为后续自动更新基线。');
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : '保存全局剧情骨架失败。');
+      } finally {
+        button.disabled = !this.repository.getExisting()?.storySkeleton.text;
+      }
+    });
+
+    element<HTMLButtonElement>(panel, '#story-echo-skeleton-update').addEventListener('click', async (event) => {
+      if (
+        this.skeletonDirty &&
+        !globalThis.confirm('全局剧情骨架有尚未保存的修改，立即更新会放弃这些修改。确定继续吗？')
+      ) {
+        return;
+      }
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try {
+        const requestedChatId = getCurrentChatId();
+        const result = await storyEchoTaskCoordinator.enqueueManual('立即更新全局剧情骨架', async () => {
+          if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+            throw new Error('等待更新骨架期间聊天已切换，已取消任务。');
+          }
+          return storySkeletonService.processAllPending();
+        });
+        this.skeletonDirty = false;
+        await onChanged();
+        if (result.updatedChunks > 0) {
+          notify.success(`全局剧情骨架已更新 ${result.updatedChunks} 次，待合并阶段总结 ${result.pendingEntries} 条。`);
+        } else {
+          notify.info('当前没有可归档到全局剧情骨架的阶段总结。');
+        }
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : '更新全局剧情骨架失败。');
+      } finally {
+        button.disabled = false;
+      }
+    });
 
     element<HTMLInputElement>(panel, '#story-echo-summary-search').addEventListener('input', () => {
       this.currentPage = 1;
@@ -281,6 +377,28 @@ export class StageSummaryMetadataManager {
       this.renderedChatUuid = chatUuid;
       this.currentPage = 1;
       this.resetSelection();
+      this.skeletonDirty = false;
+      this.populatedSkeletonUpdatedAt = null;
+    }
+
+    const skeleton = state?.storySkeleton;
+    const skeletonText = element<HTMLTextAreaElement>(panel, '#story-echo-skeleton-text');
+    const skeletonSave = element<HTMLButtonElement>(panel, '#story-echo-skeleton-save');
+    const skeletonUpdate = element<HTMLButtonElement>(panel, '#story-echo-skeleton-update');
+    const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
+    skeletonText.disabled = !skeleton?.text;
+    skeletonSave.disabled = !skeleton?.text;
+    skeletonUpdate.disabled = !state;
+    skeletonStatus.textContent = skeleton?.text
+      ? [
+          skeleton.stale ? '待重建，当前不会注入' : `覆盖到消息 ${skeleton.coveredThroughMessageId}`,
+          formattedTime(skeleton.updatedAt ?? ''),
+          skeleton.manuallyEdited ? '含人工编辑' : '',
+        ].filter(Boolean).join(' · ')
+      : '尚未生成：最近阶段总结超过 S 条后自动创建';
+    if (!this.skeletonDirty && (skeleton?.updatedAt ?? '') !== this.populatedSkeletonUpdatedAt) {
+      skeletonText.value = skeleton?.text ?? '';
+      this.populatedSkeletonUpdatedAt = skeleton?.updatedAt ?? '';
     }
 
     const entries = (state?.stageSummary.entries ?? []).filter((entry) => !entry.deleted);

@@ -77,6 +77,11 @@ export function chatState(memories: StoryMemory[] = []): StoryEchoChatState {
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     },
+    storySkeleton: {
+      text: '',
+      coveredThroughMessageId: -1,
+      sourceHash: '',
+    },
     memories,
     pendingRanges: [],
     pendingVectorHashes: [],

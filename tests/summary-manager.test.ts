@@ -50,9 +50,14 @@ describe('stage summary manager pagination and template', () => {
     expect(last.items).toHaveLength(3);
   });
 
-  it('renders search, bounded pagination, editor, save, and safe deletion controls', () => {
+  it('renders an editable but non-deletable skeleton plus safe stage-summary controls', () => {
     const template = stageSummaryManagerTemplate();
 
+    expect(template).toContain('id="story-echo-skeleton-text"');
+    expect(template).toContain('id="story-echo-skeleton-save"');
+    expect(template).toContain('id="story-echo-skeleton-update"');
+    expect(template).not.toContain('id="story-echo-skeleton-delete"');
+    expect(template).toContain('可编辑、不可删除');
     expect(template).toContain('id="story-echo-summary-search"');
     expect(template).toContain('id="story-echo-summary-list"');
     expect(template).toContain('aria-label="阶段总结分页"');

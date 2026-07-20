@@ -322,6 +322,9 @@ export class ExtractionService {
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     };
+    if (current.storySkeleton.text) {
+      current.storySkeleton.stale = true;
+    }
     current.memories = [];
     current.pendingRanges = [];
     current.pendingVectorHashes = [];

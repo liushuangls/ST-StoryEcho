@@ -418,6 +418,8 @@ describe('backgroundTargetMessageId', () => {
     const scheduler = new BackgroundProcessingScheduler();
     const schedule = vi.spyOn(scheduler, 'schedule').mockImplementation(() => undefined);
     scheduler.register();
+    expect(schedule).toHaveBeenCalledOnce();
+    schedule.mockClear();
 
     await scheduler.runNow();
     expect(reconcile).toHaveBeenCalledOnce();

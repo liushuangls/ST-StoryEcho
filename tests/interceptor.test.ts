@@ -5,11 +5,17 @@ import { MemoryRepository } from '../src/memory/repository';
 import { storyEchoGenerateInterceptor } from '../src/prompt/interceptor';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
+import { stageSummaryService } from '../src/summary/service';
+import { storySkeletonSourceHash } from '../src/summary/skeleton-state';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../src/vector/config';
 import { chatState, memory } from './fixtures';
 
 function sectionedSummary(value: string): string {
   return `【已确认剧情】\n${value}\n【当前状态】\n无\n【未解决线索】\n无\n【角色主张与推测】\n无\n【已失效或否定事实】\n无`;
+}
+
+function storySkeleton(value: string): string {
+  return `【核心设定与身份】\n${value}\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无`;
 }
 
 afterEach(() => {
@@ -256,7 +262,7 @@ describe('StoryEcho request ordering', () => {
     expect(stored.metrics.generationsTrimmed).toBe(1);
   });
 
-  it('injects only the latest S independent summaries in chronological order', async () => {
+  it('keeps archived summaries in the request until a global skeleton exists', async () => {
     const { context, settings } = await installContext({
       withMemory: false,
       summaryCoveredThrough: 2,
@@ -298,10 +304,70 @@ describe('StoryEcho request ordering', () => {
     const summaries = promptChat.filter(
       (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
     );
-    expect(summaries).toHaveLength(2);
-    expect(summaries[0]?.mes).toContain('第二阶段');
-    expect(summaries[1]?.mes).toContain('第三阶段');
-    expect(summaries.map((message) => message.mes)).not.toContain(expect.stringContaining('第一阶段'));
+    expect(summaries).toHaveLength(3);
+    expect(summaries[0]?.mes).toContain('第一阶段');
+    expect(summaries[1]?.mes).toContain('第二阶段');
+    expect(summaries[2]?.mes).toContain('第三阶段');
+  });
+
+  it('injects the global skeleton before only the latest S stage summaries', async () => {
+    const { context, settings } = await installContext({
+      withMemory: false,
+      summaryCoveredThrough: 2,
+    });
+    settings.summary.windowSize = 2;
+    const stored = context.chatMetadata[MODULE_ID];
+    stored.stageSummary = {
+      entries: [
+        {
+          text: sectionedSummary('第一阶段'),
+          sourceStartMessageId: 0,
+          sourceEndMessageId: 0,
+          sourceHash: '',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        {
+          text: sectionedSummary('第二阶段'),
+          sourceStartMessageId: 1,
+          sourceEndMessageId: 1,
+          sourceHash: '',
+          updatedAt: '2026-01-02T00:00:00.000Z',
+        },
+        {
+          text: sectionedSummary('第三阶段'),
+          sourceStartMessageId: 2,
+          sourceEndMessageId: 2,
+          sourceHash: '',
+          updatedAt: '2026-01-03T00:00:00.000Z',
+        },
+      ],
+      coveredThroughMessageId: 2,
+      coveredThroughHash: '',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    };
+    await stageSummaryService.reconcileHistory(stored);
+    const reconciled = context.chatMetadata[MODULE_ID];
+    reconciled.storySkeleton = {
+      text: storySkeleton('第一阶段已被折叠为长期骨架。'),
+      coveredThroughMessageId: 0,
+      sourceHash: await storySkeletonSourceHash(reconciled.stageSummary.entries, 0),
+    };
+    const promptChat = structuredClone(sourceChat);
+
+    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+
+    const injected = promptChat.filter(
+      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
+    );
+    expect(injected).toHaveLength(3);
+    expect(injected[0]?.mes).toContain('<story_echo_skeleton>');
+    expect(injected[0]?.mes).toContain('第一阶段已被折叠为长期骨架');
+    const stageBlocks = injected.filter((message) => message.mes.includes('<story_echo_summary>'));
+    expect(stageBlocks).toHaveLength(2);
+    expect(stageBlocks[0]?.mes).toContain('第二阶段');
+    expect(stageBlocks[1]?.mes).toContain('第三阶段');
+    expect(stageBlocks.map((message) => message.mes))
+      .not.toContain(expect.stringContaining('第一阶段'));
   });
 
   it('skips a deleted older summary while keeping its raw range covered', async () => {

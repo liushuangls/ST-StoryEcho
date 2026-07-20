@@ -13,7 +13,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 7,
+      version: 8,
       enabled: false,
       memory: { enabled: false },
       summary: { enabled: true, automatic: true },
@@ -100,6 +100,7 @@ describe('SettingsRepository credential persistence', () => {
         targetTurnsPerUpdate: 7,
         windowSize: 9,
         maxTokens: 2_304,
+        skeletonMaxTokens: 7_500,
       };
       settings.recall = {
         maxEvents: 11,
@@ -162,6 +163,7 @@ describe('SettingsRepository credential persistence', () => {
           targetTurnsPerUpdate: 0,
           windowSize: 999,
           maxTokens: 12,
+          skeletonMaxTokens: 99_999,
         },
         recall: {
           maxEvents: 999,
@@ -201,7 +203,12 @@ describe('SettingsRepository credential persistence', () => {
 
     expect(settings).toMatchObject({
       recentWindow: { size: 0, unit: 'turns' },
-      summary: { targetTurnsPerUpdate: 1, windowSize: 100, maxTokens: 128 },
+      summary: {
+        targetTurnsPerUpdate: 1,
+        windowSize: 100,
+        maxTokens: 128,
+        skeletonMaxTokens: 10_000,
+      },
       recall: { maxEvents: 50, maxTokens: 0, scoreThreshold: 1, queryMode: 'llm' },
       extraction: {
         targetTurnsPerChunk: 20,
@@ -239,11 +246,13 @@ describe('SettingsRepository credential persistence', () => {
       current.extraction.targetTurnsPerChunk = 3.9;
       current.recall.scoreThreshold = -2;
       current.summary.maxTokens = 99_999;
+      current.summary.skeletonMaxTokens = 511;
     });
 
     expect(settings.extraction.targetTurnsPerChunk).toBe(3);
     expect(settings.recall.scoreThreshold).toBe(0);
     expect(settings.summary.maxTokens).toBe(8_192);
+    expect(settings.summary.skeletonMaxTokens).toBe(512);
     expect(extensionSettings['story_echo']).toBe(settings);
     expect(saveSettingsDebounced).toHaveBeenCalledOnce();
   });
@@ -285,7 +294,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 7,
+      version: 8,
       memory: { enabled: true },
       extraction: { automatic: true, targetTurnsPerChunk: 5 },
       summary: {
@@ -294,6 +303,7 @@ describe('SettingsRepository credential persistence', () => {
         targetTurnsPerUpdate: 10,
         windowSize: 4,
         maxTokens: 1_600,
+        skeletonMaxTokens: 5_000,
       },
     });
   });
@@ -316,7 +326,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 7,
+      version: 8,
       memory: { enabled: true },
       recentWindow: { size: 12, unit: 'turns' },
       summary: {
@@ -325,6 +335,7 @@ describe('SettingsRepository credential persistence', () => {
         targetTurnsPerUpdate: 8,
         windowSize: 4,
         maxTokens: 2_048,
+        skeletonMaxTokens: 5_000,
       },
     });
   });
@@ -341,7 +352,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 7,
+      version: 8,
       memory: { enabled: true },
       recall: { maxEvents: 3 },
     });
@@ -365,7 +376,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 7,
+      version: 8,
       memory: { enabled: true },
       extraction: {
         automatic: true,

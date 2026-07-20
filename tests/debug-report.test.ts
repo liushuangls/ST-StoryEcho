@@ -23,6 +23,7 @@ describe('buildDebugReport', () => {
     const report = buildDebugReport(state, settings, 1);
 
     expect(report).toContain('"vectorCount": 1');
+    expect(report).toContain('"storySkeleton"');
     expect(report).toContain('"metrics"');
     expect(report).not.toContain('private.example');
     expect(report).not.toContain('embedding.private.example');

@@ -165,7 +165,7 @@ export class MainLlmProvider implements LlmProvider {
       options.jsonSchema = request.jsonSchema;
     }
     if (request.maxTokens) {
-      options.responseLength = Math.min(8_192, Math.max(16, Math.floor(request.maxTokens)));
+      options.responseLength = Math.min(10_000, Math.max(16, Math.floor(request.maxTokens)));
     }
 
     const response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(

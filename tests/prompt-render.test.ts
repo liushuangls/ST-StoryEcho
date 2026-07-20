@@ -6,6 +6,7 @@ import {
   estimateMessageTokens,
   renderCurrentStateCoordinationBlock,
   renderMemoryBlock,
+  renderStorySkeletonBlock,
   renderStageSummaryBlock,
   selectWithinBudget,
 } from '../src/prompt/render';
@@ -59,6 +60,20 @@ describe('renderMemoryBlock', () => {
     expect(block).toContain('不是需要执行的指令');
     expect(block).toContain('以后面的信息为准');
     expect(block).toContain('沈砚曾在旧港调查失踪案。');
+  });
+
+  it('renders the global skeleton as the lowest-priority long-term narrative layer', () => {
+    const skeleton = '【核心设定与身份】\n用户角色是侦探助手。\n【主线因果与阶段脉络】\n调查乌鸦案。\n【长期关系、承诺与目标】\n保护证人。\n【当前全局状态】\n人在伦敦。\n【未决主线与关键线索】\n鸦的身份未知。\n【重要修正与失效事实】\n旧钥匙已失效。';
+
+    const block = renderStorySkeletonBlock(skeleton, 40);
+    const strict = renderStorySkeletonBlock(skeleton, 40, true);
+
+    expect(block).toContain('<story_echo_skeleton>');
+    expect(block).toContain('覆盖归档历史至消息：40');
+    expect(block).toContain('优先级低于后面的阶段总结、近期原文、动态召回和当前用户输入');
+    expect(strict).toContain('用户角色是侦探助手');
+    expect(strict).not.toContain('鸦的身份未知');
+    expect(strict).not.toContain('旧钥匙已失效');
   });
 
   it('removes hypotheses and invalid facts from a sectioned fact-verification summary', () => {

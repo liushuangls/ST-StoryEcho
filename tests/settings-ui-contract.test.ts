@@ -19,6 +19,7 @@ const EDITABLE_CONTROLS: Readonly<Record<string, 'input' | 'change'>> = {
   'story-echo-summary-turns': 'input',
   'story-echo-summary-window': 'input',
   'story-echo-summary-max-tokens': 'input',
+  'story-echo-skeleton-max-tokens': 'input',
   'story-echo-max-events': 'input',
   'story-echo-max-tokens': 'input',
   'story-echo-threshold': 'input',
@@ -68,7 +69,7 @@ describe('settings panel editable-control contract', () => {
   });
 
   it('places the editable summary manager inside the historical-summary section', () => {
-    const historySection = source.indexOf('>历史阶段总结</span>');
+    const historySection = source.indexOf('>历史总结与全局骨架</span>');
     const manager = source.indexOf('${stageSummaryManagerTemplate()}');
     const modelSection = source.indexOf('>模型来源</span>');
 
@@ -80,7 +81,7 @@ describe('settings panel editable-control contract', () => {
   it('places the latest prompt token card beside the runtime diagnostics', () => {
     const status = source.indexOf('<div id="story-echo-status"');
     const tokenCard = source.indexOf('${promptStatsCardTemplate()}');
-    const summaryDiagnostics = source.indexOf('<summary>当前阶段总结</summary>');
+    const summaryDiagnostics = source.indexOf('<summary>当前骨架与阶段总结</summary>');
 
     expect(tokenCard).toBeGreaterThan(status);
     expect(tokenCard).toBeLessThan(summaryDiagnostics);

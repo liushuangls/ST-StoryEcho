@@ -39,7 +39,7 @@ export interface ExternalEmbeddingSettings {
 }
 
 export interface StoryEchoSettings {
-  version: 7;
+  version: 8;
   enabled: boolean;
   memory: {
     enabled: boolean;
@@ -57,6 +57,8 @@ export interface StoryEchoSettings {
     targetTurnsPerUpdate: number;
     windowSize: number;
     maxTokens: number;
+    /** Maximum output and stored size of the always-on global story skeleton. */
+    skeletonMaxTokens: number;
   };
   recall: {
     maxEvents: number;
@@ -166,6 +168,19 @@ export interface StageSummaryEntry {
   deleted?: boolean;
 }
 
+export interface StorySkeleton {
+  text: string;
+  /** Last message covered by the archived stage-summary prefix folded into this skeleton. */
+  coveredThroughMessageId: number;
+  /** Digest of the exact stage-summary prefix used to build the current skeleton. */
+  sourceHash: string;
+  updatedAt?: string;
+  /** Manual edits become the authoritative baseline for later incremental updates. */
+  manuallyEdited?: boolean;
+  /** Stale skeletons stay stored and editable, but are not injected until rebuilt. */
+  stale?: boolean;
+}
+
 export interface InspectionRecord {
   createdAt: string;
   generationType: string;
@@ -190,6 +205,8 @@ export interface StoryEchoMetrics {
   summaryUpdates: number;
   summaryFailures: number;
   summaryMessagesCovered: number;
+  skeletonUpdates: number;
+  skeletonFailures: number;
   extractionChunks: number;
   extractionFailures: number;
   candidatesExtracted: number;
@@ -218,11 +235,13 @@ export interface StoryEchoMetrics {
   estimatedInjectedTokens: number;
   totalExtractionMs: number;
   totalSummaryMs: number;
+  totalSkeletonMs: number;
   totalConsolidationMs: number;
   totalRetrievalMs: number;
   totalQueryRewriteMs: number;
   lastExtractionAt?: string;
   lastSummaryAt?: string;
+  lastSkeletonAt?: string;
   lastGenerationAt?: string;
 }
 
@@ -250,6 +269,7 @@ export interface StoryEchoChatState {
     coveredThroughHash: string;
     updatedAt?: string;
   };
+  storySkeleton: StorySkeleton;
   memories: StoryMemory[];
   pendingRanges: PendingRange[];
   pendingVectorHashes: number[];

@@ -15,6 +15,8 @@ import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { createUuid } from '../core/uuid';
 import { deriveLogicalKey } from '../consolidation/identity';
 import { classifyEvidenceRole } from '../extraction/evidence';
+import { SettingsRepository } from '../settings/repository';
+import { normalizeStorySkeletonText } from '../summary/skeleton-state';
 
 function createCollectionId(chatUuid: string): string {
   return `${VECTOR_COLLECTION_PREFIX}_${chatUuid}_v${CHAT_STATE_VERSION}`;
@@ -62,6 +64,10 @@ export interface StoryMemoryEdit {
 }
 
 export interface StageSummaryEdit {
+  text: string;
+}
+
+export interface StorySkeletonEdit {
   text: string;
 }
 
@@ -174,6 +180,11 @@ function createState(ownerChatId: string): StoryEchoChatState {
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     },
+    storySkeleton: {
+      text: '',
+      coveredThroughMessageId: -1,
+      sourceHash: '',
+    },
     memories: [],
     pendingRanges: [],
     pendingVectorHashes: [],
@@ -210,6 +221,15 @@ interface StoredStageSummary {
   updatedAt?: unknown;
 }
 
+interface StoredStorySkeleton {
+  text?: unknown;
+  coveredThroughMessageId?: unknown;
+  sourceHash?: unknown;
+  updatedAt?: unknown;
+  manuallyEdited?: unknown;
+  stale?: unknown;
+}
+
 type StoredState = Omit<
   StoryEchoChatState,
   | 'memories'
@@ -218,6 +238,7 @@ type StoredState = Omit<
   | 'vectorFingerprint'
   | 'indexedPrefixHash'
   | 'stageSummary'
+  | 'storySkeleton'
   | 'metrics'
   | 'debugTraces'
 > & {
@@ -227,6 +248,7 @@ type StoredState = Omit<
   vectorFingerprint?: string;
   indexedPrefixHash?: string;
   stageSummary?: StoredStageSummary;
+  storySkeleton?: StoredStorySkeleton;
   metrics?: StoryEchoChatState['metrics'];
   debugTraces?: StoryEchoChatState['debugTraces'];
 };
@@ -336,6 +358,39 @@ function isCurrentStageSummary(value: StoredStageSummary | undefined): boolean {
   );
 }
 
+function normalizeStorySkeleton(
+  value: StoredStorySkeleton | undefined,
+): StoryEchoChatState['storySkeleton'] {
+  const text = typeof value?.text === 'string' ? value.text.trim() : '';
+  const covered = Number(value?.coveredThroughMessageId);
+  if (!text || !Number.isFinite(covered) || covered < 0) {
+    return {
+      text: '',
+      coveredThroughMessageId: -1,
+      sourceHash: '',
+    };
+  }
+  const sourceHash = typeof value?.sourceHash === 'string' ? value.sourceHash : '';
+  return {
+    text,
+    coveredThroughMessageId: Math.floor(covered),
+    sourceHash,
+    ...(typeof value?.updatedAt === 'string' ? { updatedAt: value.updatedAt } : {}),
+    ...(value?.manuallyEdited === true ? { manuallyEdited: true } : {}),
+    ...(value?.stale === true || !sourceHash ? { stale: true } : {}),
+  };
+}
+
+function isCurrentStorySkeleton(value: StoredStorySkeleton | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  const normalized = normalizeStorySkeleton(value);
+  return normalized.text === (typeof value.text === 'string' ? value.text.trim() : '') &&
+    normalized.coveredThroughMessageId === Number(value.coveredThroughMessageId) &&
+    normalized.sourceHash === (typeof value.sourceHash === 'string' ? value.sourceHash : '');
+}
+
 function isStateBase(value: unknown): value is StoredState {
   if (typeof value !== 'object' || value === null) {
     return false;
@@ -420,13 +475,28 @@ function normalizeState(
     vectorFingerprint: typeof stored.vectorFingerprint === 'string' ? stored.vectorFingerprint : '',
     indexedPrefixHash: typeof stored.indexedPrefixHash === 'string' ? stored.indexedPrefixHash : '',
     stageSummary: normalizeStageSummary(stored.stageSummary),
+    storySkeleton: normalizeStorySkeleton(stored.storySkeleton),
     metrics: normalizeMetrics(stored.metrics),
     debugTraces: Array.isArray(stored.debugTraces) ? stored.debugTraces.slice(-50) : [],
     ...(lastInspection ? { lastInspection } : {}),
   };
 }
 
+function markSkeletonStaleForSummary(
+  state: StoryEchoChatState,
+  sourceEndMessageId: number,
+): void {
+  if (
+    state.storySkeleton.text &&
+    sourceEndMessageId <= state.storySkeleton.coveredThroughMessageId
+  ) {
+    state.storySkeleton.stale = true;
+  }
+}
+
 export class MemoryRepository {
+  private readonly settingsRepository = new SettingsRepository();
+
   getExisting(): StoryEchoChatState | null {
     const context = getContext();
     const stored = context.chatMetadata[MODULE_ID];
@@ -458,6 +528,7 @@ export class MemoryRepository {
       typeof stored.vectorFingerprint !== 'string' ||
       typeof stored.indexedPrefixHash !== 'string' ||
       !isCurrentStageSummary(stored.stageSummary) ||
+      !isCurrentStorySkeleton(stored.storySkeleton) ||
       !stored.metrics ||
       !Array.isArray(stored.debugTraces) ||
       (stored.lastInspection !== undefined &&
@@ -502,6 +573,9 @@ export class MemoryRepository {
         metrics: createMetrics(),
         debugTraces: [],
       };
+      if (branchState.storySkeleton.text) {
+        branchState.storySkeleton.stale = true;
+      }
       delete branchState.lastInspection;
       context.chatMetadata[MODULE_ID] = branchState;
       await context.saveMetadata();
@@ -684,6 +758,7 @@ export class MemoryRepository {
       updatedAt: new Date().toISOString(),
       manuallyEdited: true,
     };
+    markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
     const latest = state.stageSummary.entries.at(-1);
     state.stageSummary = {
       entries: state.stageSummary.entries,
@@ -718,6 +793,7 @@ export class MemoryRepository {
       throw new Error('要删除的阶段总结不存在，可能已在其他页面删除或失效。');
     }
     const entries = [...state.stageSummary.entries];
+    markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
     if (index === entries.length - 1) {
       entries.pop();
     } else {
@@ -734,6 +810,24 @@ export class MemoryRepository {
       coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
       coveredThroughHash: latest?.sourceHash ?? '',
       ...(latest ? { updatedAt: latest.updatedAt } : {}),
+    };
+    delete state.lastInspection;
+    await this.save(state);
+    return state;
+  }
+
+  async updateStorySkeleton(edit: StorySkeletonEdit): Promise<StoryEchoChatState> {
+    const state = await this.getOrCreate();
+    if (!state || !state.storySkeleton.text) {
+      throw new Error('当前还没有可编辑的全局剧情骨架。');
+    }
+    const maxTokens = this.settingsRepository.get().summary.skeletonMaxTokens;
+    const text = normalizeStorySkeletonText(edit.text, maxTokens);
+    state.storySkeleton = {
+      ...state.storySkeleton,
+      text,
+      updatedAt: new Date().toISOString(),
+      manuallyEdited: true,
     };
     delete state.lastInspection;
     await this.save(state);

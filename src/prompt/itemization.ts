@@ -257,7 +257,9 @@ async function buildBreakdown(
   if (!rawText.trim()) {
     return null;
   }
-  const summaryText = taggedBlocks(rawText, 'story_echo_summary');
+  const skeletonText = taggedBlocks(rawText, 'story_echo_skeleton');
+  const stageSummaryText = taggedBlocks(rawText, 'story_echo_summary');
+  const summaryText = [skeletonText, stageSummaryText].filter(Boolean).join('\n');
   const stateText = taggedBlocks(rawText, 'story_echo_current_state');
   const recallText = taggedBlocks(rawText, 'story_echo_recall');
   const characterText = [
@@ -270,7 +272,8 @@ async function buildBreakdown(
   const examplesText = stringValue(record['examplesString']);
   const anchorsText = stringValue(record['allAnchors']);
   const anchorsWithoutKnown = removeExactBlocks(anchorsText, [
-    summaryText,
+    skeletonText,
+    stageSummaryText,
     stateText,
     recallText,
     ...(worldInfoText && anchorsText.includes(worldInfoText) ? [worldInfoText] : []),

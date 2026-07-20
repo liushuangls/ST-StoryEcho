@@ -115,7 +115,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         { role: 'user', content: request.prompt },
       ],
       model,
-      max_tokens: Math.min(8_192, Math.max(16, Math.floor(request.maxTokens ?? 8_192))),
+      max_tokens: Math.min(10_000, Math.max(16, Math.floor(request.maxTokens ?? 8_192))),
       temperature: 0,
       top_p: 1,
       stream: false,

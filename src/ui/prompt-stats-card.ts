@@ -12,7 +12,7 @@ const CATEGORY_PRESENTATION: Record<PromptTokenCategoryId, { label: string; clas
   'world-info': { label: '世界书', className: 'world-info' },
   examples: { label: '示例对话', className: 'examples' },
   'recent-context': { label: '最近原文上下文', className: 'recent-context' },
-  'story-echo-summary': { label: 'StoryEcho 阶段总结', className: 'story-echo-summary' },
+  'story-echo-summary': { label: 'StoryEcho 骨架与阶段总结', className: 'story-echo-summary' },
   'story-echo-state': { label: 'StoryEcho 当前状态校正', className: 'story-echo-state' },
   'story-echo-recall': { label: 'StoryEcho 动态召回', className: 'story-echo-recall' },
   'other-prompts': { label: '其他提示与扩展注入', className: 'other-prompts' },
@@ -42,7 +42,7 @@ export function promptStatsCardTemplate(): string {
         <div id="story-echo-prompt-stats-content" hidden>
           <div class="story-echo-token-story-heading">
             <strong>StoryEcho 本轮发送</strong>
-            <span>最近原文、阶段总结与剧情元数据</span>
+            <span>最近原文、全局骨架、阶段总结与剧情元数据</span>
           </div>
           <div class="story-echo-token-story-grid">
             <div class="story-echo-token-story-stat">
@@ -50,7 +50,7 @@ export function promptStatsCardTemplate(): string {
               <strong id="story-echo-token-context">—</strong>
             </div>
             <div class="story-echo-token-story-stat">
-              <span>阶段总结</span>
+              <span>骨架与阶段总结</span>
               <strong id="story-echo-token-summary">—</strong>
             </div>
             <div class="story-echo-token-story-stat">

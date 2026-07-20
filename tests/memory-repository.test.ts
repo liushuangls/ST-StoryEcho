@@ -86,6 +86,11 @@ describe('MemoryRepository migration', () => {
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     });
+    expect(state?.storySkeleton).toEqual({
+      text: '',
+      coveredThroughMessageId: -1,
+      sourceHash: '',
+    });
     expect(state?.metrics.actions.SUPERSEDE).toBe(0);
     expect(state?.debugTraces).toEqual([]);
     expect(state?.memories[0]?.sourceHistory).toEqual([state?.memories[0]?.source]);
@@ -329,6 +334,46 @@ describe('MemoryRepository stage summary editing', () => {
     expect(state.stageSummary.coveredThroughMessageId).toBe(3);
     expect(state.stageSummary.coveredThroughHash).toBe('summary-b');
     expect(saveMetadata).toHaveBeenCalledOnce();
+  });
+
+  it('marks a covering skeleton stale when an archived stage summary is edited', async () => {
+    const { context } = contextWithSummaries();
+    const stored = context.chatMetadata['story_echo'] as ReturnType<typeof chatState>;
+    stored.storySkeleton = {
+      text: '【核心设定与身份】\n旧骨架\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无',
+      coveredThroughMessageId: 1,
+      sourceHash: 'skeleton-source',
+    };
+
+    const state = await new MemoryRepository().updateStageSummaryEntry(0, {
+      text: sectionedSummary('第一阶段由用户人工修正。'),
+    });
+
+    expect(state.storySkeleton.stale).toBe(true);
+  });
+
+  it('allows editing a skeleton without changing coverage and rejects deletion by blanking it', async () => {
+    const { context } = contextWithSummaries();
+    const stored = context.chatMetadata['story_echo'] as ReturnType<typeof chatState>;
+    stored.storySkeleton = {
+      text: '【核心设定与身份】\n旧骨架\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无',
+      coveredThroughMessageId: 1,
+      sourceHash: 'skeleton-source',
+    };
+    const edited = '【核心设定与身份】\n人工骨架\n【主线因果与阶段脉络】\n无\n【长期关系、承诺与目标】\n无\n【当前全局状态】\n无\n【未决主线与关键线索】\n无\n【重要修正与失效事实】\n无';
+    const repository = new MemoryRepository();
+
+    const state = await repository.updateStorySkeleton({ text: edited });
+
+    expect(state.storySkeleton).toMatchObject({
+      text: edited,
+      coveredThroughMessageId: 1,
+      sourceHash: 'skeleton-source',
+      manuallyEdited: true,
+    });
+    await expect(repository.updateStorySkeleton({ text: '' })).rejects.toThrow(/不能为空/);
+    expect((context.chatMetadata['story_echo'] as ReturnType<typeof chatState>).storySkeleton.text)
+      .toBe(edited);
   });
 
   it('rejects a manual summary that breaks the five-section contract', async () => {

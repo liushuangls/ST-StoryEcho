@@ -13,6 +13,11 @@ import {
 } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
+import { storySkeletonService } from '../summary/skeleton-service';
+import {
+  pendingArchivedStageSummaryEntries,
+  storySkeletonUpdateDue,
+} from '../summary/skeleton-state';
 
 const BACKGROUND_DELAY_MS = 3_000;
 const EXTRACTION_BACKOFF_BASE_MS = 30_000;
@@ -148,6 +153,7 @@ export class BackgroundProcessingScheduler {
         ? (): void => {
             markHistoryDirty();
             storyEchoTaskCoordinator.releaseForegroundLease('chat-changed');
+            this.schedule();
           }
         : markHistoryDirty;
       eventSource.on(mutationEventName, mutationHandler);
@@ -176,6 +182,10 @@ export class BackgroundProcessingScheduler {
       registeredNames.add(releaseEventName);
     }
     logger.info('已启用回复后的后台剧情整理。');
+    // Bootstrap an already-open long chat after the same quiet period used for
+    // reply-complete work. This creates the first skeleton without requiring a
+    // new role-play turn.
+    this.schedule();
   }
 
   unregister(): void {
@@ -266,15 +276,11 @@ export class BackgroundProcessingScheduler {
       return;
     }
 
-    const targetEndMessageId = backgroundTargetMessageId(getContext().chat, settings);
-    if (targetEndMessageId < 0) {
-      return;
-    }
-
     let state = await this.memoryRepository.getOrCreate();
     if (!state) {
       return;
     }
+    const targetEndMessageId = backgroundTargetMessageId(getContext().chat, settings);
     if (!settings.memory.enabled) {
       this.extractionCooldown = undefined;
       this.verifiedPrefix = undefined;
@@ -282,8 +288,15 @@ export class BackgroundProcessingScheduler {
         state = await stageSummaryService.reconcileHistory(state) ?? state;
         this.historyRequiresReconcile = false;
       }
-      if (state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
-        await stageSummaryService.processNextThrough(targetEndMessageId);
+      if (targetEndMessageId >= 0 && state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
+        state = (await stageSummaryService.processNextThrough(targetEndMessageId)).state ?? state;
+      }
+      state = await storySkeletonService.reconcile(state) ?? state;
+      const skeletonResult = await storySkeletonService.processNextIfNeeded();
+      state = skeletonResult.state ?? state;
+      const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
+      if (storySkeletonUpdateDue(state, remaining)) {
+        this.schedule();
       }
       emitDiagnosticsUpdated();
       return;
@@ -309,7 +322,7 @@ export class BackgroundProcessingScheduler {
       };
     }
 
-    if (state.indexedThroughMessageId < targetEndMessageId) {
+    if (targetEndMessageId >= 0 && state.indexedThroughMessageId < targetEndMessageId) {
       const extractionRevision = this.historyRevision;
       const extractionStart = state.indexedThroughMessageId + 1;
       const cooldown = this.extractionCooldown;
@@ -375,8 +388,15 @@ export class BackgroundProcessingScheduler {
         logger.warn('后台同步待处理向量失败，将在后续回复重试。', error);
       }
     }
-    if (state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
-      await stageSummaryService.processNextThrough(targetEndMessageId);
+    if (targetEndMessageId >= 0 && state.stageSummary.coveredThroughMessageId < targetEndMessageId) {
+      state = (await stageSummaryService.processNextThrough(targetEndMessageId)).state ?? state;
+    }
+    state = await storySkeletonService.reconcile(state) ?? state;
+    const skeletonResult = await storySkeletonService.processNextIfNeeded();
+    state = skeletonResult.state ?? state;
+    const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
+    if (storySkeletonUpdateDue(state, remaining)) {
+      this.schedule();
     }
     emitDiagnosticsUpdated();
   }

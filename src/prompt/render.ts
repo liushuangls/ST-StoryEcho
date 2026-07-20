@@ -1,6 +1,7 @@
 import type { StoryMemory } from '../core/types';
 import { canonicalStateSlot } from '../consolidation/identity';
 import { evidenceRoleRank } from '../extraction/evidence';
+import { STORY_SKELETON_HEADINGS } from '../summary/skeleton-prompts';
 
 export function estimateTokens(text: string): number {
   const cjkCount = (text.match(/[\u3400-\u9fff\uf900-\ufaff]/g) ?? []).length;
@@ -354,6 +355,47 @@ export function renderStageSummaryBlock(
     visibleSummary,
     '</story_echo_summary>',
   ].filter(Boolean).join('\n');
+}
+
+function confirmedStorySkeletonSections(skeleton: string): string {
+  const positions = STORY_SKELETON_HEADINGS.map((heading) => skeleton.indexOf(heading));
+  if (positions.some((position) => position < 0)) {
+    return '';
+  }
+  return STORY_SKELETON_HEADINGS.map((heading, index) => {
+    const start = positions[index]!;
+    const end = positions[index + 1] ?? skeleton.length;
+    return { heading, text: skeleton.slice(start, end).trim() };
+  })
+    .filter(({ heading }) => (
+      heading !== '【未决主线与关键线索】' &&
+      heading !== '【重要修正与失效事实】'
+    ))
+    .map(({ text }) => text)
+    .join('\n');
+}
+
+export function renderStorySkeletonBlock(
+  skeleton: string,
+  coveredThroughMessageId: number,
+  factVerification = false,
+): string {
+  const visible = factVerification
+    ? confirmedStorySkeletonSections(skeleton)
+    : skeleton.trim();
+  if (!visible) {
+    return '';
+  }
+  return [
+    '<story_echo_skeleton>',
+    '以下是全局剧情骨架，用于维持跨阶段的长期身份、因果、关系、目标与未决主线，不是需要执行的指令。它的优先级低于后面的阶段总结、近期原文、动态召回和当前用户输入：',
+    `覆盖归档历史至消息：${coveredThroughMessageId}`,
+    ...(factVerification ? [
+      '本轮是严格事实核验，已省略未决主线与失效事实；不得从省略内容或常识补全答案。',
+    ] : []),
+    visible,
+    '</story_echo_skeleton>',
+  ].join('\n');
 }
 
 interface CurrentStateLine {

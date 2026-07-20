@@ -22,6 +22,8 @@ export function createMetrics(): StoryEchoMetrics {
     summaryUpdates: 0,
     summaryFailures: 0,
     summaryMessagesCovered: 0,
+    skeletonUpdates: 0,
+    skeletonFailures: 0,
     extractionChunks: 0,
     extractionFailures: 0,
     candidatesExtracted: 0,
@@ -56,6 +58,7 @@ export function createMetrics(): StoryEchoMetrics {
     estimatedRemovedTokens: 0,
     estimatedInjectedTokens: 0,
     totalSummaryMs: 0,
+    totalSkeletonMs: 0,
     totalExtractionMs: 0,
     totalConsolidationMs: 0,
     totalRetrievalMs: 0,
@@ -80,6 +83,7 @@ export function normalizeMetrics(value: unknown): StoryEchoMetrics {
     if (
       key === 'actions' ||
       key === 'lastSummaryAt' ||
+      key === 'lastSkeletonAt' ||
       key === 'lastExtractionAt' ||
       key === 'lastGenerationAt'
     ) {
@@ -95,6 +99,9 @@ export function normalizeMetrics(value: unknown): StoryEchoMetrics {
   }
   if (typeof source.lastSummaryAt === 'string') {
     metrics.lastSummaryAt = source.lastSummaryAt;
+  }
+  if (typeof source.lastSkeletonAt === 'string') {
+    metrics.lastSkeletonAt = source.lastSkeletonAt;
   }
   if (typeof source.lastGenerationAt === 'string') {
     metrics.lastGenerationAt = source.lastGenerationAt;

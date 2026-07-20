@@ -33,6 +33,7 @@ export function buildDebugReport(
         entries: state.stageSummary.entries,
         currentStateCoordination: renderCurrentStateCoordinationBlock(state.memories) || null,
       },
+      storySkeleton: state.storySkeleton,
       memoryStatus,
       vectorCount,
       pendingVectorHashes: state.pendingVectorHashes.length,

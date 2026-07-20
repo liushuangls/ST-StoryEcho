@@ -20,7 +20,7 @@ import {
 } from './structured-diagnostics';
 import { repairedJsonText } from './json-repair';
 
-const MAX_RETRY_TOKENS = 8_192;
+const MAX_RETRY_TOKENS = 10_000;
 
 function yieldBackgroundAtRetryBoundary(): void {
   if (storyEchoTaskCoordinator.shouldYieldBackgroundToForeground()) {

@@ -35,6 +35,12 @@ import {
 import { SettingsRepository } from '../settings/repository';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { stageSummaryService } from '../summary/service';
+import { storySkeletonService } from '../summary/skeleton-service';
+import {
+  archivedStageSummaryEntries,
+  pendingArchivedStageSummaryEntries,
+  storySkeletonIsUsable,
+} from '../summary/skeleton-state';
 import type { VectorQueryResult } from '../vector/adapter';
 import { resolveVectorConfig } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
@@ -45,6 +51,7 @@ import {
   estimateTokens,
   renderCurrentStateCoordinationBlock,
   renderMemoryBlock,
+  renderStorySkeletonBlock,
   renderStageSummaryBlock,
   selectWithinBudget,
 } from './render';
@@ -180,6 +187,7 @@ async function prepareStoryEchoPrompt(
     if (!state) {
       return;
     }
+    state = await storySkeletonService.reconcile(state) ?? state;
 
     const warnings: string[] = [];
     const desiredCoveredThrough = minimumSourceWindow.retainedStartIndex - 1;
@@ -442,26 +450,39 @@ async function prepareStoryEchoPrompt(
       : '';
     const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
     const activeStageSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
+    const archivedSummaries = archivedStageSummaryEntries(state, summaryWindowSize);
+    const pendingArchivedSummaries = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
+    const recentSummaryPool = activeStageSummaries.slice(-summaryWindowSize);
     const summaryPool = storyPhaseScope.boundaryMessageId !== null &&
       !storyPhaseScope.earlierPhaseQuery
-      ? activeStageSummaries.filter((entry) => (
+      ? recentSummaryPool.filter((entry) => (
           entry.sourceStartMessageId >= storyPhaseScope.boundaryMessageId!
         ))
-      : activeStageSummaries;
-    if (summaryPool.length < activeStageSummaries.length) {
+      : recentSummaryPool;
+    if (summaryPool.length < recentSummaryPool.length) {
       recordDebugTrace(state, settings.debug, 'retrieval', '当前剧情阶段已省略较早阶段总结。', {
         boundaryMessageId: storyPhaseScope.boundaryMessageId ?? -1,
-        excludedSummaries: activeStageSummaries.length - summaryPool.length,
+        excludedSummaries: recentSummaryPool.length - summaryPool.length,
       });
     }
-    const summaryEntries = summaryPool.slice(-summaryWindowSize);
+    const summaryEntries = [...pendingArchivedSummaries, ...summaryPool];
+    const skeletonBlock = storySkeletonIsUsable(state)
+      ? renderStorySkeletonBlock(
+          state.storySkeleton.text,
+          state.storySkeleton.coveredThroughMessageId,
+          factVerification,
+        )
+      : '';
+    if (state.storySkeleton.text && state.storySkeleton.stale) {
+      warnings.push('全局剧情骨架来源已失效，重建成功前改为携带尚未合并的阶段总结。');
+    }
     const summaryBlocks = summaryEntries.map((entry) => renderStageSummaryBlock(
       entry.text,
       entry.sourceStartMessageId,
       entry.sourceEndMessageId,
       factVerification,
     )).filter(Boolean);
-    const currentStateBlock = memoryEnabled && summaryEntries.length > 0
+    const currentStateBlock = memoryEnabled && (summaryEntries.length > 0 || skeletonBlock)
       ? renderCurrentStateCoordinationBlock(
           activeScopedMemories.filter((memory) => !shadowedIds.has(memory.id)),
           600,
@@ -470,7 +491,7 @@ async function prepareStoryEchoPrompt(
         )
       : '';
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
-    const estimatedSummaryTokens = summaryBlocks.reduce(
+    const estimatedSummaryTokens = (skeletonBlock ? estimateTokens(skeletonBlock) : 0) + summaryBlocks.reduce(
       (total, block) => total + estimateTokens(block),
       0,
     ) + (currentStateBlock ? estimateTokens(currentStateBlock) : 0);
@@ -481,11 +502,12 @@ async function prepareStoryEchoPrompt(
     const retainedAnchor = chat[window.retainedStartIndex];
     removeMessagesAtIndices(chat, window.removableIndices);
 
-    if (summaryBlocks.length > 0 || currentStateBlock) {
+    if (skeletonBlock || summaryBlocks.length > 0 || currentStateBlock) {
       const anchorIndex = retainedAnchor ? chat.indexOf(retainedAnchor) : 0;
       chat.splice(
         Math.max(0, anchorIndex),
         0,
+        ...(skeletonBlock ? [requestSystemMessage(skeletonBlock, 'summary')] : []),
         ...summaryBlocks.map((block) => requestSystemMessage(block, 'summary')),
         ...(currentStateBlock ? [requestSystemMessage(currentStateBlock, 'state')] : []),
       );
@@ -528,6 +550,10 @@ async function prepareStoryEchoPrompt(
       summaryEntriesStored: activeStageSummaries.length,
       summaryEntriesDeleted: state.stageSummary.entries.length - activeStageSummaries.length,
       summaryEntriesInjected: summaryBlocks.length,
+      summaryEntriesArchived: archivedSummaries.length,
+      skeletonInjected: Boolean(skeletonBlock),
+      skeletonCoveredThrough: state.storySkeleton.coveredThroughMessageId,
+      skeletonPendingEntries: pendingArchivedSummaries.length,
       intentVectorResults: vectorResults.intent.length,
       sceneVectorResults: vectorResults.scene.length,
       uniqueVectorResults: uniqueVectorResultCount,
