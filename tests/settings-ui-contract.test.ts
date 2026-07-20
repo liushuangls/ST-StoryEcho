@@ -77,6 +77,30 @@ describe('settings panel editable-control contract', () => {
     expect(manager).toBeLessThan(modelSection);
   });
 
+  it('places the latest prompt token card beside the runtime diagnostics', () => {
+    const status = source.indexOf('<div id="story-echo-status"');
+    const tokenCard = source.indexOf('${promptStatsCardTemplate()}');
+    const summaryDiagnostics = source.indexOf('<summary>当前阶段总结</summary>');
+
+    expect(tokenCard).toBeGreaterThan(status);
+    expect(tokenCard).toBeLessThan(summaryDiagnostics);
+  });
+
+  it('refreshes prompt statistics after completed, stopped, swiped and loaded generations', () => {
+    for (const eventName of [
+      'MESSAGE_RECEIVED',
+      'MESSAGE_SWIPED',
+      'MESSAGE_DELETED',
+      'GENERATION_STOPPED',
+      'GENERATION_ENDED',
+      'ITEMIZED_PROMPTS_LOADED',
+      'ITEMIZED_PROMPTS_SAVED',
+    ]) {
+      expect(source).toContain(`context.event_types?.['${eventName}']`);
+    }
+    expect(source).toContain('promptTokenStatsCard.render(panel)');
+  });
+
   it('uses each field default while a numeric input is temporarily empty', () => {
     const numberValueSource = source.slice(
       source.indexOf('function numberValue('),

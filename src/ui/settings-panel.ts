@@ -40,6 +40,7 @@ import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { normalizeEmbeddingsUrl, normalizeVolcengineMultimodalEmbeddingsUrl } from '../vector/url';
 import { MemoryMetadataManager, memoryManagerTemplate } from './memory-manager';
 import { notify } from './notifications';
+import { promptStatsCardTemplate, promptTokenStatsCard } from './prompt-stats-card';
 import {
   StageSummaryMetadataManager,
   stageSummaryManagerTemplate,
@@ -478,6 +479,7 @@ function panelTemplate(): HTMLElement {
         </div>
 
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
+        ${promptStatsCardTemplate()}
         <details class="story-echo-diagnostics">
           <summary>当前阶段总结</summary>
           <pre id="story-echo-summary">尚无阶段总结。</pre>
@@ -1196,6 +1198,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
   const stats = element<HTMLElement>(panel, '#story-echo-stats');
   const inspection = element<HTMLElement>(panel, '#story-echo-inspection');
   const traces = element<HTMLElement>(panel, '#story-echo-traces');
+  void promptTokenStatsCard.render(panel);
   try {
     const currentSettings = settingsRepository.get();
     syncVisibility(panel, currentSettings);
@@ -1344,7 +1347,24 @@ export async function registerSettingsPanel(): Promise<void> {
   ].filter((eventName): eventName is string => Boolean(eventName)));
   for (const eventName of chatRefreshEvents) {
     context.eventSource?.on(eventName, () => {
+      promptTokenStatsCard.invalidate();
       globalThis.setTimeout(() => void refreshStatus(panel, true), 0);
+    });
+  }
+  const promptRefreshEvents = new Set([
+    context.event_types?.['MESSAGE_RECEIVED'],
+    context.event_types?.['MESSAGE_SWIPED'],
+    context.event_types?.['MESSAGE_DELETED'],
+    context.event_types?.['MESSAGE_SWIPE_DELETED'],
+    context.event_types?.['GENERATION_STOPPED'],
+    context.event_types?.['GENERATION_ENDED'],
+    context.event_types?.['ITEMIZED_PROMPTS_LOADED'],
+    context.event_types?.['ITEMIZED_PROMPTS_SAVED'],
+    context.event_types?.['ITEMIZED_PROMPTS_DELETED'],
+  ].filter((eventName): eventName is string => Boolean(eventName)));
+  for (const eventName of promptRefreshEvents) {
+    context.eventSource?.on(eventName, () => {
+      globalThis.setTimeout(() => void promptTokenStatsCard.render(panel), 0);
     });
   }
   await refreshStatus(panel, true);

@@ -2579,7 +2579,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 7;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.18.0";
+var EXTENSION_VERSION = "0.19.0";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -9171,6 +9171,669 @@ ${current.event}`)) {
   }
 };
 
+// src/prompt/itemization.ts
+var ITEMIZED_PROMPTS_MODULE_URL = "/scripts/itemized-prompts.js";
+var CATEGORY_ORDER = [
+  "system",
+  "character",
+  "world-info",
+  "examples",
+  "recent-context",
+  "story-echo-summary",
+  "story-echo-state",
+  "story-echo-recall",
+  "other-prompts",
+  "unclassified"
+];
+async function loadItemizedPromptsModule() {
+  return import(
+    /* @vite-ignore */
+    ITEMIZED_PROMPTS_MODULE_URL
+  );
+}
+function finiteTokens(value) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
+}
+function messageIdValue(value) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : null;
+}
+function stringValue(value) {
+  return typeof value === "string" ? value : "";
+}
+function promptText(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(promptText).filter(Boolean).join("\n");
+  }
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  const record3 = value;
+  if ("content" in record3) {
+    return promptText(record3["content"]);
+  }
+  if (typeof record3["text"] === "string") {
+    return record3["text"];
+  }
+  return "";
+}
+function taggedBlocks(text2, tag) {
+  const pattern = new RegExp(`<${tag}>[\\s\\S]*?<\\/${tag}>`, "giu");
+  return (text2.match(pattern) ?? []).join("\n");
+}
+function removeExactBlocks(text2, blocks) {
+  let result = text2;
+  for (const block of blocks) {
+    if (block.trim()) {
+      result = result.split(block).join("");
+    }
+  }
+  return result;
+}
+function proportionalAllocation(seeds, budget) {
+  const normalizedBudget = Math.max(0, Math.round(budget));
+  const normalized5 = seeds.map((seed) => ({
+    id: seed.id,
+    tokens: Math.max(0, Math.round(seed.tokens))
+  }));
+  const sum = normalized5.reduce((total, seed) => total + seed.tokens, 0);
+  const result = new Map(normalized5.map((seed) => [seed.id, 0]));
+  if (sum === 0 || normalizedBudget === 0) {
+    return result;
+  }
+  if (sum <= normalizedBudget) {
+    for (const seed of normalized5) {
+      result.set(seed.id, seed.tokens);
+    }
+    return result;
+  }
+  const scaled = normalized5.map((seed, index) => {
+    const exact = seed.tokens * normalizedBudget / sum;
+    return { id: seed.id, index, floor: Math.floor(exact), remainder: exact - Math.floor(exact) };
+  });
+  let remaining = normalizedBudget - scaled.reduce((total, seed) => total + seed.floor, 0);
+  scaled.sort((left, right) => right.remainder - left.remainder || left.index - right.index);
+  for (const seed of scaled) {
+    const extra = remaining > 0 ? 1 : 0;
+    result.set(seed.id, seed.floor + extra);
+    remaining -= extra;
+  }
+  return result;
+}
+function allocationTotal(allocation) {
+  return [...allocation.values()].reduce((total, tokens) => total + tokens, 0);
+}
+function latestRecord(value, latestChatMessageId) {
+  if (!Array.isArray(value) || latestChatMessageId < 0) {
+    return null;
+  }
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    const candidate = value[index];
+    if (!candidate || typeof candidate !== "object") {
+      continue;
+    }
+    const record3 = candidate;
+    const messageId = messageIdValue(record3.mesId);
+    if (messageId === null || messageId > latestChatMessageId) {
+      continue;
+    }
+    return record3;
+  }
+  return null;
+}
+function categoryList(values, total) {
+  const normalizedTotal = Math.max(0, Math.round(total));
+  return CATEGORY_ORDER.map((id) => {
+    const tokens = Math.max(0, Math.round(values[id] ?? 0));
+    return {
+      id,
+      tokens,
+      percentage: normalizedTotal > 0 ? tokens * 100 / normalizedTotal : 0
+    };
+  }).filter((category) => category.tokens > 0);
+}
+function connectionMetadata(record3, context, messageId) {
+  const message = context.chat[messageId];
+  const extra = message?.extra ?? {};
+  return {
+    api: stringValue(extra["api"]) || stringValue(record3["main_api"]),
+    model: stringValue(extra["model"]),
+    tokenizer: stringValue(record3["tokenizer"]),
+    preset: stringValue(record3["presetName"])
+  };
+}
+async function buildBreakdown(record3, context) {
+  const tokenCache = /* @__PURE__ */ new Map();
+  const count = (text2) => {
+    const normalized5 = text2.trim();
+    if (!normalized5) {
+      return Promise.resolve({ tokens: 0, estimated: false });
+    }
+    const cached = tokenCache.get(normalized5);
+    if (cached) {
+      return cached;
+    }
+    const pending = (async () => {
+      if (context.getTokenCountAsync) {
+        try {
+          const tokens = await context.getTokenCountAsync(normalized5, 0);
+          if (Number.isFinite(tokens) && tokens >= 0) {
+            return { tokens: Math.round(tokens), estimated: false };
+          }
+        } catch {
+        }
+      }
+      return { tokens: estimateTokens(normalized5), estimated: true };
+    })();
+    tokenCache.set(normalized5, pending);
+    return pending;
+  };
+  const rawText = promptText(record3.rawPrompt ?? record3["finalPrompt"]);
+  if (!rawText.trim()) {
+    return null;
+  }
+  const summaryText = taggedBlocks(rawText, "story_echo_summary");
+  const stateText = taggedBlocks(rawText, "story_echo_current_state");
+  const recallText = taggedBlocks(rawText, "story_echo_recall");
+  const characterText = [
+    stringValue(record3["charDescription"]),
+    stringValue(record3["charPersonality"]),
+    stringValue(record3["scenarioText"]),
+    stringValue(record3["userPersona"])
+  ].filter(Boolean).join("\n");
+  const worldInfoText = stringValue(record3["worldInfoString"]);
+  const examplesText = stringValue(record3["examplesString"]);
+  const anchorsText = stringValue(record3["allAnchors"]);
+  const anchorsWithoutKnown = removeExactBlocks(anchorsText, [
+    summaryText,
+    stateText,
+    recallText,
+    ...worldInfoText && anchorsText.includes(worldInfoText) ? [worldInfoText] : []
+  ]);
+  const instructionText = [
+    stringValue(record3["instruction"]),
+    stringValue(record3["generatedPromptCache"]),
+    stringValue(record3["promptBias"])
+  ].filter(Boolean).join("\n");
+  const storyText = stringValue(record3["storyString"]);
+  const chatText = stringValue(record3["mesSendString"]);
+  const counted = await Promise.all([
+    count(rawText),
+    count(summaryText),
+    count(stateText),
+    count(recallText),
+    count(characterText),
+    count(worldInfoText),
+    count(examplesText),
+    count(anchorsWithoutKnown),
+    count(instructionText),
+    count(storyText),
+    count(chatText)
+  ]);
+  const [
+    raw,
+    summary,
+    state,
+    recall,
+    character,
+    worldInfo,
+    examples,
+    otherAnchors,
+    instruction,
+    story,
+    chat
+  ] = counted;
+  const counterEstimated = counted.some((value) => value.estimated);
+  const mainApi = stringValue(record3["main_api"]);
+  const storedTotal = finiteTokens(record3["oaiTotalTokens"]);
+  const hasChatCompletionBreakdown = mainApi === "openai" && storedTotal > 0;
+  const messageId = messageIdValue(record3.mesId);
+  if (messageId === null) {
+    return null;
+  }
+  const metadata = connectionMetadata(record3, context, messageId);
+  if (hasChatCompletionBreakdown) {
+    const total2 = storedTotal;
+    const systemSeed = [
+      "oaiStartTokens",
+      "oaiMainTokens",
+      "oaiNsfwTokens",
+      "oaiJailbreakTokens",
+      "oaiImpersonateTokens",
+      "oaiNudgeTokens",
+      "oaiBiasTokens"
+    ].reduce((sum, key) => sum + finiteTokens(record3[key]), 0);
+    const examplesSeed = finiteTokens(record3["oaiExamplesTokens"]);
+    const conversationSeed = finiteTokens(record3["oaiConversationTokens"]);
+    const fixed = proportionalAllocation([
+      { id: "system", tokens: systemSeed },
+      { id: "examples", tokens: examplesSeed },
+      { id: "conversation", tokens: conversationSeed }
+    ], total2);
+    const systemTokens = fixed.get("system") ?? 0;
+    const exampleTokens = fixed.get("examples") ?? 0;
+    const conversationTokens = fixed.get("conversation") ?? 0;
+    const promptBudget = Math.max(0, total2 - allocationTotal(fixed));
+    const promptParts = proportionalAllocation([
+      { id: "character", tokens: character.tokens },
+      { id: "world-info", tokens: worldInfo.tokens }
+    ], promptBudget);
+    const characterTokens = promptParts.get("character") ?? 0;
+    const worldInfoTokens = promptParts.get("world-info") ?? 0;
+    const otherPromptTokens = Math.max(0, promptBudget - allocationTotal(promptParts));
+    const conversationParts = proportionalAllocation([
+      { id: "story-echo-summary", tokens: summary.tokens },
+      { id: "story-echo-state", tokens: state.tokens },
+      { id: "story-echo-recall", tokens: recall.tokens },
+      { id: "other-prompts", tokens: otherAnchors.tokens }
+    ], conversationTokens);
+    const summaryTokens2 = conversationParts.get("story-echo-summary") ?? 0;
+    const stateTokens2 = conversationParts.get("story-echo-state") ?? 0;
+    const recallTokens2 = conversationParts.get("story-echo-recall") ?? 0;
+    const conversationOtherTokens = conversationParts.get("other-prompts") ?? 0;
+    const recentContextTokens = Math.max(0, conversationTokens - allocationTotal(conversationParts));
+    const categories = categoryList({
+      system: systemTokens,
+      character: characterTokens,
+      "world-info": worldInfoTokens,
+      examples: exampleTokens,
+      "recent-context": recentContextTokens,
+      "story-echo-summary": summaryTokens2,
+      "story-echo-state": stateTokens2,
+      "story-echo-recall": recallTokens2,
+      "other-prompts": otherPromptTokens + conversationOtherTokens
+    }, total2);
+    return {
+      messageId,
+      totalTokens: total2,
+      categories,
+      storyEcho: {
+        contextTokens: recentContextTokens,
+        summaryTokens: summaryTokens2,
+        metadataTokens: stateTokens2 + recallTokens2,
+        currentStateTokens: stateTokens2,
+        recallTokens: recallTokens2
+      },
+      ...metadata,
+      detailed: true,
+      estimated: counterEstimated
+    };
+  }
+  const total = raw.tokens;
+  if (total <= 0) {
+    return null;
+  }
+  if (mainApi !== "openai" && (story.tokens > 0 || chat.tokens > 0)) {
+    const outer = proportionalAllocation([
+      { id: "story", tokens: story.tokens },
+      { id: "examples", tokens: examples.tokens },
+      { id: "chat", tokens: chat.tokens }
+    ], total);
+    const storyBudget = outer.get("story") ?? 0;
+    const examplesBudget = outer.get("examples") ?? 0;
+    const chatBudget = outer.get("chat") ?? 0;
+    const storyParts = proportionalAllocation([
+      { id: "system", tokens: instruction.tokens },
+      { id: "character", tokens: character.tokens },
+      { id: "world-info", tokens: worldInfo.tokens }
+    ], storyBudget);
+    const chatParts = proportionalAllocation([
+      { id: "story-echo-summary", tokens: summary.tokens },
+      { id: "story-echo-state", tokens: state.tokens },
+      { id: "story-echo-recall", tokens: recall.tokens },
+      { id: "other-prompts", tokens: otherAnchors.tokens }
+    ], chatBudget);
+    const summaryTokens2 = chatParts.get("story-echo-summary") ?? 0;
+    const stateTokens2 = chatParts.get("story-echo-state") ?? 0;
+    const recallTokens2 = chatParts.get("story-echo-recall") ?? 0;
+    const recentContextTokens = Math.max(0, chatBudget - allocationTotal(chatParts));
+    const unclassified2 = Math.max(
+      0,
+      total - allocationTotal(outer) + storyBudget - allocationTotal(storyParts)
+    );
+    const categories = categoryList({
+      system: storyParts.get("system") ?? 0,
+      character: storyParts.get("character") ?? 0,
+      "world-info": storyParts.get("world-info") ?? 0,
+      examples: examplesBudget,
+      "recent-context": recentContextTokens,
+      "story-echo-summary": summaryTokens2,
+      "story-echo-state": stateTokens2,
+      "story-echo-recall": recallTokens2,
+      "other-prompts": chatParts.get("other-prompts") ?? 0,
+      unclassified: unclassified2
+    }, total);
+    return {
+      messageId,
+      totalTokens: total,
+      categories,
+      storyEcho: {
+        contextTokens: recentContextTokens,
+        summaryTokens: summaryTokens2,
+        metadataTokens: stateTokens2 + recallTokens2,
+        currentStateTokens: stateTokens2,
+        recallTokens: recallTokens2
+      },
+      ...metadata,
+      detailed: true,
+      estimated: true
+    };
+  }
+  const fallbackParts = proportionalAllocation([
+    { id: "system", tokens: instruction.tokens },
+    { id: "character", tokens: character.tokens },
+    { id: "world-info", tokens: worldInfo.tokens },
+    { id: "examples", tokens: examples.tokens },
+    { id: "story-echo-summary", tokens: summary.tokens },
+    { id: "story-echo-state", tokens: state.tokens },
+    { id: "story-echo-recall", tokens: recall.tokens },
+    { id: "other-prompts", tokens: otherAnchors.tokens }
+  ], total);
+  const summaryTokens = fallbackParts.get("story-echo-summary") ?? 0;
+  const stateTokens = fallbackParts.get("story-echo-state") ?? 0;
+  const recallTokens = fallbackParts.get("story-echo-recall") ?? 0;
+  const unclassified = Math.max(0, total - allocationTotal(fallbackParts));
+  return {
+    messageId,
+    totalTokens: total,
+    categories: categoryList({
+      system: fallbackParts.get("system") ?? 0,
+      character: fallbackParts.get("character") ?? 0,
+      "world-info": fallbackParts.get("world-info") ?? 0,
+      examples: fallbackParts.get("examples") ?? 0,
+      "story-echo-summary": summaryTokens,
+      "story-echo-state": stateTokens,
+      "story-echo-recall": recallTokens,
+      "other-prompts": fallbackParts.get("other-prompts") ?? 0,
+      unclassified
+    }, total),
+    storyEcho: {
+      contextTokens: null,
+      summaryTokens,
+      metadataTokens: stateTokens + recallTokens,
+      currentStateTokens: stateTokens,
+      recallTokens
+    },
+    ...metadata,
+    detailed: false,
+    estimated: true
+  };
+}
+var PromptItemizationService = class {
+  constructor(loader = loadItemizedPromptsModule) {
+    this.loader = loader;
+  }
+  cachedChatId = "";
+  cachedChatLength = -1;
+  cachedItemCount = -1;
+  cachedRecord = null;
+  cachedRawPrompt;
+  cachedBreakdown = null;
+  pendingChatId = "";
+  pendingChatLength = -1;
+  pendingItemCount = -1;
+  pendingRecord = null;
+  pendingRawPrompt;
+  pendingBreakdown = null;
+  async latest(context = getContext()) {
+    const chatId = getCurrentChatId(context) ?? "";
+    if (!chatId || context.chat.length === 0) {
+      this.clearCache();
+      return null;
+    }
+    const module = await this.loader();
+    const records = Array.isArray(module.itemizedPrompts) ? module.itemizedPrompts : [];
+    const record3 = latestRecord(records, context.chat.length - 1);
+    if (!record3) {
+      this.cachedChatId = chatId;
+      this.cachedChatLength = context.chat.length;
+      this.cachedItemCount = records.length;
+      this.cachedRecord = null;
+      this.cachedRawPrompt = void 0;
+      this.cachedBreakdown = null;
+      return null;
+    }
+    const rawPrompt = record3.rawPrompt ?? record3["finalPrompt"];
+    if (chatId === this.cachedChatId && context.chat.length === this.cachedChatLength && records.length === this.cachedItemCount && record3 === this.cachedRecord && rawPrompt === this.cachedRawPrompt) {
+      return this.cachedBreakdown;
+    }
+    if (chatId === this.pendingChatId && context.chat.length === this.pendingChatLength && records.length === this.pendingItemCount && record3 === this.pendingRecord && rawPrompt === this.pendingRawPrompt && this.pendingBreakdown) {
+      return this.pendingBreakdown;
+    }
+    const pending = buildBreakdown(record3, context);
+    this.pendingChatId = chatId;
+    this.pendingChatLength = context.chat.length;
+    this.pendingItemCount = records.length;
+    this.pendingRecord = record3;
+    this.pendingRawPrompt = rawPrompt;
+    this.pendingBreakdown = pending;
+    let breakdown;
+    try {
+      breakdown = await pending;
+    } catch (error) {
+      if (this.pendingBreakdown === pending) {
+        this.clearPending();
+      }
+      throw error;
+    }
+    if (this.pendingBreakdown !== pending) {
+      return breakdown;
+    }
+    this.clearPending();
+    if ((getCurrentChatId(context) ?? "") !== chatId) {
+      return null;
+    }
+    this.cachedChatId = chatId;
+    this.cachedChatLength = context.chat.length;
+    this.cachedItemCount = records.length;
+    this.cachedRecord = record3;
+    this.cachedRawPrompt = rawPrompt;
+    this.cachedBreakdown = breakdown;
+    return breakdown;
+  }
+  clearCache() {
+    this.cachedChatId = "";
+    this.cachedChatLength = -1;
+    this.cachedItemCount = -1;
+    this.cachedRecord = null;
+    this.cachedRawPrompt = void 0;
+    this.cachedBreakdown = null;
+    this.clearPending();
+  }
+  clearPending() {
+    this.pendingChatId = "";
+    this.pendingChatLength = -1;
+    this.pendingItemCount = -1;
+    this.pendingRecord = null;
+    this.pendingRawPrompt = void 0;
+    this.pendingBreakdown = null;
+  }
+};
+var promptItemizationService = new PromptItemizationService();
+
+// src/ui/prompt-stats-card.ts
+var CATEGORY_PRESENTATION = {
+  system: { label: "\u7CFB\u7EDF\u63D0\u793A\u4E0E\u9884\u8BBE", className: "system" },
+  character: { label: "\u89D2\u8272\u5361\u4E0E Persona", className: "character" },
+  "world-info": { label: "\u4E16\u754C\u4E66", className: "world-info" },
+  examples: { label: "\u793A\u4F8B\u5BF9\u8BDD", className: "examples" },
+  "recent-context": { label: "\u6700\u8FD1\u539F\u6587\u4E0A\u4E0B\u6587", className: "recent-context" },
+  "story-echo-summary": { label: "StoryEcho \u9636\u6BB5\u603B\u7ED3", className: "story-echo-summary" },
+  "story-echo-state": { label: "StoryEcho \u5F53\u524D\u72B6\u6001\u6821\u6B63", className: "story-echo-state" },
+  "story-echo-recall": { label: "StoryEcho \u52A8\u6001\u53EC\u56DE", className: "story-echo-recall" },
+  "other-prompts": { label: "\u5176\u4ED6\u63D0\u793A\u4E0E\u6269\u5C55\u6CE8\u5165", className: "other-prompts" },
+  unclassified: { label: "\u672A\u5206\u7C7B\u4E0E\u6D88\u606F\u5F00\u9500", className: "unclassified" }
+};
+function promptStatsCardTemplate() {
+  return `
+    <details id="story-echo-prompt-stats-card" class="story-echo-section story-echo-collapsible story-echo-prompt-stats-card" open>
+      <summary class="story-echo-section-summary">
+        <span class="story-echo-section-summary-main">
+          <i class="fa-solid fa-chart-pie" aria-hidden="true"></i>
+          <span class="story-echo-section-summary-copy">
+            <span class="story-echo-section-summary-title">\u6700\u8FD1\u4E00\u6B21\u8BF7\u6C42\u8F93\u5165 Token \u6784\u6210</span>
+            <span id="story-echo-prompt-stats-subtitle" class="story-echo-section-summary-description">\u53D1\u9001\u4E00\u6761\u6D88\u606F\u540E\u663E\u793A</span>
+          </span>
+        </span>
+        <span class="story-echo-prompt-stats-summary-side">
+          <span id="story-echo-prompt-stats-total" class="story-echo-token-total">\u2014</span>
+          <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+        </span>
+      </summary>
+      <div class="story-echo-section-body story-echo-prompt-stats-body">
+        <div id="story-echo-prompt-stats-empty" class="story-echo-token-empty">
+          \u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709\u53EF\u8BFB\u53D6\u7684\u63D0\u793A\u8BCD\u660E\u7EC6\u3002\u5B8C\u6210\u4E00\u6B21\u89D2\u8272\u56DE\u590D\u540E\u4F1A\u81EA\u52A8\u66F4\u65B0\u3002
+        </div>
+        <div id="story-echo-prompt-stats-content" hidden>
+          <div class="story-echo-token-story-heading">
+            <strong>StoryEcho \u672C\u8F6E\u53D1\u9001</strong>
+            <span>\u6700\u8FD1\u539F\u6587\u3001\u9636\u6BB5\u603B\u7ED3\u4E0E\u5267\u60C5\u5143\u6570\u636E</span>
+          </div>
+          <div class="story-echo-token-story-grid">
+            <div class="story-echo-token-story-stat">
+              <span>\u6700\u8FD1\u539F\u6587\u4E0A\u4E0B\u6587</span>
+              <strong id="story-echo-token-context">\u2014</strong>
+            </div>
+            <div class="story-echo-token-story-stat">
+              <span>\u9636\u6BB5\u603B\u7ED3</span>
+              <strong id="story-echo-token-summary">\u2014</strong>
+            </div>
+            <div class="story-echo-token-story-stat">
+              <span>\u5143\u6570\u636E\u6CE8\u5165</span>
+              <strong id="story-echo-token-metadata">\u2014</strong>
+              <small id="story-echo-token-metadata-detail"></small>
+            </div>
+          </div>
+
+          <div class="story-echo-token-composition-heading">
+            <strong>\u5B8C\u6574\u8BF7\u6C42\u6784\u6210</strong>
+            <span id="story-echo-prompt-stats-meta"></span>
+          </div>
+          <div id="story-echo-token-bar" class="story-echo-token-bar" role="img" aria-label="\u6700\u8FD1\u4E00\u6B21\u8BF7\u6C42 Token \u6784\u6210"></div>
+          <div id="story-echo-token-rows" class="story-echo-token-rows"></div>
+          <p id="story-echo-prompt-stats-note" class="story-echo-hint story-echo-token-note"></p>
+        </div>
+      </div>
+    </details>
+  `;
+}
+function element2(panel, selector) {
+  const found = panel.querySelector(selector);
+  if (!found) {
+    throw new Error(`Token\u7EDF\u8BA1\u63A7\u4EF6\u4E0D\u5B58\u5728\uFF1A${selector}`);
+  }
+  return found;
+}
+function formatTokens(tokens) {
+  return tokens === null ? "\u2014" : `${Math.max(0, Math.round(tokens)).toLocaleString()} Token`;
+}
+function formatPercentage(percentage) {
+  if (percentage > 0 && percentage < 0.1) {
+    return "<0.1%";
+  }
+  return `${percentage.toFixed(1)}%`;
+}
+function categorySegment(category) {
+  const presentation = CATEGORY_PRESENTATION[category.id];
+  const segment = document.createElement("span");
+  segment.className = `story-echo-token-segment story-echo-token-color-${presentation.className}`;
+  segment.style.width = `${Math.max(0, Math.min(100, category.percentage))}%`;
+  segment.title = `${presentation.label}\uFF1A${formatTokens(category.tokens)}\uFF08${formatPercentage(category.percentage)}\uFF09`;
+  return segment;
+}
+function categoryRow(category) {
+  const presentation = CATEGORY_PRESENTATION[category.id];
+  const row = document.createElement("div");
+  row.className = "story-echo-token-row";
+  const label = document.createElement("span");
+  label.className = "story-echo-token-row-label";
+  const dot = document.createElement("span");
+  dot.className = `story-echo-token-dot story-echo-token-color-${presentation.className}`;
+  dot.setAttribute("aria-hidden", "true");
+  const text2 = document.createElement("span");
+  text2.textContent = presentation.label;
+  label.append(dot, text2);
+  const value = document.createElement("span");
+  value.className = "story-echo-token-row-value";
+  const tokens = document.createElement("strong");
+  tokens.textContent = category.tokens.toLocaleString();
+  const percentage = document.createElement("span");
+  percentage.textContent = formatPercentage(category.percentage);
+  value.append(tokens, percentage);
+  row.append(label, value);
+  return row;
+}
+function connectionText(value) {
+  return [
+    `\u6D88\u606F #${value.messageId}`,
+    value.api ? `API\uFF1A${value.api}` : "",
+    value.model,
+    value.preset ? `\u9884\u8BBE\uFF1A${value.preset}` : "",
+    value.tokenizer ? `Tokenizer\uFF1A${value.tokenizer}` : ""
+  ].filter(Boolean).join(" \xB7 ");
+}
+var PromptTokenStatsCard = class {
+  renderSequence = 0;
+  async render(panel) {
+    const sequence = ++this.renderSequence;
+    const requestedChatId = getCurrentChatId() ?? "";
+    let breakdown = null;
+    let errorMessage2 = "";
+    try {
+      breakdown = await promptItemizationService.latest(getContext());
+    } catch (error) {
+      errorMessage2 = error instanceof Error ? error.message : "\u8BFB\u53D6\u63D0\u793A\u8BCD\u660E\u7EC6\u5931\u8D25\u3002";
+    }
+    if (sequence !== this.renderSequence || (getCurrentChatId() ?? "") !== requestedChatId) {
+      return;
+    }
+    if (!breakdown) {
+      this.renderEmpty(panel, errorMessage2);
+      return;
+    }
+    this.renderBreakdown(panel, breakdown);
+  }
+  invalidate() {
+    promptItemizationService.clearCache();
+  }
+  renderEmpty(panel, errorMessage2) {
+    element2(panel, "#story-echo-prompt-stats-subtitle").textContent = errorMessage2 ? "\u63D0\u793A\u8BCD\u660E\u7EC6\u6682\u4E0D\u53EF\u7528" : "\u53D1\u9001\u4E00\u6761\u6D88\u606F\u540E\u663E\u793A";
+    element2(panel, "#story-echo-prompt-stats-total").textContent = "\u2014";
+    const empty = element2(panel, "#story-echo-prompt-stats-empty");
+    empty.textContent = errorMessage2 || "\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709\u53EF\u8BFB\u53D6\u7684\u63D0\u793A\u8BCD\u660E\u7EC6\u3002\u5B8C\u6210\u4E00\u6B21\u89D2\u8272\u56DE\u590D\u540E\u4F1A\u81EA\u52A8\u66F4\u65B0\u3002";
+    empty.hidden = false;
+    element2(panel, "#story-echo-prompt-stats-content").hidden = true;
+  }
+  renderBreakdown(panel, breakdown) {
+    element2(panel, "#story-echo-prompt-stats-subtitle").textContent = `\u6D88\u606F #${breakdown.messageId} \xB7 ${breakdown.detailed ? `\u9152\u9986\u5206\u7C7B\u660E\u7EC6${breakdown.estimated ? "\uFF08\u90E8\u5206\u4F30\u7B97\uFF09" : ""}` : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}`;
+    element2(panel, "#story-echo-prompt-stats-total").textContent = `${breakdown.totalTokens.toLocaleString()} Token`;
+    element2(panel, "#story-echo-prompt-stats-empty").hidden = true;
+    element2(panel, "#story-echo-prompt-stats-content").hidden = false;
+    element2(panel, "#story-echo-token-context").textContent = formatTokens(breakdown.storyEcho.contextTokens);
+    element2(panel, "#story-echo-token-summary").textContent = formatTokens(breakdown.storyEcho.summaryTokens);
+    element2(panel, "#story-echo-token-metadata").textContent = formatTokens(breakdown.storyEcho.metadataTokens);
+    element2(panel, "#story-echo-token-metadata-detail").textContent = `\u72B6\u6001\u6821\u6B63 ${breakdown.storyEcho.currentStateTokens.toLocaleString()} \xB7 \u52A8\u6001\u53EC\u56DE ${breakdown.storyEcho.recallTokens.toLocaleString()}`;
+    element2(panel, "#story-echo-prompt-stats-meta").textContent = connectionText(breakdown);
+    const bar = element2(panel, "#story-echo-token-bar");
+    bar.replaceChildren(...breakdown.categories.map(categorySegment));
+    bar.setAttribute(
+      "aria-label",
+      breakdown.categories.map((category) => {
+        const label = CATEGORY_PRESENTATION[category.id].label;
+        return `${label}${formatPercentage(category.percentage)}`;
+      }).join("\uFF0C")
+    );
+    const rows = element2(panel, "#story-echo-token-rows");
+    rows.replaceChildren(...breakdown.categories.map(categoryRow));
+    element2(panel, "#story-echo-prompt-stats-note").textContent = breakdown.detailed ? `\u603B\u91CF\u53D6\u81EA SillyTavern \u6700\u8FD1\u4E00\u6B21\u63D0\u793A\u8BCD\u660E\u7EC6\uFF1BStoryEcho \u6807\u7B7E${breakdown.estimated ? "\u5728\u9152\u9986 Tokenizer \u4E0D\u53EF\u7528\u65F6\u91C7\u7528\u672C\u5730\u4F30\u7B97" : "\u4F7F\u7528\u9152\u9986\u5F53\u524D Tokenizer \u8BA1\u6570"}\u3002\u6D88\u606F\u89D2\u8272\u3001\u6A21\u677F\u548C\u5C11\u91CF\u65E0\u6CD5\u6807\u6CE8\u7684\u5F00\u9500\u4F1A\u5F52\u5165\u6240\u5C5E\u5927\u7C7B\u6216\u201C\u672A\u5206\u7C7B\u201D\u3002` : "SillyTavern \u672A\u4FDD\u5B58\u8FD9\u4E00\u8F6E\u7684\u5B8C\u6574\u5206\u7C7B\u8BA1\u6570\uFF0C\u5F53\u524D\u6309\u6700\u7EC8\u63D0\u793A\u8BCD\u4E2D\u7684\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97\uFF1B\u201C\u2014\u201D\u8868\u793A\u6700\u8FD1\u539F\u6587\u65E0\u6CD5\u4ECE\u5408\u5E76\u8BF7\u6C42\u4E2D\u53EF\u9760\u5206\u79BB\u3002";
+  }
+};
+var promptTokenStatsCard = new PromptTokenStatsCard();
+
 // src/ui/summary-manager.ts
 var SUMMARY_PAGE_SIZE = 10;
 function stageSummaryKey(entry) {
@@ -9270,7 +9933,7 @@ function stageSummaryManagerTemplate() {
     </div>
   `;
 }
-function element2(panel, selector) {
+function element3(panel, selector) {
   const found = panel.querySelector(selector);
   if (!found) {
     throw new Error(`\u9636\u6BB5\u603B\u7ED3\u7BA1\u7406\u63A7\u4EF6\u4E0D\u5B58\u5728\uFF1A${selector}`);
@@ -9289,29 +9952,29 @@ var StageSummaryMetadataManager = class {
   currentPage = 1;
   renderedChatUuid = "";
   bind(panel, onChanged) {
-    const editor = element2(panel, "#story-echo-summary-editor");
-    const editorText = element2(panel, "#story-echo-summary-editor-text");
+    const editor = element3(panel, "#story-echo-summary-editor");
+    const editorText = element3(panel, "#story-echo-summary-editor-text");
     const markDirty = () => {
       this.editorDirty = true;
       this.editorRevision += 1;
     };
     editorText.addEventListener("input", markDirty);
     editorText.addEventListener("change", markDirty);
-    element2(panel, "#story-echo-summary-search").addEventListener("input", () => {
+    element3(panel, "#story-echo-summary-search").addEventListener("input", () => {
       this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
-    element2(panel, "#story-echo-summary-reload").addEventListener("click", () => {
+    element3(panel, "#story-echo-summary-reload").addEventListener("click", () => {
       this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
-    element2(panel, "#story-echo-summary-previous").addEventListener("click", () => {
+    element3(panel, "#story-echo-summary-previous").addEventListener("click", () => {
       this.changePage(panel, this.currentPage - 1);
     });
-    element2(panel, "#story-echo-summary-next").addEventListener("click", () => {
+    element3(panel, "#story-echo-summary-next").addEventListener("click", () => {
       this.changePage(panel, this.currentPage + 1);
     });
-    element2(panel, "#story-echo-summary-list").addEventListener("click", (event) => {
+    element3(panel, "#story-echo-summary-list").addEventListener("click", (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
         return;
@@ -9329,7 +9992,7 @@ var StageSummaryMetadataManager = class {
       this.populatedSummaryKey = "";
       this.render(panel, this.repository.getExisting());
     });
-    element2(panel, "#story-echo-summary-save").addEventListener("click", async (event) => {
+    element3(panel, "#story-echo-summary-save").addEventListener("click", async (event) => {
       const current = this.currentSummary();
       if (!current) {
         return;
@@ -9358,7 +10021,7 @@ var StageSummaryMetadataManager = class {
         button.disabled = false;
       }
     });
-    element2(panel, "#story-echo-summary-delete").addEventListener("click", async (event) => {
+    element3(panel, "#story-echo-summary-delete").addEventListener("click", async (event) => {
       const state = this.repository.getExisting();
       const current = this.currentSummary(state);
       if (!state || !current) {
@@ -9400,13 +10063,13 @@ ${consequence}
     void editor;
   }
   render(panel, state) {
-    const list = element2(panel, "#story-echo-summary-list");
-    const count = element2(panel, "#story-echo-summary-count");
-    const editor = element2(panel, "#story-echo-summary-editor");
-    const pagination = element2(panel, "#story-echo-summary-pagination");
-    const previous = element2(panel, "#story-echo-summary-previous");
-    const next = element2(panel, "#story-echo-summary-next");
-    const pageLabel = element2(panel, "#story-echo-summary-page");
+    const list = element3(panel, "#story-echo-summary-list");
+    const count = element3(panel, "#story-echo-summary-count");
+    const editor = element3(panel, "#story-echo-summary-editor");
+    const pagination = element3(panel, "#story-echo-summary-pagination");
+    const previous = element3(panel, "#story-echo-summary-previous");
+    const next = element3(panel, "#story-echo-summary-next");
+    const pageLabel = element3(panel, "#story-echo-summary-page");
     const chatUuid = state?.chatUuid ?? "";
     if (chatUuid !== this.renderedChatUuid) {
       this.renderedChatUuid = chatUuid;
@@ -9418,7 +10081,7 @@ ${consequence}
     if (this.selectedSummaryKey && !selected) {
       this.resetSelection();
     }
-    const search = element2(panel, "#story-echo-summary-search").value.trim().toLocaleLowerCase();
+    const search = element3(panel, "#story-echo-summary-search").value.trim().toLocaleLowerCase();
     const filtered = entries.map((entry, index) => ({ entry, index, key: stageSummaryKey(entry) })).filter(({ entry, index }) => !search || searchableSummary(entry, index).includes(search)).reverse();
     const page = paginateItems(filtered, this.currentPage, SUMMARY_PAGE_SIZE);
     this.currentPage = page.page;
@@ -9498,9 +10161,9 @@ ${consequence}
     this.render(panel, this.repository.getExisting());
   }
   populateEditor(panel, entry, index) {
-    element2(panel, "#story-echo-summary-editor-range").textContent = `#${index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`;
-    element2(panel, "#story-echo-summary-editor-text").value = entry.text;
-    element2(panel, "#story-echo-summary-source").textContent = sourceText2(entry);
+    element3(panel, "#story-echo-summary-editor-range").textContent = `#${index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`;
+    element3(panel, "#story-echo-summary-editor-text").value = entry.text;
+    element3(panel, "#story-echo-summary-source").textContent = sourceText2(entry);
   }
   resetSelection() {
     this.selectedSummaryKey = "";
@@ -9940,6 +10603,7 @@ function panelTemplate() {
         </div>
 
         <div id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u2026\u2026</div>
+        ${promptStatsCardTemplate()}
         <details class="story-echo-diagnostics">
           <summary>\u5F53\u524D\u9636\u6BB5\u603B\u7ED3</summary>
           <pre id="story-echo-summary">\u5C1A\u65E0\u9636\u6BB5\u603B\u7ED3\u3002</pre>
@@ -9962,7 +10626,7 @@ function panelTemplate() {
   `;
   return panel;
 }
-function element3(panel, selector) {
+function element4(panel, selector) {
   const found = panel.querySelector(selector);
   if (!found) {
     throw new Error(`\u8BBE\u7F6E\u63A7\u4EF6\u4E0D\u5B58\u5728\uFF1A${selector}`);
@@ -9978,7 +10642,7 @@ function numberValue(input, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 function populateCustomModelOptions(panel, models, currentModel) {
-  const select = element3(panel, "#story-echo-model-select");
+  const select = element4(panel, "#story-echo-model-select");
   select.replaceChildren();
   const placeholder = document.createElement("option");
   placeholder.value = "";
@@ -9999,52 +10663,52 @@ function populateCustomModelOptions(panel, models, currentModel) {
   select.value = currentModel || "";
 }
 function syncVisibility(panel, settings) {
-  const custom = element3(panel, "#story-echo-custom-provider");
+  const custom = element4(panel, "#story-echo-custom-provider");
   custom.hidden = settings.llm.provider !== "openai-compatible";
   for (const memoryOnly of panel.querySelectorAll("[data-story-echo-memory-only]")) {
     memoryOnly.hidden = !settings.memory.enabled;
   }
-  const customEmbedding = element3(panel, "#story-echo-custom-embedding");
+  const customEmbedding = element4(panel, "#story-echo-custom-embedding");
   customEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== "openai-compatible";
-  const volcengineEmbedding = element3(panel, "#story-echo-volcengine-embedding");
+  const volcengineEmbedding = element4(panel, "#story-echo-volcengine-embedding");
   volcengineEmbedding.hidden = !settings.memory.enabled || settings.vector.source !== "volcengine-multimodal";
-  const rebuildMemories = element3(panel, "#story-echo-memory-rebuild");
+  const rebuildMemories = element4(panel, "#story-echo-memory-rebuild");
   rebuildMemories.disabled = !settings.memory.enabled;
   rebuildMemories.title = settings.memory.enabled ? "" : "\u542F\u7528\u201C\u5267\u60C5\u8BB0\u5FC6\u4E0E\u53EC\u56DE\u201D\u540E\u624D\u80FD\u91CD\u5EFA\u81EA\u52A8\u5143\u6570\u636E";
 }
 function syncForm(panel, settings) {
-  element3(panel, "#story-echo-enabled").checked = settings.enabled;
-  element3(panel, "#story-echo-memory-enabled").checked = settings.memory.enabled;
-  element3(panel, "#story-echo-window-size").value = String(settings.recentWindow.size);
-  element3(panel, "#story-echo-window-unit").value = settings.recentWindow.unit;
-  element3(panel, "#story-echo-summary-turns").value = String(settings.summary.targetTurnsPerUpdate);
-  element3(panel, "#story-echo-summary-window").value = String(settings.summary.windowSize);
-  element3(panel, "#story-echo-summary-max-tokens").value = String(settings.summary.maxTokens);
-  element3(panel, "#story-echo-max-events").value = String(settings.recall.maxEvents);
-  element3(panel, "#story-echo-max-tokens").value = String(settings.recall.maxTokens);
-  element3(panel, "#story-echo-threshold").value = String(settings.recall.scoreThreshold);
-  element3(panel, "#story-echo-query-mode").value = settings.recall.queryMode;
-  element3(panel, "#story-echo-provider").value = settings.llm.provider;
-  element3(panel, "#story-echo-extraction-turns").value = String(settings.extraction.targetTurnsPerChunk);
-  element3(panel, "#story-echo-reference-mode").value = settings.extraction.reference.mode;
-  element3(panel, "#story-echo-reference-tokens").value = String(settings.extraction.reference.maxTokens);
-  element3(panel, "#story-echo-reference-world-info").value = String(settings.extraction.reference.maxWorldInfoEntries);
-  element3(panel, "#story-echo-debug").checked = settings.debug;
-  element3(panel, "#story-echo-base-url").value = settings.llm.custom.baseUrl;
-  element3(panel, "#story-echo-model").value = settings.llm.custom.model;
-  element3(panel, "#story-echo-model-select").value = "";
-  element3(panel, "#story-echo-allow-http").checked = settings.llm.custom.allowInsecureHttp;
-  element3(panel, "#story-echo-fallback-main").checked = settings.llm.custom.fallbackToMain;
-  element3(panel, "#story-echo-api-key").value = settings.llm.custom.apiKey;
-  element3(panel, "#story-echo-vector-source").value = settings.vector.source;
-  element3(panel, "#story-echo-embedding-base-url").value = settings.vector.custom.baseUrl;
-  element3(panel, "#story-echo-embedding-model").value = settings.vector.custom.model;
-  element3(panel, "#story-echo-embedding-allow-http").checked = settings.vector.custom.allowInsecureHttp;
-  element3(panel, "#story-echo-embedding-api-key").value = settings.vector.custom.apiKey;
-  element3(panel, "#story-echo-volcengine-base-url").value = settings.vector.volcengine.baseUrl;
-  element3(panel, "#story-echo-volcengine-model").value = settings.vector.volcengine.model;
-  element3(panel, "#story-echo-volcengine-allow-http").checked = settings.vector.volcengine.allowInsecureHttp;
-  element3(panel, "#story-echo-volcengine-api-key").value = settings.vector.volcengine.apiKey;
+  element4(panel, "#story-echo-enabled").checked = settings.enabled;
+  element4(panel, "#story-echo-memory-enabled").checked = settings.memory.enabled;
+  element4(panel, "#story-echo-window-size").value = String(settings.recentWindow.size);
+  element4(panel, "#story-echo-window-unit").value = settings.recentWindow.unit;
+  element4(panel, "#story-echo-summary-turns").value = String(settings.summary.targetTurnsPerUpdate);
+  element4(panel, "#story-echo-summary-window").value = String(settings.summary.windowSize);
+  element4(panel, "#story-echo-summary-max-tokens").value = String(settings.summary.maxTokens);
+  element4(panel, "#story-echo-max-events").value = String(settings.recall.maxEvents);
+  element4(panel, "#story-echo-max-tokens").value = String(settings.recall.maxTokens);
+  element4(panel, "#story-echo-threshold").value = String(settings.recall.scoreThreshold);
+  element4(panel, "#story-echo-query-mode").value = settings.recall.queryMode;
+  element4(panel, "#story-echo-provider").value = settings.llm.provider;
+  element4(panel, "#story-echo-extraction-turns").value = String(settings.extraction.targetTurnsPerChunk);
+  element4(panel, "#story-echo-reference-mode").value = settings.extraction.reference.mode;
+  element4(panel, "#story-echo-reference-tokens").value = String(settings.extraction.reference.maxTokens);
+  element4(panel, "#story-echo-reference-world-info").value = String(settings.extraction.reference.maxWorldInfoEntries);
+  element4(panel, "#story-echo-debug").checked = settings.debug;
+  element4(panel, "#story-echo-base-url").value = settings.llm.custom.baseUrl;
+  element4(panel, "#story-echo-model").value = settings.llm.custom.model;
+  element4(panel, "#story-echo-model-select").value = "";
+  element4(panel, "#story-echo-allow-http").checked = settings.llm.custom.allowInsecureHttp;
+  element4(panel, "#story-echo-fallback-main").checked = settings.llm.custom.fallbackToMain;
+  element4(panel, "#story-echo-api-key").value = settings.llm.custom.apiKey;
+  element4(panel, "#story-echo-vector-source").value = settings.vector.source;
+  element4(panel, "#story-echo-embedding-base-url").value = settings.vector.custom.baseUrl;
+  element4(panel, "#story-echo-embedding-model").value = settings.vector.custom.model;
+  element4(panel, "#story-echo-embedding-allow-http").checked = settings.vector.custom.allowInsecureHttp;
+  element4(panel, "#story-echo-embedding-api-key").value = settings.vector.custom.apiKey;
+  element4(panel, "#story-echo-volcengine-base-url").value = settings.vector.volcengine.baseUrl;
+  element4(panel, "#story-echo-volcengine-model").value = settings.vector.volcengine.model;
+  element4(panel, "#story-echo-volcengine-allow-http").checked = settings.vector.volcengine.allowInsecureHttp;
+  element4(panel, "#story-echo-volcengine-api-key").value = settings.vector.volcengine.apiKey;
   syncVisibility(panel, settings);
 }
 function bindSettings(panel) {
@@ -10052,108 +10716,108 @@ function bindSettings(panel) {
     backgroundProcessingScheduler.schedule();
     void refreshStatus(panel);
   };
-  element3(panel, "#story-echo-enabled").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-enabled").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.enabled = event.currentTarget.checked;
     });
     scheduleDerivedUpdate();
   });
-  element3(panel, "#story-echo-memory-enabled").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-memory-enabled").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.memory.enabled = event.currentTarget.checked;
     });
     syncVisibility(panel, settings);
     scheduleDerivedUpdate();
   });
-  element3(panel, "#story-echo-window-size").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-window-size").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.recentWindow.size = Math.max(0, Math.floor(numberValue(event.currentTarget, 10)));
     });
     scheduleDerivedUpdate();
   });
-  element3(panel, "#story-echo-window-unit").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-window-unit").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.recentWindow.unit = event.currentTarget.value;
     });
     scheduleDerivedUpdate();
   });
-  element3(panel, "#story-echo-summary-turns").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-summary-turns").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 10));
       settings.summary.targetTurnsPerUpdate = Math.min(100, Math.max(1, value));
     });
     scheduleDerivedUpdate();
   });
-  element3(panel, "#story-echo-summary-window").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-summary-window").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 4));
       settings.summary.windowSize = Math.min(100, Math.max(1, value));
     });
     void refreshStatus(panel);
   });
-  element3(panel, "#story-echo-summary-max-tokens").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-summary-max-tokens").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 1600));
       settings.summary.maxTokens = Math.min(8192, Math.max(128, value));
     });
   });
-  element3(panel, "#story-echo-max-events").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-max-events").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.recall.maxEvents = Math.max(0, Math.floor(numberValue(event.currentTarget, 3)));
     });
   });
-  element3(panel, "#story-echo-max-tokens").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-max-tokens").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.recall.maxTokens = Math.max(0, Math.floor(numberValue(event.currentTarget, 1200)));
     });
   });
-  element3(panel, "#story-echo-threshold").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-threshold").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = numberValue(event.currentTarget, 0.25);
       settings.recall.scoreThreshold = Math.min(1, Math.max(0, value));
     });
   });
-  element3(panel, "#story-echo-query-mode").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-query-mode").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.recall.queryMode = event.currentTarget.value;
     });
   });
-  element3(panel, "#story-echo-provider").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-provider").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.llm.provider = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
   });
-  element3(panel, "#story-echo-extraction-turns").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-extraction-turns").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 5));
       settings.extraction.targetTurnsPerChunk = Math.min(20, Math.max(1, value));
     });
     scheduleDerivedUpdate();
   });
-  element3(panel, "#story-echo-reference-mode").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-reference-mode").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.extraction.reference.mode = event.currentTarget.value;
     });
   });
-  element3(panel, "#story-echo-reference-tokens").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-reference-tokens").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 3e3));
       settings.extraction.reference.maxTokens = Math.min(16e3, Math.max(256, value));
     });
   });
-  element3(panel, "#story-echo-reference-world-info").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-reference-world-info").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       const value = Math.floor(numberValue(event.currentTarget, 5));
       settings.extraction.reference.maxWorldInfoEntries = Math.min(20, Math.max(0, value));
     });
   });
-  element3(panel, "#story-echo-debug").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-debug").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.debug = event.currentTarget.checked;
     });
   });
-  element3(panel, "#story-echo-base-url").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
     const current = settingsRepository2.get();
     const value = input.value.trim();
@@ -10176,25 +10840,25 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "Base URL\u65E0\u6548\u3002");
     }
   });
-  element3(panel, "#story-echo-model").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-model").addEventListener("input", (event) => {
     const model = event.currentTarget.value.trim();
     settingsRepository2.update((settings) => {
       settings.llm.custom.model = model;
     });
-    const select = element3(panel, "#story-echo-model-select");
+    const select = element4(panel, "#story-echo-model-select");
     select.value = [...select.options].some((option) => option.value === model) ? model : "";
   });
-  element3(panel, "#story-echo-model-select").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-model-select").addEventListener("change", (event) => {
     const model = event.currentTarget.value;
     if (!model) {
       return;
     }
-    element3(panel, "#story-echo-model").value = model;
+    element4(panel, "#story-echo-model").value = model;
     settingsRepository2.update((settings) => {
       settings.llm.custom.model = model;
     });
   });
-  element3(panel, "#story-echo-fetch-models").addEventListener("click", async (event) => {
+  element4(panel, "#story-echo-fetch-models").addEventListener("click", async (event) => {
     const button = event.currentTarget;
     const label = button.querySelector("span");
     button.disabled = true;
@@ -10215,29 +10879,29 @@ function bindSettings(panel) {
       }
     }
   });
-  element3(panel, "#story-echo-api-key").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-api-key").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.apiKey = event.currentTarget.value;
     });
   });
-  element3(panel, "#story-echo-allow-http").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.allowInsecureHttp = event.currentTarget.checked;
     });
   });
-  element3(panel, "#story-echo-fallback-main").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-fallback-main").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.llm.custom.fallbackToMain = event.currentTarget.checked;
     });
   });
-  element3(panel, "#story-echo-vector-source").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-vector-source").addEventListener("change", (event) => {
     const settings = settingsRepository2.update((current) => {
       current.vector.source = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
     void refreshStatus(panel, true);
   });
-  element3(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
     const current = settingsRepository2.get();
     const value = input.value.trim();
@@ -10261,22 +10925,22 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "Embedding Base URL\u65E0\u6548\u3002");
     }
   });
-  element3(panel, "#story-echo-embedding-model").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-embedding-model").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.model = event.currentTarget.value.trim();
     });
   });
-  element3(panel, "#story-echo-embedding-api-key").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-embedding-api-key").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.apiKey = event.currentTarget.value;
     });
   });
-  element3(panel, "#story-echo-embedding-allow-http").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-embedding-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.custom.allowInsecureHttp = event.currentTarget.checked;
     });
   });
-  element3(panel, "#story-echo-volcengine-base-url").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-volcengine-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
     const current = settingsRepository2.get();
     const value = input.value.trim();
@@ -10300,23 +10964,23 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "\u706B\u5C71\u65B9\u821F Base URL\u65E0\u6548\u3002");
     }
   });
-  element3(panel, "#story-echo-volcengine-model").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-volcengine-model").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.volcengine.model = event.currentTarget.value.trim();
     });
   });
-  element3(panel, "#story-echo-volcengine-api-key").addEventListener("input", (event) => {
+  element4(panel, "#story-echo-volcengine-api-key").addEventListener("input", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.volcengine.apiKey = event.currentTarget.value;
     });
   });
-  element3(panel, "#story-echo-volcengine-allow-http").addEventListener("change", (event) => {
+  element4(panel, "#story-echo-volcengine-allow-http").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
       settings.vector.volcengine.allowInsecureHttp = event.currentTarget.checked;
     });
   });
   const bindEmbeddingTest = (selector) => {
-    element3(panel, selector).addEventListener("click", async (event) => {
+    element4(panel, selector).addEventListener("click", async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
       try {
@@ -10338,7 +11002,7 @@ function bindSettings(panel) {
   };
   bindEmbeddingTest("#story-echo-test-embedding");
   bindEmbeddingTest("#story-echo-test-volcengine-embedding");
-  element3(panel, "#story-echo-test-llm").addEventListener("click", async (event) => {
+  element4(panel, "#story-echo-test-llm").addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
     try {
@@ -10353,9 +11017,9 @@ function bindSettings(panel) {
       button.disabled = false;
     }
   });
-  element3(panel, "#story-echo-process-history").addEventListener("click", async (event) => {
+  element4(panel, "#story-echo-process-history").addEventListener("click", async (event) => {
     const button = event.currentTarget;
-    const status = element3(panel, "#story-echo-status");
+    const status = element4(panel, "#story-echo-status");
     button.disabled = true;
     try {
       const requestedChatId = getCurrentChatId();
@@ -10393,10 +11057,10 @@ function bindSettings(panel) {
       button.disabled = false;
     }
   });
-  element3(panel, "#story-echo-refresh-status").addEventListener("click", async () => {
+  element4(panel, "#story-echo-refresh-status").addEventListener("click", async () => {
     await refreshStatus(panel, true);
   });
-  element3(panel, "#story-echo-copy-debug").addEventListener("click", async () => {
+  element4(panel, "#story-echo-copy-debug").addEventListener("click", async () => {
     const state = memoryRepository2.getExisting();
     if (!state) {
       notify.info("\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709StoryEcho\u8C03\u8BD5\u6570\u636E\u3002");
@@ -10420,7 +11084,7 @@ function bindSettings(panel) {
       notify.error(error instanceof Error ? error.message : "\u590D\u5236\u8C03\u8BD5\u62A5\u544A\u5931\u8D25\u3002");
     }
   });
-  element3(panel, "#story-echo-reset-stats").addEventListener("click", async (event) => {
+  element4(panel, "#story-echo-reset-stats").addEventListener("click", async (event) => {
     const state = memoryRepository2.getExisting();
     if (!state) {
       notify.info("\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709\u7EDF\u8BA1\u6570\u636E\u3002");
@@ -10563,11 +11227,12 @@ function runtimeStatusText() {
   ];
 }
 async function refreshStatus(panel, refreshVectorCount = false) {
-  const target = element3(panel, "#story-echo-status");
-  const stageSummaryTarget = element3(panel, "#story-echo-summary");
-  const stats = element3(panel, "#story-echo-stats");
-  const inspection = element3(panel, "#story-echo-inspection");
-  const traces = element3(panel, "#story-echo-traces");
+  const target = element4(panel, "#story-echo-status");
+  const stageSummaryTarget = element4(panel, "#story-echo-summary");
+  const stats = element4(panel, "#story-echo-stats");
+  const inspection = element4(panel, "#story-echo-inspection");
+  const traces = element4(panel, "#story-echo-traces");
+  void promptTokenStatsCard.render(panel);
   try {
     const currentSettings = settingsRepository2.get();
     syncVisibility(panel, currentSettings);
@@ -10698,7 +11363,24 @@ async function registerSettingsPanel() {
   ].filter((eventName) => Boolean(eventName)));
   for (const eventName of chatRefreshEvents) {
     context.eventSource?.on(eventName, () => {
+      promptTokenStatsCard.invalidate();
       globalThis.setTimeout(() => void refreshStatus(panel, true), 0);
+    });
+  }
+  const promptRefreshEvents = new Set([
+    context.event_types?.["MESSAGE_RECEIVED"],
+    context.event_types?.["MESSAGE_SWIPED"],
+    context.event_types?.["MESSAGE_DELETED"],
+    context.event_types?.["MESSAGE_SWIPE_DELETED"],
+    context.event_types?.["GENERATION_STOPPED"],
+    context.event_types?.["GENERATION_ENDED"],
+    context.event_types?.["ITEMIZED_PROMPTS_LOADED"],
+    context.event_types?.["ITEMIZED_PROMPTS_SAVED"],
+    context.event_types?.["ITEMIZED_PROMPTS_DELETED"]
+  ].filter((eventName) => Boolean(eventName)));
+  for (const eventName of promptRefreshEvents) {
+    context.eventSource?.on(eventName, () => {
+      globalThis.setTimeout(() => void promptTokenStatsCard.render(panel), 0);
     });
   }
   await refreshStatus(panel, true);
