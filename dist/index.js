@@ -2579,7 +2579,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 7;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.19.2";
+var EXTENSION_VERSION = "0.19.3";
 
 // src/memory/repository.ts
 function createCollectionId(chatUuid) {
@@ -6912,6 +6912,38 @@ function normalizeSummary(raw, sourceMessages = [], userUiPersona = "", requireS
   }
   return consistencySafe;
 }
+function repairGeneratedSummarySections(raw) {
+  const positions = REQUIRED_SUMMARY_HEADINGS.map((heading) => raw.indexOf(heading));
+  const missing = positions.map((position, index) => ({ position, index })).filter(({ position }) => position < 0);
+  if (missing.length !== 1) {
+    return raw;
+  }
+  const missingIndex = missing[0].index;
+  if (missingIndex === 0 || missingIndex === REQUIRED_SUMMARY_HEADINGS.length - 1) {
+    return raw;
+  }
+  let previousPosition = -1;
+  for (const position of positions) {
+    if (position < 0) {
+      continue;
+    }
+    if (position <= previousPosition) {
+      return raw;
+    }
+    previousPosition = position;
+  }
+  const nextHeading = REQUIRED_SUMMARY_HEADINGS[missingIndex + 1];
+  const insertionPoint = raw.indexOf(nextHeading);
+  if (insertionPoint < 0) {
+    return raw;
+  }
+  return [
+    raw.slice(0, insertionPoint).trimEnd(),
+    REQUIRED_SUMMARY_HEADINGS[missingIndex],
+    "\u65E0",
+    raw.slice(insertionPoint).trimStart()
+  ].join("\n");
+}
 function assertChatOwner2(state) {
   if (getCurrentChatId() !== state.ownerChatId) {
     throw new Error("\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u5199\u5165\u3002");
@@ -7086,13 +7118,14 @@ var StageSummaryService = class {
         if (currentHash !== snapshotHash) {
           throw new Error("\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u6E90\u6D88\u606F\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u4E22\u5F03\u672C\u6B21\u7ED3\u679C\u3002");
         }
-        const text2 = normalizeSummary(raw, snapshot, identity.userUiPersona, true);
+        const repairedRaw = repairGeneratedSummarySections(raw);
+        const text2 = normalizeSummary(repairedRaw, snapshot, identity.userUiPersona, true);
         const identitySafeWithoutConsistency = normalizeSummary(
-          raw,
+          repairedRaw,
           snapshot,
           identity.userUiPersona
         );
-        const withoutPersonaSanitization = normalizeSummary(raw, snapshot, "", true);
+        const withoutPersonaSanitization = normalizeSummary(repairedRaw, snapshot, "", true);
         const commitChat = getContext().chat;
         const commitHash = await sha256(sourcePayload2(
           commitChat.slice(chunk.startMessageId, chunk.endMessageId + 1),
@@ -7126,6 +7159,7 @@ var StageSummaryService = class {
           summaryEntries: state.stageSummary.entries.length,
           personaLabelSanitized: text2 !== withoutPersonaSanitization,
           summaryConsistencyAdjusted: text2 !== identitySafeWithoutConsistency,
+          summarySectionRepaired: repairedRaw !== raw,
           authoritativeFactCharacters: authoritativeFacts.length
         });
         await this.memoryRepository.save(state);

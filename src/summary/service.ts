@@ -217,6 +217,49 @@ export function normalizeSummary(
   return consistencySafe;
 }
 
+/**
+ * Recover the common provider mistake where exactly one empty interior section
+ * is omitted. Keep this deliberately narrow: missing edge sections, multiple
+ * missing sections, and reordered headings still fail strict validation.
+ */
+export function repairGeneratedSummarySections(raw: string): string {
+  const positions = REQUIRED_SUMMARY_HEADINGS.map((heading) => raw.indexOf(heading));
+  const missing = positions
+    .map((position, index) => ({ position, index }))
+    .filter(({ position }) => position < 0);
+  if (missing.length !== 1) {
+    return raw;
+  }
+
+  const missingIndex = missing[0]!.index;
+  if (missingIndex === 0 || missingIndex === REQUIRED_SUMMARY_HEADINGS.length - 1) {
+    return raw;
+  }
+
+  let previousPosition = -1;
+  for (const position of positions) {
+    if (position < 0) {
+      continue;
+    }
+    if (position <= previousPosition) {
+      return raw;
+    }
+    previousPosition = position;
+  }
+
+  const nextHeading = REQUIRED_SUMMARY_HEADINGS[missingIndex + 1]!;
+  const insertionPoint = raw.indexOf(nextHeading);
+  if (insertionPoint < 0) {
+    return raw;
+  }
+  return [
+    raw.slice(0, insertionPoint).trimEnd(),
+    REQUIRED_SUMMARY_HEADINGS[missingIndex],
+    '无',
+    raw.slice(insertionPoint).trimStart(),
+  ].join('\n');
+}
+
 function assertChatOwner(state: StoryEchoChatState): void {
   if (getCurrentChatId() !== state.ownerChatId) {
     throw new Error('阶段总结期间聊天发生切换，已取消写入。');
@@ -446,13 +489,14 @@ export class StageSummaryService {
         if (currentHash !== snapshotHash) {
           throw new Error('阶段总结期间源消息发生变化，已丢弃本次结果。');
         }
-        const text = normalizeSummary(raw, snapshot, identity.userUiPersona, true);
+        const repairedRaw = repairGeneratedSummarySections(raw);
+        const text = normalizeSummary(repairedRaw, snapshot, identity.userUiPersona, true);
         const identitySafeWithoutConsistency = normalizeSummary(
-          raw,
+          repairedRaw,
           snapshot,
           identity.userUiPersona,
         );
-        const withoutPersonaSanitization = normalizeSummary(raw, snapshot, '', true);
+        const withoutPersonaSanitization = normalizeSummary(repairedRaw, snapshot, '', true);
         // Read the live chat again instead of trusting the context object
         // captured before the LLM call. SillyTavern can replace the chat array
         // when a message is edited or a branch is switched while generation is
@@ -491,6 +535,7 @@ export class StageSummaryService {
           summaryEntries: state.stageSummary.entries.length,
           personaLabelSanitized: text !== withoutPersonaSanitization,
           summaryConsistencyAdjusted: text !== identitySafeWithoutConsistency,
+          summarySectionRepaired: repairedRaw !== raw,
           authoritativeFactCharacters: authoritativeFacts.length,
         });
         await this.memoryRepository.save(state);

@@ -7,6 +7,7 @@ import {
 } from '../src/summary/prompts';
 import {
   normalizeSummary,
+  repairGeneratedSummarySections,
   removeResolvedSummaryThreads,
   StageSummaryService,
 } from '../src/summary/service';
@@ -266,6 +267,18 @@ describe('independent stage summaries', () => {
       .toContain('【角色主张与推测】\n无');
   });
 
+  it('repairs exactly one omitted interior section in a generated summary', () => {
+    const missingClaims = sectionedSummary('用户角色进入贝克街。')
+      .replace('【角色主张与推测】\n无\n', '');
+    const repaired = repairGeneratedSummarySections(missingClaims);
+
+    expect(repaired).toContain('【未解决线索】\n无\n【角色主张与推测】\n无\n【已失效或否定事实】');
+    expect(normalizeSummary(repaired, [], '', true)).toBe(repaired);
+    expect(repairGeneratedSummarySections(
+      '【已确认剧情】\n有\n【已失效或否定事实】\n无',
+    )).not.toContain('【角色主张与推测】');
+  });
+
   it('removes a use that was resolved in confirmed plot from unresolved clues', () => {
     const contradictory = [
       '【已确认剧情】',
@@ -347,6 +360,23 @@ describe('independent stage summaries', () => {
     expect(result.state?.metrics.summaryMessagesCovered).toBe(5);
     expect(context.saveMetadata).toHaveBeenCalled();
     expect(generateRaw.mock.calls[0]?.[0]).toMatchObject({ responseLength: 1_600 });
+  });
+
+  it('stores a provider summary after repairing one omitted empty interior section', async () => {
+    const incomplete = sectionedSummary('第一轮已经完成。')
+      .replace('【角色主张与推测】\n无\n', '');
+    const generateRaw = vi.fn(async () => incomplete);
+    installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+    ], generateRaw, 1);
+
+    const result = await new StageSummaryService().processNextThrough(1);
+
+    expect(result.updatedChunks).toBe(1);
+    expect(result.state?.stageSummary.entries[0]?.text)
+      .toContain('【角色主张与推测】\n无');
+    expect(result.state?.metrics.summaryFailures).toBe(0);
   });
 
   it('keeps a final partial manual batch as raw history until it reaches N turns', async () => {
