@@ -16,6 +16,10 @@ const MAX_CHARACTER_REFERENCE_TOKENS = 1_200;
 const MAX_REFERENCE_SOURCE_CHARACTERS = 100_000;
 export const MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS = 20_000;
 export const MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS = 10_000;
+export const MAX_STAGE_SUMMARY_CONSTANT_WORLD_INFO_CHARACTERS =
+  MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS;
+export const MAX_STAGE_SUMMARY_MATCHED_WORLD_INFO_CHARACTERS =
+  MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS;
 
 interface WorldInfoModule {
   getSortedEntries?: () => Promise<SillyTavernWorldInfoEntry[]>;
@@ -26,6 +30,10 @@ export interface ExtractionReferenceContext {
   tokenCount: number;
   characterFields: string[];
   worldInfoEntries: string[];
+  constantWorldInfoEntries?: string[];
+  matchedWorldInfoEntries?: string[];
+  constantWorldInfoCharacters?: number;
+  matchedWorldInfoCharacters?: number;
   truncated: boolean;
   warnings: string[];
 }
@@ -613,13 +621,9 @@ export async function buildSummaryWorldInfoReferenceContext(
   settings: StoryEchoSettings['extraction']['reference'],
   context = getContext(),
 ): Promise<ExtractionReferenceContext> {
-  if (settings.mode !== 'character-world-info') {
-    return emptyReference();
-  }
-  return buildReferenceContext(messages, settings, context, {
-    purpose: 'summary',
-    includeCharacter: false,
-    includeWorldInfo: true,
+  return buildHistoricalWorldInfoReferenceContext(messages, settings, context, {
+    constantCharacters: MAX_STAGE_SUMMARY_CONSTANT_WORLD_INFO_CHARACTERS,
+    matchedCharacters: MAX_STAGE_SUMMARY_MATCHED_WORLD_INFO_CHARACTERS,
   });
 }
 
@@ -627,6 +631,24 @@ export async function buildStorySkeletonWorldInfoReferenceContext(
   messages: TavernChatMessage[],
   settings: StoryEchoSettings['extraction']['reference'],
   context = getContext(),
+): Promise<ExtractionReferenceContext> {
+  return buildHistoricalWorldInfoReferenceContext(messages, settings, context, {
+    constantCharacters: MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
+    matchedCharacters: MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
+  });
+}
+
+/**
+ * Stage summaries and the global skeleton use the same world-book policy:
+ * complete blue-light entries plus green entries matched only by the current
+ * source batch. These character budgets are intentionally independent from
+ * the compact extraction-reference token budget.
+ */
+async function buildHistoricalWorldInfoReferenceContext(
+  messages: TavernChatMessage[],
+  settings: StoryEchoSettings['extraction']['reference'],
+  context: SillyTavernContext,
+  limits: { constantCharacters: number; matchedCharacters: number },
 ): Promise<ExtractionReferenceContext> {
   if (settings.mode !== 'character-world-info') {
     return emptyReference();
@@ -646,23 +668,36 @@ export async function buildStorySkeletonWorldInfoReferenceContext(
 
   try {
     const entries = await sortedWorldInfoEntries(context);
+    const availableEntries = entries.filter((entry) => (
+      worldInfoEntryAvailable(entry, context, batchNames)
+    ));
     const seen = new Set<string>();
-    for (const entry of entries) {
-      if (!worldInfoEntryAvailable(entry, context, batchNames)) {
+    const identityOf = (entry: SillyTavernWorldInfoEntry): string => [
+      clean(entry.world),
+      entry.uid === undefined ? '' : String(entry.uid),
+      clean(entry.comment),
+      clean(entry.content),
+    ].join('\u0000');
+    // Resolve duplicate definitions deterministically: a blue-light entry is
+    // the always-on source and wins even when an equivalent green entry sorts
+    // before it in SillyTavern's world-book order.
+    for (const entry of availableEntries) {
+      if (entry.constant !== true) {
         continue;
       }
-      const identity = [
-        clean(entry.world),
-        entry.uid === undefined ? '' : String(entry.uid),
-        clean(entry.comment),
-        clean(entry.content),
-      ].join('\u0000');
+      const identity = identityOf(entry);
       if (seen.has(identity)) {
         continue;
       }
+      seen.add(identity);
+      constants.push({ entry, matchedKeys: [], activation: 'constant' });
+    }
+    for (const entry of availableEntries) {
       if (entry.constant === true) {
-        seen.add(identity);
-        constants.push({ entry, matchedKeys: [], activation: 'constant' });
+        continue;
+      }
+      const identity = identityOf(entry);
+      if (seen.has(identity)) {
         continue;
       }
       if (matchOverflow) {
@@ -688,21 +723,28 @@ export async function buildStorySkeletonWorldInfoReferenceContext(
   const fittedConstants = fitWholeWorldInfoEntries(
     constants,
     context,
-    MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
+    limits.constantCharacters,
   );
   const fittedMatches = fitWholeWorldInfoEntries(
     matches,
     context,
-    MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
+    limits.matchedCharacters,
   );
   if (!fittedConstants.text && !fittedMatches.text) {
-    return emptyReference(warnings);
+    return {
+      ...emptyReference(warnings),
+      constantWorldInfoEntries: [],
+      matchedWorldInfoEntries: [],
+      constantWorldInfoCharacters: 0,
+      matchedWorldInfoCharacters: 0,
+      truncated: fittedConstants.truncated || fittedMatches.truncated || matchOverflow,
+    };
   }
 
   const text = [
     '<story_echo_world_background>',
     '以下世界书内容只作为故事背景与设定参考，用于理解世界规则、专有名词、人物身份、地点和能力体系。',
-    '它们不证明某件剧情已经发生，也不代表角色当前状态；历史事件以本轮阶段总结和历史骨架为依据。',
+    '它们不证明某件剧情已经发生，也不代表角色当前状态；具体剧情事实以随后提供的剧情原文、阶段总结、高权威校正或现有骨架为依据。',
     ...(fittedConstants.text ? [
       '<constant_world_info>',
       fittedConstants.text,
@@ -727,15 +769,20 @@ export async function buildStorySkeletonWorldInfoReferenceContext(
     }
   }
   const selected = [...fittedConstants.entries, ...fittedMatches.entries];
+  const entryIdentity = ({ entry }: MatchedWorldInfoEntry): string => [
+    clean(entry.world) || '未命名世界书',
+    entry.uid === undefined ? '?' : String(entry.uid),
+    clean(entry.comment),
+  ].filter(Boolean).join('#');
   return {
     text,
     tokenCount,
     characterFields: [],
-    worldInfoEntries: selected.map(({ entry }) => [
-      clean(entry.world) || '未命名世界书',
-      entry.uid === undefined ? '?' : String(entry.uid),
-      clean(entry.comment),
-    ].filter(Boolean).join('#')),
+    worldInfoEntries: selected.map(entryIdentity),
+    constantWorldInfoEntries: fittedConstants.entries.map(entryIdentity),
+    matchedWorldInfoEntries: fittedMatches.entries.map(entryIdentity),
+    constantWorldInfoCharacters: Array.from(fittedConstants.text).length,
+    matchedWorldInfoCharacters: Array.from(fittedMatches.text).length,
     truncated: fittedConstants.truncated || fittedMatches.truncated || matchOverflow,
     warnings,
   };

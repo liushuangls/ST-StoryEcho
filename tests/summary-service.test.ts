@@ -8,6 +8,7 @@ import {
   STAGE_SUMMARY_SYSTEM_PROMPT,
 } from '../src/summary/prompts';
 import {
+  MAX_SUMMARY_SOURCE_CHARACTERS,
   normalizeSummary,
   StageSummaryService,
 } from '../src/summary/service';
@@ -107,7 +108,7 @@ describe('independent stage summaries', () => {
     expect(prompt).not.toContain('previous_summary');
   });
 
-  it('sends batch-matched world info to the stage-summary model as non-evidence background', async () => {
+  it('sends blue-light and batch-matched world info as non-evidence background', async () => {
     const generateRaw = vi.fn(async (_options: { systemPrompt: string; prompt: string }) => (
       '用户角色在姜梦指导下修炼无我剑诀。'
     ));
@@ -115,21 +116,33 @@ describe('independent stage summaries', () => {
       { is_user: true, mes: '开始修炼无我剑诀。' },
       { is_user: false, name: '姜梦', mes: '姜梦指点了心法要领。' },
     ], generateRaw, 1);
-    installed.context.getSortedWorldInfoEntries.mockResolvedValueOnce([{
-      world: '蜀山设定',
-      uid: 7,
-      key: ['无我剑诀'],
-      content: '无我剑诀以忘我、忘剑为核心。',
-    }]);
+    installed.context.getSortedWorldInfoEntries.mockResolvedValueOnce([
+      {
+        world: '玄天界常驻设定',
+        uid: 6,
+        constant: true,
+        content: '玄天界由宗门、世家与散修共同构成修行秩序。',
+      },
+      {
+        world: '蜀山设定',
+        uid: 7,
+        key: ['无我剑诀'],
+        content: '无我剑诀以忘我、忘剑为核心。',
+      },
+    ]);
 
     const result = await new StageSummaryService().processNextThrough(1);
 
     expect(result.updatedChunks).toBe(1);
     const request = generateRaw.mock.calls[0]?.[0];
     expect(String(request?.prompt ?? '')).toContain('<story_echo_world_background>');
+    expect(String(request?.prompt ?? '')).toContain('<constant_world_info>');
+    expect(String(request?.prompt ?? '')).toContain('玄天界由宗门、世家与散修共同构成修行秩序');
+    expect(String(request?.prompt ?? '')).toContain('<matched_world_info>');
     expect(String(request?.prompt ?? '')).toContain('无我剑诀以忘我、忘剑为核心');
     expect(String(request?.systemPrompt ?? '')).toContain('为后续续写披露足够的上下文');
     expect(String(request?.systemPrompt ?? '')).toContain('剧情事件与阶段结束状态以history_messages和authoritative_facts为依据');
+    expect(String(request?.systemPrompt ?? '')).toContain('不证明预设事件已经发生');
   });
 
   it('grounds a correction batch with user-confirmed current facts instead of assistant speculation', () => {
@@ -407,9 +420,9 @@ describe('independent stage summaries', () => {
     const generateRaw = vi.fn(async () => summary);
     installContext([
       { is_user: true, mes: 'u1' },
-      { is_user: false, mes: '甲'.repeat(40_000) },
+      { is_user: false, mes: '甲'.repeat(60_000) },
       { is_user: true, mes: 'u2' },
-      { is_user: false, mes: '乙'.repeat(40_000) },
+      { is_user: false, mes: '乙'.repeat(60_000) },
     ], generateRaw, 10);
 
     const result = await new StageSummaryService().processAllThrough(3);
@@ -422,6 +435,32 @@ describe('independent stage summaries', () => {
     }]);
     expect(result.state?.stageSummary.coveredThroughMessageId).toBe(1);
     expect(generateRaw).toHaveBeenCalledTimes(1);
+    expect(MAX_SUMMARY_SOURCE_CHARACTERS).toBe(100_000);
+  });
+
+  it('keeps one oversized complete turn intact and records a bounded debug warning', async () => {
+    const generateRaw = vi.fn(async () => '超长单回合已经完整总结。');
+    const installed = installContext([
+      { is_user: true, mes: '继续这一回合。' },
+      { is_user: false, mes: '甲'.repeat(MAX_SUMMARY_SOURCE_CHARACTERS + 1) },
+    ], generateRaw, 10);
+    installed.settings.debug = true;
+
+    const result = await new StageSummaryService().processAllThrough(1);
+
+    expect(result.updatedChunks).toBe(1);
+    expect(result.state?.stageSummary.entries[0]).toMatchObject({
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 1,
+      text: '超长单回合已经完整总结。',
+    });
+    const warning = result.state?.debugTraces.find((trace) => (
+      trace.message.includes('单个完整剧情回合超过阶段总结原文字符上限')
+    ));
+    expect(warning?.details).toMatchObject({
+      sourceCharacterLimit: 100_000,
+    });
+    expect(Number(warning?.details?.sourceCharacters)).toBeGreaterThan(100_000);
   });
 
   it('creates immutable entries for successive batches without feeding an old summary back', async () => {

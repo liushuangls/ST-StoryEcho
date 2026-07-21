@@ -8,6 +8,7 @@ import { SourceRevisionCache } from '../history/source-revision-cache';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
+import { estimateTokens } from '../prompt/render';
 import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
 import { firstStoryPhaseBoundary } from '../retrieval/story-phase';
 import { SettingsRepository } from '../settings/repository';
@@ -17,7 +18,7 @@ import {
   STAGE_SUMMARY_SYSTEM_PROMPT,
 } from './prompts';
 
-const MAX_SUMMARY_SOURCE_CHARACTERS = 64_000;
+export const MAX_SUMMARY_SOURCE_CHARACTERS = 100_000;
 const MAX_STORED_SUMMARY_CHARACTERS = 64_000;
 
 export interface StageSummaryProgress {
@@ -295,6 +296,10 @@ export class StageSummaryService {
             ...(message.name ? { name: message.name } : {}),
             mes: message.mes,
           }));
+        const sourceCharacters = snapshot.reduce(
+          (total, message) => total + message.mes.length,
+          0,
+        );
         // An explicit story-phase transition closes the preceding summary even
         // when it contains fewer than N turns. This prevents one immutable
         // summary entry from mixing facts from two otherwise isolated phases.
@@ -309,7 +314,14 @@ export class StageSummaryService {
         const closedByStoryPhase = splitBeforeBoundary && snapshot.some((message) => (
           !message.is_system && storyContent(message).length > 0
         ));
-        if (!hasFullTurnBatch && !stoppedBeforeRequestedEnd && !closedByStoryPhase) {
+        const oversizedCompleteChunk = completedTurns > 0 &&
+          sourceCharacters > MAX_SUMMARY_SOURCE_CHARACTERS;
+        if (
+          !hasFullTurnBatch &&
+          !stoppedBeforeRequestedEnd &&
+          !closedByStoryPhase &&
+          !oversizedCompleteChunk
+        ) {
           recordDebugTrace(state, settings.debug, 'summary', '阶段总结等待凑满配置批次。', {
             startMessageId: chunk.startMessageId,
             availableEndMessageId: chunk.endMessageId,
@@ -317,6 +329,19 @@ export class StageSummaryService {
             targetTurns: settings.summary.targetTurnsPerUpdate,
           });
           break;
+        }
+        if (sourceCharacters > MAX_SUMMARY_SOURCE_CHARACTERS) {
+          recordDebugTrace(
+            state,
+            settings.debug,
+            'summary',
+            '单个完整剧情回合超过阶段总结原文字符上限，已保持回合完整并单独处理。',
+            {
+              range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+              sourceCharacters,
+              sourceCharacterLimit: MAX_SUMMARY_SOURCE_CHARACTERS,
+            },
+          );
         }
 
         const startedAt = performance.now();
@@ -341,6 +366,10 @@ export class StageSummaryService {
             range: `${chunk.startMessageId}-${chunk.endMessageId}`,
             tokens: reference.tokenCount,
             worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
+            constantWorldInfoEntries: reference.constantWorldInfoEntries?.length ?? 0,
+            constantWorldInfoCharacters: reference.constantWorldInfoCharacters ?? 0,
+            matchedWorldInfoEntries: reference.matchedWorldInfoEntries?.length ?? 0,
+            matchedWorldInfoCharacters: reference.matchedWorldInfoCharacters ?? 0,
             truncated: reference.truncated,
             warnings: reference.warnings.join(' | ') || '-',
             referencePreview: reference.text.slice(0, 4_000) || '-',
@@ -351,15 +380,26 @@ export class StageSummaryService {
             error: error instanceof Error ? error.message : String(error),
           });
         }
+        const prompt = buildStageSummaryPrompt(
+          snapshot,
+          chunk.startMessageId,
+          identity,
+          authoritativeFacts,
+          worldBackground,
+        );
+        if (settings.debug) {
+          const requestInput = `${STAGE_SUMMARY_SYSTEM_PROMPT}\n${prompt}`;
+          recordDebugTrace(state, true, 'summary', '阶段总结请求已构建。', {
+            range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+            sourceCharacters,
+            sourceCharacterLimit: MAX_SUMMARY_SOURCE_CHARACTERS,
+            requestCharacters: requestInput.length,
+            estimatedRequestTokens: estimateTokens(requestInput),
+          });
+        }
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
-          prompt: buildStageSummaryPrompt(
-            snapshot,
-            chunk.startMessageId,
-            identity,
-            authoritativeFacts,
-            worldBackground,
-          ),
+          prompt,
           maxTokens: settings.summary.maxTokens,
         });
         // Detect a branch/edit before accepting even the summary format, so a

@@ -5,6 +5,8 @@ import {
   buildSummaryWorldInfoReferenceContext,
   MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
   MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
+  MAX_STAGE_SUMMARY_CONSTANT_WORLD_INFO_CHARACTERS,
+  MAX_STAGE_SUMMARY_MATCHED_WORLD_INFO_CHARACTERS,
 } from '../src/reference/context';
 import type { SillyTavernContext } from '../src/platform/sillytavern';
 
@@ -130,7 +132,7 @@ describe('extraction reference context', () => {
 });
 
 describe('summary world-info background', () => {
-  it('includes only batch-matched world info without adding character-card fields', async () => {
+  it('includes blue-light and batch-matched world info without adding character-card fields', async () => {
     const result = await buildSummaryWorldInfoReferenceContext([
       { is_user: true, name: '刘爽', mes: '用户角色开始修炼无我剑诀。' },
       { is_user: false, name: '姜梦', mes: '姜梦指点了第一层心法。' },
@@ -153,22 +155,25 @@ describe('summary world-info background', () => {
         world: '常驻设定',
         uid: 13,
         constant: true,
-        content: '常驻内容不应无条件进入。',
+        content: '玄天界常驻修行秩序背景。',
       }]),
     }));
 
     expect(result.text).toContain('<story_echo_world_background>');
     expect(result.text).toContain('无我剑诀以忘我、忘剑为核心');
-    expect(result.text).toContain('静态设定语境');
-    expect(result.text).toContain('具体剧情事实以随后提供的剧情原文、阶段总结或现有骨架为依据');
+    expect(result.text).toContain('玄天界常驻修行秩序背景');
+    expect(result.text).toContain('<constant_world_info>');
+    expect(result.text).toContain('<matched_world_info>');
+    expect(result.text).toContain('具体剧情事实以随后提供的剧情原文、阶段总结、高权威校正或现有骨架为依据');
     expect(result.text).not.toContain('这段角色卡信息');
     expect(result.text).not.toContain('未命中内容');
-    expect(result.text).not.toContain('常驻内容');
-    expect(result.worldInfoEntries).toEqual(['蜀山设定#11#无我剑诀']);
+    expect(result.constantWorldInfoEntries).toEqual(['常驻设定#13']);
+    expect(result.matchedWorldInfoEntries).toEqual(['蜀山设定#11#无我剑诀']);
+    expect(result.worldInfoEntries).toEqual(['常驻设定#13', '蜀山设定#11#无我剑诀']);
     expect(result.tokenCount).toBeLessThanOrEqual(3_000);
   });
 
-  it('adds blue-light entries only to the story-skeleton background', async () => {
+  it('adds the same blue-light entries to stage summaries and the story skeleton', async () => {
     const worldEntries = [{
       world: '蜀山设定',
       uid: 11,
@@ -204,45 +209,77 @@ describe('summary world-info background', () => {
     expect(skeleton.text).toContain('<matched_world_info>');
     expect(skeleton.text).toContain('只作为故事背景与设定参考');
     expect(skeleton.text).not.toContain('这条蓝灯不属于当前角色');
-    expect(stage.text).not.toContain('玄天界以宗门、世家与散修势力共同构成修行秩序');
+    expect(stage.text).toContain('无我剑诀以忘我、忘剑为核心');
+    expect(stage.text).toContain('玄天界以宗门、世家与散修势力共同构成修行秩序');
+    expect(stage.text).toContain('激活方式=蓝灯常驻');
+    expect(stage.text).toContain('<constant_world_info>');
+    expect(stage.text).toContain('<matched_world_info>');
+    expect(stage.text).not.toContain('这条蓝灯不属于当前角色');
+  });
+
+  it('matches green entries only from the source batch and gives duplicate blue entries priority', async () => {
+    const result = await buildSummaryWorldInfoReferenceContext([
+      { is_user: true, mes: '本批只提到了无我剑诀。' },
+    ], settings, context({
+      getSortedWorldInfoEntries: vi.fn(async () => [{
+        world: '重复设定', uid: 1, key: ['无我剑诀'], content: '同一份基础设定。',
+      }, {
+        world: '重复设定', uid: 1, constant: true, content: '同一份基础设定。',
+      }, {
+        world: '常驻背景', uid: 2, constant: true, content: '太虚剑只在蓝灯正文中出现。',
+      }, {
+        world: '不应激活', uid: 3, key: ['太虚剑'], content: '绿灯不得由蓝灯正文反向激活。',
+      }]),
+    }));
+
+    expect(result.constantWorldInfoEntries).toEqual(['重复设定#1', '常驻背景#2']);
+    expect(result.matchedWorldInfoEntries).toEqual([]);
+    expect(result.text.match(/同一份基础设定。/gu)).toHaveLength(1);
+    expect(result.text).not.toContain('绿灯不得由蓝灯正文反向激活');
   });
 
   it('separately limits complete blue entries to 20000 and green matches to 10000 characters', async () => {
-    const result = await buildStorySkeletonWorldInfoReferenceContext([
-      { is_user: true, mes: '无我剑诀 太虚剑' },
-    ], {
-      ...settings,
-      maxTokens: 256,
-    }, context({
-      getSortedWorldInfoEntries: vi.fn(async () => [
+    const worldEntries = [
         { world: '蓝灯', uid: 1, constant: true, content: `蓝一${'甲'.repeat(8_000)}` },
         { world: '蓝灯', uid: 2, constant: true, content: `蓝二${'乙'.repeat(8_000)}` },
         { world: '蓝灯', uid: 3, constant: true, content: `蓝三${'丙'.repeat(8_000)}` },
         { world: '绿灯', uid: 4, key: ['无我剑诀'], content: `绿一${'丁'.repeat(6_000)}` },
         { world: '绿灯', uid: 5, key: ['太虚剑'], content: `绿二${'戊'.repeat(6_000)}` },
-      ]),
-    }));
+    ];
+    const build = (builder: typeof buildSummaryWorldInfoReferenceContext) => builder(
+      [{ is_user: true, mes: '无我剑诀 太虚剑' }],
+      { ...settings, maxTokens: 256 },
+      context({ getSortedWorldInfoEntries: vi.fn(async () => worldEntries) }),
+    );
+    const results = await Promise.all([
+      build(buildSummaryWorldInfoReferenceContext),
+      build(buildStorySkeletonWorldInfoReferenceContext),
+    ]);
 
-    const constant = result.text.match(
-      /<constant_world_info>\n([\s\S]*?)\n<\/constant_world_info>/u,
-    )?.[1] ?? '';
-    const matched = result.text.match(
-      /<matched_world_info>\n([\s\S]*?)\n<\/matched_world_info>/u,
-    )?.[1] ?? '';
-    expect(Array.from(constant).length).toBeLessThanOrEqual(
-      MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
-    );
-    expect(Array.from(matched).length).toBeLessThanOrEqual(
-      MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
-    );
-    expect(constant).toContain('蓝一');
-    expect(constant).toContain('蓝二');
-    expect(constant).not.toContain('蓝三');
-    expect(matched).toContain('绿一');
-    expect(matched).not.toContain('绿二');
-    expect(result.text).toContain('</story_echo_world_background>');
-    expect(result.truncated).toBe(true);
-    expect(result.tokenCount).toBeGreaterThan(settings.maxTokens);
+    for (const result of results) {
+      const constant = result.text.match(
+        /<constant_world_info>\n([\s\S]*?)\n<\/constant_world_info>/u,
+      )?.[1] ?? '';
+      const matched = result.text.match(
+        /<matched_world_info>\n([\s\S]*?)\n<\/matched_world_info>/u,
+      )?.[1] ?? '';
+      expect(Array.from(constant).length).toBeLessThanOrEqual(
+        MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
+      );
+      expect(Array.from(matched).length).toBeLessThanOrEqual(
+        MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
+      );
+      expect(constant).toContain('蓝一');
+      expect(constant).toContain('蓝二');
+      expect(constant).not.toContain('蓝三');
+      expect(matched).toContain('绿一');
+      expect(matched).not.toContain('绿二');
+      expect(result.text).toContain('</story_echo_world_background>');
+      expect(result.truncated).toBe(true);
+      expect(result.tokenCount).toBeGreaterThan(settings.maxTokens);
+    }
+    expect(MAX_STAGE_SUMMARY_CONSTANT_WORLD_INFO_CHARACTERS).toBe(20_000);
+    expect(MAX_STAGE_SUMMARY_MATCHED_WORLD_INFO_CHARACTERS).toBe(10_000);
   });
 
   it('respects the shared reference-mode switch', async () => {
@@ -281,7 +318,7 @@ describe('summary world-info background', () => {
     expect(result.truncated).toBe(true);
   });
 
-  it('fits a long world-info entry with a bounded number of tokenizer calls', async () => {
+  it('does not apply the compact reference token budget to stage-summary world info', async () => {
     const getTokenCountAsync = vi.fn(async (text: string) => Array.from(text).length);
     const result = await buildSummaryWorldInfoReferenceContext([
       { is_user: true, mes: '无我剑诀' },
@@ -295,12 +332,13 @@ describe('summary world-info background', () => {
         world: '大型世界书',
         uid: 1,
         key: ['无我剑诀'],
-        content: '详细世界设定'.repeat(5_000),
+        content: '详细世界设定'.repeat(1_000),
       }]),
     }));
 
-    expect(result.tokenCount).toBeLessThanOrEqual(1_000);
-    expect(result.truncated).toBe(true);
-    expect(getTokenCountAsync.mock.calls.length).toBeLessThanOrEqual(8);
+    expect(result.text).toContain('详细世界设定'.repeat(1_000));
+    expect(result.tokenCount).toBeGreaterThan(1_000);
+    expect(result.truncated).toBe(false);
+    expect(getTokenCountAsync).toHaveBeenCalledOnce();
   });
 });
