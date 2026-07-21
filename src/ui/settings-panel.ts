@@ -205,7 +205,7 @@ function panelTemplate(): HTMLElement {
         <div class="story-echo-switch-row story-echo-switch-primary">
           <div class="story-echo-switch-copy">
             <span class="story-echo-switch-title">启用 StoryEcho 上下文管理</span>
-            <span class="story-echo-switch-description">使用 LLM 维护最小原文窗口、阶段总结与全局剧情骨架</span>
+            <span class="story-echo-switch-description">使用 LLM 维护最小原文窗口、阶段总结与长期剧情骨架</span>
           </div>
           <div class="story-echo-toggle">
             <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
@@ -310,7 +310,7 @@ function panelTemplate(): HTMLElement {
               <i class="fa-solid fa-book-atlas" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
                 <span class="story-echo-section-summary-title">剧情处理参考</span>
-                <span class="story-echo-section-summary-description">角色卡与当前文本命中的世界书</span>
+                <span class="story-echo-section-summary-description">角色卡、命中世界书与骨架蓝灯背景</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -319,7 +319,7 @@ function panelTemplate(): HTMLElement {
             <label class="story-echo-field">
               <span>参考模式</span>
               <select id="story-echo-reference-mode" class="text_pole">
-                <option value="character-world-info">抽取使用角色卡，抽取/总结/骨架使用命中世界书（推荐）</option>
+                <option value="character-world-info">抽取使用角色卡；抽取/总结使用命中世界书，骨架另含蓝灯（推荐）</option>
                 <option value="character">仅抽取使用角色卡</option>
                 <option value="off">关闭</option>
               </select>
@@ -333,7 +333,7 @@ function panelTemplate(): HTMLElement {
               <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              只读取角色精简信息和当前处理文本直接命中的世界书，不传入预设、system、jailbreak、示例对话或欢迎语。阶段总结与全局剧情骨架仅使用命中世界书作为背景，不使用角色卡，也不将背景当作剧情事实证据。
+              只读取角色精简信息和当前处理文本直接命中的世界书，不传入预设、system、jailbreak、示例对话或欢迎语。阶段总结仅使用当前来源命中的世界书；长期剧情骨架的首次生成、增量更新和重新生成都会携带蓝灯常驻条目（最多 20000 字符）与本批来源命中的绿灯条目（最多 10000 字符），这两项骨架专用字符上限不受上面的参考 Token 预算二次压缩。骨架不使用角色卡，世界书只作为背景设定，不作为已发生剧情的证据。
             </p>
           </div>
         </details>
@@ -343,7 +343,7 @@ function panelTemplate(): HTMLElement {
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-book-open" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">历史总结与全局骨架</span>
+                <span class="story-echo-section-summary-title">历史总结与长期骨架</span>
                 <span class="story-echo-section-summary-description">总结间隔 N、携带窗口 S 与两级输出预算</span>
               </span>
             </span>
@@ -363,11 +363,11 @@ function panelTemplate(): HTMLElement {
               <input id="story-echo-summary-max-tokens" class="text_pole" type="number" min="128" max="8192" step="128">
             </label>
             <label class="story-echo-field">
-              <span>全局剧情骨架最大 Token</span>
+              <span>长期剧情骨架最大 Token</span>
               <input id="story-echo-skeleton-max-tokens" class="text_pole" type="number" min="512" max="10000" step="128">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              总开关开启后自动维护阶段总结。最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文。较老总结会汇入始终携带的全局剧情骨架，请求同时携带最近 S 条阶段总结；骨架默认上限为 5000 Token，可在 512～10000 之间调整。
+              总开关开启后自动维护阶段总结。最小窗口 W 内原文始终保留；窗口外每满 N 轮生成一条独立总结，未满 N 轮继续保留原文。较老总结会汇入记录重要历史事件与剧情大纲的长期骨架，请求同时携带最近 S 条阶段总结；当前状态和人物档案由近期上下文、MVU变量与世界书承担。骨架默认上限为 5000 Token，可在 512～10000 之间调整。
             </p>
             <div class="story-echo-field-wide">
               ${stageSummaryManagerTemplate()}

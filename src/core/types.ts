@@ -170,7 +170,7 @@ export interface StageSummaryEntry {
 
 export interface StorySkeleton {
   text: string;
-  /** Last message covered by the archived stage-summary prefix folded into this skeleton. */
+  /** Last message covered by the stage-summary prefix folded into this historical skeleton. */
   coveredThroughMessageId: number;
   /** Digest of the exact stage-summary prefix used to build the current skeleton. */
   sourceHash: string;

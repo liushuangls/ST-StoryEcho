@@ -62,14 +62,16 @@ describe('renderMemoryBlock', () => {
   });
 
   it('renders the global skeleton as the lowest-priority long-term narrative layer', () => {
-    const skeleton = '用户角色是蜀山弟子，正在修炼无我剑诀。\n姜梦负责指导其突破，剑冢异动的原因尚未确认。';
+    const skeleton = '用户角色拜入蜀山并开始学习无我剑诀。\n姜梦指导其完成突破，剑冢异动由此成为未决主线。';
 
     const block = renderStorySkeletonBlock(skeleton, 40);
     const strict = renderStorySkeletonBlock(skeleton, 40, true);
 
     expect(block).toContain('<story_echo_skeleton>');
     expect(block).toContain('覆盖归档历史至消息：40');
-    expect(block).toContain('优先级低于后面的阶段总结、近期原文、动态召回和当前用户输入');
+    expect(block).toContain('长期剧情史与剧情大纲');
+    expect(block).toContain('当前场景与即时状态由时间更近的阶段总结、近期原文、动态召回、MVU变量和当前用户输入提供');
+    expect(block).toContain('发生冲突时始终以这些最新信息为准');
     expect(strict).toBe('');
   });
 

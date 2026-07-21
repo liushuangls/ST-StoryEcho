@@ -85,7 +85,7 @@ export function stageSummaryManagerTemplate(): string {
             <textarea id="story-echo-skeleton-text" class="text_pole" rows="16" maxlength="96000" disabled placeholder="最近阶段总结超过 S 条后自动生成"></textarea>
           </label>
           <p class="story-echo-hint">
-            新聊天在第 S+1 条阶段总结归档时首次生成；已有长聊天打开并稳定约 3 秒后自动补建。平时每累计 3 条待归档总结或约 3000 Token 更新一次；更新成功前，待合并总结仍会随请求携带。正文可按剧情需要自由分段；空白内容不能保存，界面不提供删除操作。
+            骨架记录长期重要事件、剧情大纲、关键因果与未决主线，不维护角色当前状态或 NPC 档案；最新情况由最近阶段总结、近期原文、MVU变量与世界书承担。新聊天在第 S+1 条阶段总结归档时首次生成，并从旧到新读取当时全部阶段总结；之后每有一条尚未覆盖的总结首次进入归档，就与旧骨架一起增量更新。“重新生成”会丢弃旧骨架并从全部有效阶段总结干净重建，阶段总结按每批最多 80000 字符顺序处理，所有批次成功后才替换旧骨架。正文可按剧情需要自由分段，空白内容不能保存，界面不提供删除操作。
           </p>
           <div class="story-echo-summary-editor-actions">
             <button id="story-echo-skeleton-save" class="menu_button story-echo-action-primary" type="button" disabled>
@@ -93,6 +93,9 @@ export function stageSummaryManagerTemplate(): string {
             </button>
             <button id="story-echo-skeleton-update" class="menu_button" type="button">
               <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>立即更新骨架</span>
+            </button>
+            <button id="story-echo-skeleton-rebuild" class="menu_button story-echo-skeleton-rebuild" type="button">
+              <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i><span>重新生成骨架</span>
             </button>
           </div>
         </div>
@@ -260,6 +263,37 @@ export class StageSummaryMetadataManager {
       }
     });
 
+    element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild').addEventListener('click', async (event) => {
+      const confirmation = this.skeletonDirty
+        ? '骨架有尚未保存的修改。重新生成会放弃这些修改，并从当前聊天全部有效阶段总结由旧到新干净重建。确定继续吗？'
+        : '将丢弃现有骨架基线，从当前聊天全部有效阶段总结由旧到新分批重建；所有批次成功后才替换现有骨架。确定继续吗？';
+      if (!globalThis.confirm(confirmation)) {
+        return;
+      }
+      const button = event.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try {
+        const requestedChatId = getCurrentChatId();
+        const result = await storyEchoTaskCoordinator.enqueueManual('重新生成全局剧情骨架', async () => {
+          if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+            throw new Error('等待重新生成骨架期间聊天已切换，已取消任务。');
+          }
+          return storySkeletonService.rebuildAll();
+        });
+        this.skeletonDirty = false;
+        await onChanged();
+        if (result.updatedChunks > 0) {
+          notify.success(`全局剧情骨架已从全部有效阶段总结重新生成，共处理 ${result.updatedChunks} 批。`);
+        } else {
+          notify.info('当前聊天还没有可用于重新生成骨架的阶段总结。');
+        }
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : '重新生成全局剧情骨架失败。');
+      } finally {
+        button.disabled = false;
+      }
+    });
+
     element<HTMLInputElement>(panel, '#story-echo-summary-search').addEventListener('input', () => {
       this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
@@ -394,10 +428,12 @@ export class StageSummaryMetadataManager {
     const skeletonText = element<HTMLTextAreaElement>(panel, '#story-echo-skeleton-text');
     const skeletonSave = element<HTMLButtonElement>(panel, '#story-echo-skeleton-save');
     const skeletonUpdate = element<HTMLButtonElement>(panel, '#story-echo-skeleton-update');
+    const skeletonRebuild = element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild');
     const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
     skeletonText.disabled = !skeleton?.text;
     skeletonSave.disabled = !skeleton?.text;
     skeletonUpdate.disabled = !state;
+    skeletonRebuild.disabled = !state;
     skeletonStatus.textContent = skeleton?.text
       ? [
           skeleton.stale ? '待重建，当前不会注入' : `覆盖到消息 ${skeleton.coveredThroughMessageId}`,

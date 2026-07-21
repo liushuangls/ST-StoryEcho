@@ -55,7 +55,12 @@ describe('genre-neutral LLM prompts', () => {
     ].join('\n');
     const skeletonPrompt = [
       STORY_SKELETON_SYSTEM_PROMPT,
-      buildStorySkeletonPrompt('', [], 5_000, false),
+      buildStorySkeletonPrompt({
+        existingSkeleton: '',
+        sourceEntries: [],
+        maxTokens: 5_000,
+        mode: 'initial-build',
+      }),
     ].join('\n');
 
     for (const prompt of [stagePrompt, skeletonPrompt]) {

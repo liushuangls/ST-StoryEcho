@@ -61,8 +61,14 @@ describe('stage summary manager pagination and template', () => {
     expect(template).toContain('id="story-echo-skeleton-text"');
     expect(template).toContain('id="story-echo-skeleton-save"');
     expect(template).toContain('id="story-echo-skeleton-update"');
+    expect(template).toContain('id="story-echo-skeleton-rebuild"');
     expect(template).not.toContain('id="story-echo-skeleton-delete"');
     expect(template).toContain('可编辑、不可删除');
+    expect(template).toContain('长期重要事件、剧情大纲、关键因果与未决主线');
+    expect(template).toContain('不维护角色当前状态或 NPC 档案');
+    expect(template).toContain('每有一条尚未覆盖的总结首次进入归档');
+    expect(template).toContain('从全部有效阶段总结干净重建');
+    expect(template).toContain('每批最多 80000 字符');
     expect(template).toContain('正文可按剧情需要自由分段');
     expect(template).not.toContain('必须保留六个分级标题');
     expect(template).toContain('id="story-echo-summary-search"');

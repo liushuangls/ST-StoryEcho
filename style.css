@@ -668,6 +668,10 @@
   margin: 0;
 }
 
+#story-echo-settings .story-echo-skeleton-rebuild {
+  grid-column: 1 / -1;
+}
+
 #story-echo-settings .story-echo-summary-delete {
   border-color: color-mix(in srgb, #d9534f 70%, var(--SmartThemeBorderColor));
 }

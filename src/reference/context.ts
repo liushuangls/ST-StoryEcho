@@ -14,6 +14,8 @@ import { estimateTokens } from '../prompt/render';
 const WORLD_INFO_MODULE_URL = '/scripts/world-info.js';
 const MAX_CHARACTER_REFERENCE_TOKENS = 1_200;
 const MAX_REFERENCE_SOURCE_CHARACTERS = 100_000;
+export const MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS = 20_000;
+export const MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS = 10_000;
 
 interface WorldInfoModule {
   getSortedEntries?: () => Promise<SillyTavernWorldInfoEntry[]>;
@@ -31,6 +33,7 @@ export interface ExtractionReferenceContext {
 interface MatchedWorldInfoEntry {
   entry: SillyTavernWorldInfoEntry;
   matchedKeys: string[];
+  activation: 'keyword' | 'constant';
 }
 
 interface PreparedHistoryText {
@@ -45,6 +48,8 @@ interface ReferenceContextBuildOptions {
   purpose: ReferenceContextPurpose;
   includeCharacter: boolean;
   includeWorldInfo: boolean;
+  includeConstantWorldInfo?: boolean;
+  maxCharacters?: number;
 }
 
 let worldInfoModulePromise: Promise<WorldInfoModule> | undefined;
@@ -181,11 +186,7 @@ function matchedWorldInfoKeys(
   batchNames: string[],
 ): string[] {
   if (
-    entry.disable === true ||
-    !clean(entry.content) ||
-    entry.decorators?.some((decorator) => decorator.startsWith('@@dont_activate')) ||
-    (Array.isArray(entry.triggers) && entry.triggers.length > 0 && !entry.triggers.includes('normal')) ||
-    !passesCharacterFilter(entry, context, batchNames)
+    !worldInfoEntryAvailable(entry, context, batchNames)
   ) {
     return [];
   }
@@ -211,6 +212,18 @@ function matchedWorldInfoKeys(
         ? allSecondary
         : anySecondary;
   return secondaryAccepted ? primaryMatches : [];
+}
+
+function worldInfoEntryAvailable(
+  entry: SillyTavernWorldInfoEntry,
+  context: SillyTavernContext,
+  batchNames: string[],
+): boolean {
+  return entry.disable !== true &&
+    Boolean(clean(entry.content)) &&
+    !entry.decorators?.some((decorator) => decorator.startsWith('@@dont_activate')) &&
+    (!Array.isArray(entry.triggers) || entry.triggers.length === 0 || entry.triggers.includes('normal')) &&
+    passesCharacterFilter(entry, context, batchNames);
 }
 
 async function sortedWorldInfoEntries(
@@ -277,20 +290,69 @@ function characterReference(
   };
 }
 
+function worldInfoEntryReference(
+  matched: MatchedWorldInfoEntry,
+  context: SillyTavernContext,
+  index: number,
+): string {
+  const { entry, matchedKeys, activation } = matched;
+  const book = clean(entry.world) || '未命名世界书';
+  const uid = entry.uid === undefined ? '?' : String(entry.uid);
+  const comment = clean(entry.comment);
+  const header = [
+    `世界书${index + 1}`,
+    `${book}#${uid}`,
+    comment,
+    activation === 'constant'
+      ? '激活方式=蓝灯常驻'
+      : `触发词=${matchedKeys.map((key) => clean(key)).filter(Boolean).join('、')}`,
+  ].filter(Boolean).join('｜');
+  const content = safeSubstitute(context, clean(entry.content));
+  return `[${escapeReferenceValue(header)}]\n${escapeReferenceValue(content)}`;
+}
+
 function worldInfoReference(entries: MatchedWorldInfoEntry[], context: SillyTavernContext): string {
-  return entries.map(({ entry, matchedKeys }, index) => {
-    const book = clean(entry.world) || '未命名世界书';
-    const uid = entry.uid === undefined ? '?' : String(entry.uid);
-    const comment = clean(entry.comment);
-    const header = [
-      `世界书${index + 1}`,
-      `${book}#${uid}`,
-      comment,
-      `触发词=${matchedKeys.map((key) => clean(key)).filter(Boolean).join('、')}`,
-    ].filter(Boolean).join('｜');
-    const content = safeSubstitute(context, clean(entry.content));
-    return `[${escapeReferenceValue(header)}]\n${escapeReferenceValue(content)}`;
-  }).join('\n\n');
+  return entries.map((entry, index) => worldInfoEntryReference(entry, context, index)).join('\n\n');
+}
+
+function fitWholeWorldInfoEntries(
+  entries: readonly MatchedWorldInfoEntry[],
+  context: SillyTavernContext,
+  maxCharacters: number,
+): { entries: MatchedWorldInfoEntry[]; text: string; truncated: boolean } {
+  const selected: MatchedWorldInfoEntry[] = [];
+  const blocks: string[] = [];
+  let characters = 0;
+  for (const entry of entries) {
+    const block = worldInfoEntryReference(entry, context, selected.length);
+    const separatorCharacters = blocks.length > 0 ? 2 : 0;
+    const blockCharacters = Array.from(block).length;
+    if (characters + separatorCharacters + blockCharacters > maxCharacters) {
+      return { entries: selected, text: blocks.join('\n\n'), truncated: true };
+    }
+    selected.push(entry);
+    blocks.push(block);
+    characters += separatorCharacters + blockCharacters;
+  }
+  return { entries: selected, text: blocks.join('\n\n'), truncated: false };
+}
+
+function truncateToCharacterBudget(
+  value: string,
+  maxCharacters: number,
+): { text: string; truncated: boolean } {
+  const points = Array.from(value);
+  if (points.length <= maxCharacters) {
+    return { text: value, truncated: false };
+  }
+  if (maxCharacters <= 0) {
+    return { text: '', truncated: Boolean(value) };
+  }
+  const suffix = '…';
+  return {
+    text: `${points.slice(0, Math.max(0, maxCharacters - 1)).join('').trimEnd()}${suffix}`,
+    truncated: true,
+  };
 }
 
 async function truncateToTokenBudget(
@@ -376,8 +438,12 @@ async function buildReferenceContext(
   const fittedCharacter = await truncateToTokenBudget(character.text, characterLimit, countTokens);
   const batchNames = unique(messages.map((message) => clean(message.name)));
   let matchedEntries: MatchedWorldInfoEntry[] = [];
+  let constantEntries: MatchedWorldInfoEntry[] = [];
   let availableEntryCount = 0;
-  if (options.includeWorldInfo && settings.maxWorldInfoEntries > 0) {
+  if (
+    options.includeWorldInfo &&
+    (settings.maxWorldInfoEntries > 0 || options.includeConstantWorldInfo)
+  ) {
     try {
       const historyText = prepareHistoryText(messages
         .filter((message) => !message.is_system)
@@ -387,26 +453,37 @@ async function buildReferenceContext(
       const entries = await sortedWorldInfoEntries(context);
       const maximumMatches = Math.min(20, Math.max(0, Math.floor(settings.maxWorldInfoEntries)));
       const allMatches: MatchedWorldInfoEntry[] = [];
+      const allConstants: MatchedWorldInfoEntry[] = [];
+      let keywordScanComplete = maximumMatches === 0;
       for (const entry of entries) {
-        const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
-        if (matchedKeys.length > 0) {
-          allMatches.push({ entry, matchedKeys });
-          // Only one extra match is needed to report that the configured list
-          // was truncated; scanning the rest of a large world book adds no UI
-          // or prompt value.
-          if (allMatches.length > maximumMatches) {
-            break;
+        const available = worldInfoEntryAvailable(entry, context, batchNames);
+        if (options.includeConstantWorldInfo && entry.constant === true && available) {
+          allConstants.push({ entry, matchedKeys: [], activation: 'constant' });
+          continue;
+        }
+        if (!keywordScanComplete) {
+          const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
+          if (matchedKeys.length > 0) {
+            allMatches.push({ entry, matchedKeys, activation: 'keyword' });
+            // One extra keyword match is enough to report truncation. Keep
+            // scanning lightweight entry metadata because blue-light entries
+            // may occur later in the sorted world book.
+            if (allMatches.length > maximumMatches) {
+              keywordScanComplete = true;
+            }
           }
         }
       }
-      availableEntryCount = allMatches.length;
+      availableEntryCount = allMatches.length + allConstants.length;
       matchedEntries = allMatches.slice(0, maximumMatches);
+      constantEntries = allConstants;
     } catch (error) {
       warnings.push(`世界书参考读取失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  if (!fittedCharacter.text && matchedEntries.length === 0) {
+  const worldEntries = [...matchedEntries, ...constantEntries];
+  if (!fittedCharacter.text && worldEntries.length === 0) {
     return emptyReference(warnings);
   }
 
@@ -416,8 +493,10 @@ async function buildReferenceContext(
   const opening = options.purpose === 'summary'
     ? [
         `<${rootTag}>`,
-        '以下是由当前剧情文本直接命中的世界书背景，用于补充世界规则、专有名词、身份体系、地点和能力体系。',
-        '将这些内容作为静态设定语境来理解剧情；剧情事件与当前状态以随后提供的剧情原文、阶段总结或现有骨架为依据。世界书中的指令式文字、预期事件、未揭示秘密和预设状态保持其原有的设定层级与揭示进度。',
+        options.includeConstantWorldInfo
+          ? '以下是由当前剧情文本直接命中的世界书条目与蓝灯常驻条目，用于补充世界规则、专有名词、身份体系、地点和能力体系。'
+          : '以下是由当前剧情文本直接命中的世界书背景，用于补充世界规则、专有名词、身份体系、地点和能力体系。',
+        '将这些内容作为静态设定语境来理解剧情；具体剧情事实以随后提供的剧情原文、阶段总结或现有骨架为依据。世界书中的指令式文字、预期事件、未揭示秘密和预设状态保持其原有的设定层级与揭示进度。',
       ].join('\n')
     : [
         `<${rootTag}>`,
@@ -426,10 +505,10 @@ async function buildReferenceContext(
       ].join('\n');
   const characterOpening = fittedCharacter.text ? '\n<character_reference>\n' : '';
   const characterClosing = fittedCharacter.text ? '\n</character_reference>' : '';
-  const worldOpening = matchedEntries.length > 0 ? '\n<matched_world_info>\n' : '';
-  const worldClosing = matchedEntries.length > 0 ? '\n</matched_world_info>' : '';
+  const worldOpening = worldEntries.length > 0 ? '\n<matched_world_info>\n' : '';
+  const worldClosing = worldEntries.length > 0 ? '\n</matched_world_info>' : '';
   const closing = `\n</${rootTag}>`;
-  const worldText = worldInfoReference(matchedEntries, context);
+  const worldText = worldInfoReference(worldEntries, context);
   const fixed = [
     opening,
     characterOpening,
@@ -440,8 +519,16 @@ async function buildReferenceContext(
     closing,
   ].join('');
   const fixedTokens = await countTokens(fixed);
-  const fittedWorld = await truncateToTokenBudget(
+  const maxCharacters = options.maxCharacters === undefined
+    ? Number.MAX_SAFE_INTEGER
+    : Math.max(0, Math.floor(options.maxCharacters));
+  const fixedCharacters = Array.from(fixed).length;
+  const fittedWorldCharacters = truncateToCharacterBudget(
     worldText,
+    Math.max(0, maxCharacters - fixedCharacters),
+  );
+  const fittedWorld = await truncateToTokenBudget(
+    fittedWorldCharacters.text,
     Math.max(0, maxTokens - fixedTokens),
     countTokens,
   );
@@ -492,12 +579,15 @@ async function buildReferenceContext(
     text,
     tokenCount,
     characterFields: fittedCharacter.text ? character.fields : [],
-    worldInfoEntries: matchedEntries.map(({ entry }) => [
+    worldInfoEntries: worldEntries.map(({ entry }) => [
       clean(entry.world) || '未命名世界书',
       entry.uid === undefined ? '?' : String(entry.uid),
       clean(entry.comment),
     ].filter(Boolean).join('#')),
-    truncated: fittedCharacter.truncated || fittedWorld.truncated || availableEntryCount > matchedEntries.length,
+    truncated: fittedCharacter.truncated ||
+      fittedWorldCharacters.truncated ||
+      fittedWorld.truncated ||
+      availableEntryCount > worldEntries.length,
     warnings,
   };
 }
@@ -531,4 +621,122 @@ export async function buildSummaryWorldInfoReferenceContext(
     includeCharacter: false,
     includeWorldInfo: true,
   });
+}
+
+export async function buildStorySkeletonWorldInfoReferenceContext(
+  messages: TavernChatMessage[],
+  settings: StoryEchoSettings['extraction']['reference'],
+  context = getContext(),
+): Promise<ExtractionReferenceContext> {
+  if (settings.mode !== 'character-world-info') {
+    return emptyReference();
+  }
+
+  const warnings: string[] = [];
+  const batchNames = unique(messages.map((message) => clean(message.name)));
+  const historyText = prepareHistoryText(messages
+    .filter((message) => !message.is_system)
+    .map((message) => [clean(message.name), storyContent(message)].filter(Boolean).join(': '))
+    .reverse()
+    .join('\n'));
+  const maximumMatches = Math.min(20, Math.max(0, Math.floor(settings.maxWorldInfoEntries)));
+  const constants: MatchedWorldInfoEntry[] = [];
+  const matches: MatchedWorldInfoEntry[] = [];
+  let matchOverflow = false;
+
+  try {
+    const entries = await sortedWorldInfoEntries(context);
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      if (!worldInfoEntryAvailable(entry, context, batchNames)) {
+        continue;
+      }
+      const identity = [
+        clean(entry.world),
+        entry.uid === undefined ? '' : String(entry.uid),
+        clean(entry.comment),
+        clean(entry.content),
+      ].join('\u0000');
+      if (seen.has(identity)) {
+        continue;
+      }
+      if (entry.constant === true) {
+        seen.add(identity);
+        constants.push({ entry, matchedKeys: [], activation: 'constant' });
+        continue;
+      }
+      if (matchOverflow) {
+        continue;
+      }
+      const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
+      if (matchedKeys.length === 0) {
+        continue;
+      }
+      if (matches.length >= maximumMatches) {
+        matchOverflow = true;
+        continue;
+      }
+      seen.add(identity);
+      matches.push({ entry, matchedKeys, activation: 'keyword' });
+    }
+  } catch (error) {
+    return emptyReference([
+      `世界书参考读取失败：${error instanceof Error ? error.message : String(error)}`,
+    ]);
+  }
+
+  const fittedConstants = fitWholeWorldInfoEntries(
+    constants,
+    context,
+    MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
+  );
+  const fittedMatches = fitWholeWorldInfoEntries(
+    matches,
+    context,
+    MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
+  );
+  if (!fittedConstants.text && !fittedMatches.text) {
+    return emptyReference(warnings);
+  }
+
+  const text = [
+    '<story_echo_world_background>',
+    '以下世界书内容只作为故事背景与设定参考，用于理解世界规则、专有名词、人物身份、地点和能力体系。',
+    '它们不证明某件剧情已经发生，也不代表角色当前状态；历史事件以本轮阶段总结和历史骨架为依据。',
+    ...(fittedConstants.text ? [
+      '<constant_world_info>',
+      fittedConstants.text,
+      '</constant_world_info>',
+    ] : []),
+    ...(fittedMatches.text ? [
+      '<matched_world_info>',
+      fittedMatches.text,
+      '</matched_world_info>',
+    ] : []),
+    '</story_echo_world_background>',
+  ].join('\n');
+  let tokenCount = estimateTokens(text);
+  if (context.getTokenCountAsync) {
+    try {
+      const count = await context.getTokenCountAsync(text, 0);
+      if (Number.isFinite(count) && count >= 0) {
+        tokenCount = Math.ceil(count);
+      }
+    } catch {
+      warnings.push('酒馆Tokenizer不可用，参考上下文Token统计使用本地估算。');
+    }
+  }
+  const selected = [...fittedConstants.entries, ...fittedMatches.entries];
+  return {
+    text,
+    tokenCount,
+    characterFields: [],
+    worldInfoEntries: selected.map(({ entry }) => [
+      clean(entry.world) || '未命名世界书',
+      entry.uid === undefined ? '?' : String(entry.uid),
+      clean(entry.comment),
+    ].filter(Boolean).join('#')),
+    truncated: fittedConstants.truncated || fittedMatches.truncated || matchOverflow,
+    warnings,
+  };
 }

@@ -7,6 +7,9 @@ import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { StorySkeletonService } from '../src/summary/skeleton-service';
 import { STORY_SKELETON_SYSTEM_PROMPT } from '../src/summary/skeleton-prompts';
 import {
+  MAX_SKELETON_SOURCE_BATCH_CHARACTERS,
+  skeletonSourceBatchCharacters,
+  skeletonSourceBatches,
   storySkeletonIsUsable,
   storySkeletonSourceHash,
 } from '../src/summary/skeleton-state';
@@ -15,15 +18,15 @@ import { chatState } from './fixtures';
 function skeletonText(core = '用户角色与姜梦共同推进蜀山主线。'): string {
   return [
     core,
-    '用户角色在蜀山修炼无我剑诀，并承诺继续完成姜梦安排的功课。',
-    '当前用户角色仍在蜀山；剑冢异动的原因尚未确认。',
+    '用户角色在蜀山学习无我剑诀，并在姜梦护法下完成一次关键突破。',
+    '剑冢异动引出了来源未明的旧阵主线，相关幕后势力仍待调查。',
   ].join('\n');
 }
 
 function stageEntry(index: number): StageSummaryEntry {
   const start = index * 2;
   return {
-    text: `第${index + 1}阶段完成，当前状态更新为状态${index + 1}；下一阶段仍需推进目标${index + 1}。`,
+    text: `第${index + 1}阶段完成，发生重要事件${index + 1}；后续仍需推进目标${index + 1}。`,
     sourceStartMessageId: start,
     sourceEndMessageId: start + 1,
     sourceHash: `stage-source-${index}`,
@@ -49,7 +52,7 @@ function installContext(
     ...(entries.length > 0 ? { updatedAt: entries.at(-1)!.updatedAt } : {}),
   };
   const chat: TavernChatMessage[] = Array.from(
-    { length: entries.at(-1)?.sourceEndMessageId ?? 0 },
+    { length: (entries.at(-1)?.sourceEndMessageId ?? -1) + 1 },
     (_, index) => ({ is_user: index % 2 === 0, mes: `消息${index}` }),
   );
   const context = {
@@ -74,15 +77,25 @@ afterEach(() => {
 });
 
 describe('global story skeleton lifecycle', () => {
-  it('keeps a genre-adaptive long-term plot spine with cultivation progression', () => {
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择最合适的写法');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可重点说明修炼体系、境界与突破');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('概括性标题、动态小节、内容分类、自然段落');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('重大因果和成长轨迹');
+  it('defines a genre-adaptive historical outline instead of a status or NPC profile', () => {
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('长期的重要历史事件记录与剧情大纲');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('人物档案、NPC介绍');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前境界、属性数值、生命状态');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可突出重要历练');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择合适的标题');
   });
 
-  it('first builds when the S+1 stage summary becomes archived', async () => {
-    const generateRaw = vi.fn(async () => skeletonText());
+  it('first builds at S+1 but includes every current summary regardless of S', async () => {
+    const generateRaw = vi.fn(async (options: { prompt: string }) => {
+      expect(options.prompt).toContain('<baseline_status>initial-build</baseline_status>');
+      for (let index = 1; index <= 5; index += 1) {
+        expect(options.prompt).toContain(`第${index}阶段完成`);
+      }
+      expect(options.prompt.indexOf('第1阶段完成')).toBeLessThan(
+        options.prompt.indexOf('第5阶段完成'),
+      );
+      return skeletonText();
+    });
     const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
     installContext(entries, generateRaw, { windowSize: 4 });
 
@@ -90,17 +103,17 @@ describe('global story skeleton lifecycle', () => {
 
     expect(result.updatedChunks).toBe(1);
     expect(result.pendingEntries).toBe(0);
-    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(1);
+    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(entries.at(-1)!.sourceEndMessageId);
     expect(result.state?.storySkeleton.stale).toBeUndefined();
     expect(storySkeletonIsUsable(result.state!)).toBe(true);
     expect(generateRaw).toHaveBeenCalledOnce();
   });
 
-  it('sends world info matched by the existing skeleton and archived summaries as background', async () => {
-    const generateRaw = vi.fn(async (_options: { systemPrompt: string; prompt: string }) => (
+  it('uses only the newly archived summary for green matches and adds blue-light background', async () => {
+    const generateRaw = vi.fn(async (_options: { prompt: string; systemPrompt: string }) => (
       skeletonText('命中世界书后的骨架。')
     ));
-    const entries = Array.from({ length: 8 }, (_, index) => stageEntry(index));
+    const entries = Array.from({ length: 6 }, (_, index) => stageEntry(index));
     entries[1]!.text = '用户角色开始修炼无我剑诀。';
     const installed = installContext(entries, generateRaw);
     installed.state.storySkeleton = {
@@ -109,26 +122,139 @@ describe('global story skeleton lifecycle', () => {
       sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
     };
     installed.context.getSortedWorldInfoEntries.mockResolvedValueOnce([{
-      world: '剑道设定',
-      uid: 21,
-      key: ['太虚剑'],
-      content: '太虚剑是蜀山古传法宝。',
+      world: '剑道设定', uid: 21, key: ['太虚剑'], content: '太虚剑是蜀山古传法宝。',
     }, {
-      world: '剑道设定',
-      uid: 22,
-      key: ['无我剑诀'],
-      content: '无我剑诀以忘我、忘剑为核心。',
+      world: '剑道设定', uid: 22, key: ['无我剑诀'], content: '无我剑诀以忘我、忘剑为核心。',
+    }, {
+      world: '玄天界常驻背景', uid: 23, constant: true,
+      content: '玄天界的修行秩序由宗门、世家与散修共同构成。',
     }]);
 
     const result = await new StorySkeletonService().processNextIfNeeded();
 
     expect(result.updatedChunks).toBe(1);
     const request = generateRaw.mock.calls[0]?.[0];
-    expect(String(request?.prompt ?? '')).toContain('<story_echo_world_background>');
-    expect(String(request?.prompt ?? '')).toContain('太虚剑是蜀山古传法宝');
-    expect(String(request?.prompt ?? '')).toContain('无我剑诀以忘我、忘剑为核心');
-    expect(String(request?.systemPrompt ?? '')).toContain('提供跨章节仍然有用的世界背景');
-    expect(String(request?.systemPrompt ?? '')).toContain('长期事件与当前状态以existing_story_skeleton和new_archived_stage_summaries为依据');
+    const prompt = String(request?.prompt ?? '');
+    expect(prompt).toContain('<constant_world_info>');
+    expect(prompt).toContain('<matched_world_info>');
+    expect(prompt).not.toContain('太虚剑是蜀山古传法宝');
+    expect(prompt).toContain('无我剑诀以忘我、忘剑为核心');
+    expect(prompt).toContain('玄天界的修行秩序由宗门、世家与散修共同构成');
+    expect(prompt).toContain('<baseline_status>incremental-update</baseline_status>');
+    expect(prompt).toContain('用户角色长期持有太虚剑');
+    expect(prompt).toContain('用户角色开始修炼无我剑诀');
+    expect(prompt).not.toContain('第3阶段');
+    expect(String(request?.systemPrompt ?? '')).toContain('背景设定，不是已经发生剧情的证据');
+  });
+
+  it('fully rebuilds cleanly from all summaries and discards the saved old skeleton', async () => {
+    const generateRaw = vi.fn(async (options: { prompt: string }) => {
+      expect(options.prompt).toContain('<baseline_status>full-rebuild</baseline_status>');
+      expect(options.prompt).toContain('<existing_story_skeleton>\n无\n</existing_story_skeleton>');
+      expect(options.prompt).not.toContain('旧骨架保留的重要历史');
+      for (let index = 1; index <= 5; index += 1) {
+        expect(options.prompt).toContain(`第${index}阶段完成`);
+      }
+      expect(options.prompt).toContain('蓝灯常驻背景用于理解玄天界法则');
+      return skeletonText('全部历史已按长期剧情大纲重新整理。');
+    });
+    const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
+    const { context, state } = installContext(entries, generateRaw, { windowSize: 4 });
+    context.getSortedWorldInfoEntries.mockResolvedValueOnce([{
+      world: '玄天界常驻设定', uid: 99, constant: true,
+      content: '蓝灯常驻背景用于理解玄天界法则。',
+    }]);
+    state.storySkeleton = {
+      text: skeletonText('旧骨架保留的重要历史。'),
+      coveredThroughMessageId: entries[0]!.sourceEndMessageId,
+      sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
+      manuallyEdited: true,
+    };
+
+    const result = await new StorySkeletonService().rebuildAll();
+
+    expect(result.updatedChunks).toBe(1);
+    expect(result.pendingEntries).toBe(0);
+    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(entries.at(-1)!.sourceEndMessageId);
+    expect(result.state?.storySkeleton.sourceHash).toBe(
+      await storySkeletonSourceHash(entries, entries.at(-1)!.sourceEndMessageId),
+    );
+    expect(result.state?.storySkeleton.manuallyEdited).toBeUndefined();
+  });
+
+  it('processes all history chronologically in batches of at most 80000 characters', async () => {
+    const entries = Array.from({ length: 3 }, (_, index) => stageEntry(index));
+    entries.forEach((entry, index) => {
+      entry.text = `第${index + 1}阶段：${String(index + 1).repeat(38_000)}`;
+    });
+    const generateRaw = vi.fn(async (options: { prompt: string }) => (
+      options.prompt.includes('full-rebuild-continue')
+        ? skeletonText('第二批完成后的骨架。')
+        : skeletonText('第一批形成的临时草稿。')
+    ));
+    const { state } = installContext(entries, generateRaw, { windowSize: 1 });
+    state.storySkeleton = {
+      text: skeletonText('重新生成前的旧骨架。'),
+      coveredThroughMessageId: entries[0]!.sourceEndMessageId,
+      sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
+    };
+
+    const result = await new StorySkeletonService().rebuildAll();
+
+    expect(MAX_SKELETON_SOURCE_BATCH_CHARACTERS).toBe(80_000);
+    expect(result.updatedChunks).toBe(2);
+    expect(generateRaw).toHaveBeenCalledTimes(2);
+    const firstPrompt = String(generateRaw.mock.calls[0]?.[0]?.prompt ?? '');
+    const secondPrompt = String(generateRaw.mock.calls[1]?.[0]?.prompt ?? '');
+    expect(firstPrompt).toContain('<baseline_status>full-rebuild</baseline_status>');
+    expect(firstPrompt).toContain('第1阶段');
+    expect(firstPrompt).toContain('第2阶段');
+    expect(firstPrompt).not.toContain('第3阶段');
+    expect(secondPrompt).toContain('<baseline_status>full-rebuild-continue</baseline_status>');
+    expect(secondPrompt).toContain('第一批形成的临时草稿');
+    expect(secondPrompt).toContain('第3阶段');
+    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(entries.at(-1)!.sourceEndMessageId);
+  });
+
+  it('splits sources by the 80000-character batch cap and rejects one oversized summary', () => {
+    const entries = [stageEntry(20), stageEntry(21), stageEntry(22)];
+    entries[0]!.text = '甲'.repeat(39_000);
+    entries[1]!.text = '乙'.repeat(39_000);
+    entries[2]!.text = '丙'.repeat(39_000);
+
+    const batches = skeletonSourceBatches(entries);
+    expect(batches).toEqual([[entries[0], entries[1]], [entries[2]]]);
+    for (const batch of batches) {
+      expect(skeletonSourceBatchCharacters(batch)).toBeLessThanOrEqual(
+        MAX_SKELETON_SOURCE_BATCH_CHARACTERS,
+      );
+    }
+    entries[0]!.text = '超'.repeat(MAX_SKELETON_SOURCE_BATCH_CHARACTERS);
+    expect(() => skeletonSourceBatches([entries[0]!])).toThrow(/单条阶段总结/);
+  });
+
+  it('keeps the saved skeleton intact when a later rebuild batch fails', async () => {
+    const entries = Array.from({ length: 3 }, (_, index) => stageEntry(index));
+    entries.forEach((entry, index) => {
+      entry.text = `第${index + 1}阶段：${String(index + 1).repeat(38_000)}`;
+    });
+    const generateRaw = vi.fn()
+      .mockResolvedValueOnce(skeletonText('第一批临时草稿。'))
+      .mockRejectedValueOnce(new Error('provider unavailable'));
+    const { state } = installContext(entries, generateRaw, { windowSize: 1 });
+    const originalText = skeletonText('这份旧骨架应在失败后继续保留。');
+    state.storySkeleton = {
+      text: originalText,
+      coveredThroughMessageId: entries[0]!.sourceEndMessageId,
+      sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
+      manuallyEdited: true,
+    };
+
+    await expect(new StorySkeletonService().rebuildAll()).rejects.toThrow('provider unavailable');
+
+    expect(state.storySkeleton.text).toBe(originalText);
+    expect(state.storySkeleton.coveredThroughMessageId).toBe(entries[0]!.sourceEndMessageId);
+    expect(state.storySkeleton.manuallyEdited).toBe(true);
   });
 
   it('does not build while all stage summaries still fit inside S', async () => {
@@ -141,8 +267,10 @@ describe('global story skeleton lifecycle', () => {
     expect(generateRaw).not.toHaveBeenCalled();
   });
 
-  it('waits for three pending archived entries during routine updates', async () => {
-    const generateRaw = vi.fn(async () => skeletonText('增量更新后的骨架。'));
+  it('immediately absorbs exactly one newly archived summary per automatic update', async () => {
+    const generateRaw = vi.fn(async (_options: { prompt: string }) => (
+      skeletonText('增量更新后的骨架。')
+    ));
     const entries = Array.from({ length: 7 }, (_, index) => stageEntry(index));
     const { state } = installContext(entries, generateRaw);
     state.storySkeleton = {
@@ -150,25 +278,20 @@ describe('global story skeleton lifecycle', () => {
       coveredThroughMessageId: entries[0]!.sourceEndMessageId,
       sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
     };
-    const service = new StorySkeletonService();
 
-    expect((await service.processNextIfNeeded()).updatedChunks).toBe(0);
-    expect(generateRaw).not.toHaveBeenCalled();
-
-    const next = stageEntry(7);
-    state.stageSummary.entries.push(next);
-    state.stageSummary.coveredThroughMessageId = next.sourceEndMessageId;
-    state.stageSummary.coveredThroughHash = next.sourceHash;
-    const result = await service.processNextIfNeeded();
+    const result = await new StorySkeletonService().processNextIfNeeded();
 
     expect(result.updatedChunks).toBe(1);
-    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(entries[3]!.sourceEndMessageId);
-    expect(generateRaw).toHaveBeenCalledOnce();
+    expect(result.pendingEntries).toBe(1);
+    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(entries[1]!.sourceEndMessageId);
+    const prompt = String(generateRaw.mock.calls[0]?.[0]?.prompt ?? '');
+    expect(prompt).toContain('第2阶段');
+    expect(prompt).not.toContain('第3阶段');
   });
 
-  it('forces a one-entry update from the manual history action', async () => {
+  it('manual history processing folds every pending archive one by one', async () => {
     const generateRaw = vi.fn(async () => skeletonText('手动更新后的骨架。'));
-    const entries = Array.from({ length: 6 }, (_, index) => stageEntry(index));
+    const entries = Array.from({ length: 7 }, (_, index) => stageEntry(index));
     const { state } = installContext(entries, generateRaw);
     state.storySkeleton = {
       text: skeletonText('更新前骨架。'),
@@ -178,17 +301,18 @@ describe('global story skeleton lifecycle', () => {
 
     const result = await new StorySkeletonService().processAllPending();
 
-    expect(result.updatedChunks).toBe(1);
+    expect(result.updatedChunks).toBe(2);
     expect(result.pendingEntries).toBe(0);
-    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(entries[1]!.sourceEndMessageId);
+    expect(result.state?.storySkeleton.coveredThroughMessageId).toBe(entries[2]!.sourceEndMessageId);
+    expect(generateRaw).toHaveBeenCalledTimes(2);
   });
 
-  it('uses the configurable 10000-token cap for generation and keeps manual edits as the baseline', async () => {
+  it('uses the configurable 10000-token cap and keeps manual edits for incremental updates', async () => {
     const generateRaw = vi.fn(async (options: { prompt: string }) => {
       expect(options.prompt).toContain('用户人工确认：姜梦是长期同行者。');
       return skeletonText('用户人工确认：姜梦是长期同行者；新增阶段已合并。');
     });
-    const entries = Array.from({ length: 8 }, (_, index) => stageEntry(index));
+    const entries = Array.from({ length: 6 }, (_, index) => stageEntry(index));
     const { state } = installContext(entries, generateRaw, { skeletonMaxTokens: 10_000 });
     state.storySkeleton = {
       text: skeletonText('旧自动骨架。'),
@@ -207,10 +331,6 @@ describe('global story skeleton lifecycle', () => {
     expect(result.state?.storySkeleton.manuallyEdited).toBe(true);
     expect(generateRaw).toHaveBeenCalledWith(expect.objectContaining({ responseLength: 10_000 }));
     await expect(repository.updateStorySkeleton({ text: '' })).rejects.toThrow(/不能为空/);
-    const natural = await repository.updateStorySkeleton({
-      text: '刘爽继续在蜀山修炼；姜梦是长期同行与指导者。',
-    });
-    expect(natural.storySkeleton.text).toBe('刘爽继续在蜀山修炼；姜梦是长期同行与指导者。');
   });
 
   it('marks an existing skeleton stale when a lowered configured cap no longer fits it', async () => {

@@ -82,7 +82,7 @@ describe('settings panel editable-control contract', () => {
   });
 
   it('places the editable summary manager inside the historical-summary section', () => {
-    const historySection = source.indexOf('>历史总结与全局骨架</span>');
+    const historySection = source.indexOf('>历史总结与长期骨架</span>');
     const manager = source.indexOf('${stageSummaryManagerTemplate()}');
     const modelSection = source.indexOf('>模型来源</span>');
 

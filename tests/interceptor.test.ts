@@ -344,9 +344,9 @@ describe('StoryEcho request ordering', () => {
     await stageSummaryService.reconcileHistory(stored);
     const reconciled = context.chatMetadata[MODULE_ID];
     reconciled.storySkeleton = {
-      text: storySkeleton('第一阶段已被折叠为长期骨架。'),
-      coveredThroughMessageId: 0,
-      sourceHash: await storySkeletonSourceHash(reconciled.stageSummary.entries, 0),
+      text: storySkeleton('前三阶段已被整理为长期剧情大纲。'),
+      coveredThroughMessageId: 2,
+      sourceHash: await storySkeletonSourceHash(reconciled.stageSummary.entries, 2),
     };
     const promptChat = structuredClone(sourceChat);
     promptChat.at(-1)!.mes = '我们继续在院中交谈。';
@@ -358,7 +358,7 @@ describe('StoryEcho request ordering', () => {
     );
     expect(injected).toHaveLength(3);
     expect(injected[0]?.mes).toContain('<story_echo_skeleton>');
-    expect(injected[0]?.mes).toContain('第一阶段已被折叠为长期骨架');
+    expect(injected[0]?.mes).toContain('前三阶段已被整理为长期剧情大纲');
     const stageBlocks = injected.filter((message) => message.mes.includes('<story_echo_summary>'));
     expect(stageBlocks).toHaveLength(2);
     expect(stageBlocks[0]?.mes).toContain('第二阶段');

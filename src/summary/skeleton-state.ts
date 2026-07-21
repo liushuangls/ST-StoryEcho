@@ -2,9 +2,7 @@ import { sha256 } from '../core/hash';
 import type { StageSummaryEntry, StoryEchoChatState } from '../core/types';
 import { estimateTokens } from '../prompt/render';
 
-export const SKELETON_UPDATE_ENTRY_THRESHOLD = 3;
-export const SKELETON_UPDATE_TOKEN_THRESHOLD = 3_000;
-export const MAX_SKELETON_SOURCE_CHARACTERS = 64_000;
+export const MAX_SKELETON_SOURCE_BATCH_CHARACTERS = 80_000;
 const MAX_STORED_SKELETON_CHARACTERS = 96_000;
 
 export function activeStageSummaryEntries(state: StoryEchoChatState): StageSummaryEntry[] {
@@ -65,36 +63,57 @@ export function pendingArchivedStageSummaryEntries(
 }
 
 export function storySkeletonUpdateDue(
-  state: StoryEchoChatState,
+  _state: StoryEchoChatState,
   pending: readonly StageSummaryEntry[],
-  force = false,
+  _force = false,
 ): boolean {
-  if (pending.length === 0) {
-    return false;
-  }
-  if (force || !state.storySkeleton.text.trim() || state.storySkeleton.stale) {
-    return true;
-  }
-  return pending.length >= SKELETON_UPDATE_ENTRY_THRESHOLD ||
-    pending.reduce((total, entry) => total + estimateTokens(entry.text), 0) >=
-      SKELETON_UPDATE_TOKEN_THRESHOLD;
+  return pending.length > 0;
 }
 
-export function boundedSkeletonSourceEntries(
+export function skeletonSourceEntryCharacters(entry: StageSummaryEntry): number {
+  return Array.from(JSON.stringify({
+    sourceStartMessageId: entry.sourceStartMessageId,
+    sourceEndMessageId: entry.sourceEndMessageId,
+    stageSummary: entry.text,
+  })).length;
+}
+
+export function skeletonSourceBatchCharacters(entries: readonly StageSummaryEntry[]): number {
+  return 2 + entries.reduce(
+    (total, entry, index) => total + skeletonSourceEntryCharacters(entry) + (index > 0 ? 1 : 0),
+    0,
+  );
+}
+
+export function skeletonSourceBatches(
   entries: readonly StageSummaryEntry[],
-  maxCharacters = MAX_SKELETON_SOURCE_CHARACTERS,
-): StageSummaryEntry[] {
-  const selected: StageSummaryEntry[] = [];
-  let characters = 0;
+  maxCharacters = MAX_SKELETON_SOURCE_BATCH_CHARACTERS,
+): StageSummaryEntry[][] {
+  const maximum = Math.max(1, Math.floor(maxCharacters));
+  const batches: StageSummaryEntry[][] = [];
+  let batch: StageSummaryEntry[] = [];
+  let characters = 2;
+
   for (const entry of entries) {
-    const nextCharacters = entry.text.length + 160;
-    if (selected.length > 0 && characters + nextCharacters > maxCharacters) {
-      break;
+    const entryCharacters = skeletonSourceEntryCharacters(entry);
+    if (entryCharacters + 2 > maximum) {
+      throw new Error(
+        `单条阶段总结序列化后约 ${entryCharacters + 2} 字符，超过全局剧情骨架单批 ${maximum} 字符上限。`,
+      );
     }
-    selected.push(entry);
-    characters += nextCharacters;
+    const nextCharacters = entryCharacters + (batch.length > 0 ? 1 : 0);
+    if (batch.length > 0 && characters + nextCharacters > maximum) {
+      batches.push(batch);
+      batch = [];
+      characters = 2;
+    }
+    batch.push(entry);
+    characters += entryCharacters + (batch.length > 1 ? 1 : 0);
   }
-  return selected;
+  if (batch.length > 0) {
+    batches.push(batch);
+  }
+  return batches;
 }
 
 export function normalizeStorySkeletonText(raw: string, maxTokens: number): string {

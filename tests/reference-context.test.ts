@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildExtractionReferenceContext,
+  buildStorySkeletonWorldInfoReferenceContext,
   buildSummaryWorldInfoReferenceContext,
+  MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
+  MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
 } from '../src/reference/context';
 import type { SillyTavernContext } from '../src/platform/sillytavern';
 
@@ -157,12 +160,89 @@ describe('summary world-info background', () => {
     expect(result.text).toContain('<story_echo_world_background>');
     expect(result.text).toContain('无我剑诀以忘我、忘剑为核心');
     expect(result.text).toContain('静态设定语境');
-    expect(result.text).toContain('剧情事件与当前状态以随后提供的剧情原文、阶段总结或现有骨架为依据');
+    expect(result.text).toContain('具体剧情事实以随后提供的剧情原文、阶段总结或现有骨架为依据');
     expect(result.text).not.toContain('这段角色卡信息');
     expect(result.text).not.toContain('未命中内容');
     expect(result.text).not.toContain('常驻内容');
     expect(result.worldInfoEntries).toEqual(['蜀山设定#11#无我剑诀']);
     expect(result.tokenCount).toBeLessThanOrEqual(3_000);
+  });
+
+  it('adds blue-light entries only to the story-skeleton background', async () => {
+    const worldEntries = [{
+      world: '蜀山设定',
+      uid: 11,
+      key: ['无我剑诀'],
+      content: '无我剑诀以忘我、忘剑为核心。',
+    }, {
+      world: '玄天界常驻背景',
+      uid: 12,
+      constant: true,
+      content: '玄天界以宗门、世家与散修势力共同构成修行秩序。',
+    }, {
+      world: '角色限定常驻背景',
+      uid: 13,
+      constant: true,
+      characterFilter: { names: ['其他角色'] },
+      content: '这条蓝灯不属于当前角色。',
+    }];
+    const skeleton = await buildStorySkeletonWorldInfoReferenceContext([
+      { is_user: true, mes: '用户角色开始修炼无我剑诀。' },
+    ], settings, context({
+      getSortedWorldInfoEntries: vi.fn(async () => worldEntries),
+    }));
+    const stage = await buildSummaryWorldInfoReferenceContext([
+      { is_user: true, mes: '用户角色开始修炼无我剑诀。' },
+    ], settings, context({
+      getSortedWorldInfoEntries: vi.fn(async () => worldEntries),
+    }));
+
+    expect(skeleton.text).toContain('无我剑诀以忘我、忘剑为核心');
+    expect(skeleton.text).toContain('玄天界以宗门、世家与散修势力共同构成修行秩序');
+    expect(skeleton.text).toContain('激活方式=蓝灯常驻');
+    expect(skeleton.text).toContain('<constant_world_info>');
+    expect(skeleton.text).toContain('<matched_world_info>');
+    expect(skeleton.text).toContain('只作为故事背景与设定参考');
+    expect(skeleton.text).not.toContain('这条蓝灯不属于当前角色');
+    expect(stage.text).not.toContain('玄天界以宗门、世家与散修势力共同构成修行秩序');
+  });
+
+  it('separately limits complete blue entries to 20000 and green matches to 10000 characters', async () => {
+    const result = await buildStorySkeletonWorldInfoReferenceContext([
+      { is_user: true, mes: '无我剑诀 太虚剑' },
+    ], {
+      ...settings,
+      maxTokens: 256,
+    }, context({
+      getSortedWorldInfoEntries: vi.fn(async () => [
+        { world: '蓝灯', uid: 1, constant: true, content: `蓝一${'甲'.repeat(8_000)}` },
+        { world: '蓝灯', uid: 2, constant: true, content: `蓝二${'乙'.repeat(8_000)}` },
+        { world: '蓝灯', uid: 3, constant: true, content: `蓝三${'丙'.repeat(8_000)}` },
+        { world: '绿灯', uid: 4, key: ['无我剑诀'], content: `绿一${'丁'.repeat(6_000)}` },
+        { world: '绿灯', uid: 5, key: ['太虚剑'], content: `绿二${'戊'.repeat(6_000)}` },
+      ]),
+    }));
+
+    const constant = result.text.match(
+      /<constant_world_info>\n([\s\S]*?)\n<\/constant_world_info>/u,
+    )?.[1] ?? '';
+    const matched = result.text.match(
+      /<matched_world_info>\n([\s\S]*?)\n<\/matched_world_info>/u,
+    )?.[1] ?? '';
+    expect(Array.from(constant).length).toBeLessThanOrEqual(
+      MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
+    );
+    expect(Array.from(matched).length).toBeLessThanOrEqual(
+      MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
+    );
+    expect(constant).toContain('蓝一');
+    expect(constant).toContain('蓝二');
+    expect(constant).not.toContain('蓝三');
+    expect(matched).toContain('绿一');
+    expect(matched).not.toContain('绿二');
+    expect(result.text).toContain('</story_echo_world_background>');
+    expect(result.truncated).toBe(true);
+    expect(result.tokenCount).toBeGreaterThan(settings.maxTokens);
   });
 
   it('respects the shared reference-mode switch', async () => {

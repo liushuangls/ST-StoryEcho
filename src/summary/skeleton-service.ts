@@ -1,20 +1,29 @@
 import { logger } from '../core/logger';
-import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
+import type {
+  StageSummaryEntry,
+  StoryEchoChatState,
+  StoryEchoSettings,
+  StorySkeleton,
+  TavernChatMessage,
+} from '../core/types';
 import { recordDebugTrace } from '../debug/metrics';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getCurrentChatId } from '../platform/sillytavern';
-import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
+import { buildStorySkeletonWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
 import {
   buildStorySkeletonPrompt,
   STORY_SKELETON_SYSTEM_PROMPT,
+  type StorySkeletonPromptMode,
 } from './skeleton-prompts';
 import {
+  activeStageSummaryEntries,
   archivedStageSummaryEntries,
-  boundedSkeletonSourceEntries,
   normalizeStorySkeletonText,
   pendingArchivedStageSummaryEntries,
+  skeletonSourceBatches,
+  skeletonSourceEntryCharacters,
   storySkeletonIsUsable,
   storySkeletonSourceHash,
   storySkeletonUpdateDue,
@@ -35,6 +44,7 @@ export interface StorySkeletonRunResult {
 interface StorySkeletonRunOptions {
   force: boolean;
   maxChunks: number;
+  rebuild: boolean;
   onProgress?: (progress: StorySkeletonProgress) => void;
 }
 
@@ -54,6 +64,56 @@ interface SkeletonRevisionSnapshot {
   stale: boolean;
   maxTokens: number;
   entries: SkeletonSourceSnapshot[];
+}
+
+function sourceRangeKey(entry: StageSummaryEntry): string {
+  return `${entry.sourceStartMessageId}:${entry.sourceEndMessageId}`;
+}
+
+function sameStageSummaryEntries(
+  left: readonly StageSummaryEntry[],
+  right: readonly StageSummaryEntry[],
+): boolean {
+  return left.length === right.length && left.every((entry, index) => {
+    const other = right[index];
+    return Boolean(
+      other &&
+      sourceRangeKey(entry) === sourceRangeKey(other) &&
+      entry.sourceHash === other.sourceHash &&
+      entry.text === other.text &&
+      Boolean(entry.deleted) === Boolean(other.deleted)
+    );
+  });
+}
+
+function sameSkeletonRevision(left: StorySkeleton, right: StorySkeleton): boolean {
+  return left.text === right.text &&
+    left.coveredThroughMessageId === right.coveredThroughMessageId &&
+    left.sourceHash === right.sourceHash &&
+    left.updatedAt === right.updatedAt &&
+    Boolean(left.manuallyEdited) === Boolean(right.manuallyEdited) &&
+    Boolean(left.stale) === Boolean(right.stale);
+}
+
+function orderedActiveEntries(state: StoryEchoChatState): StageSummaryEntry[] {
+  return activeStageSummaryEntries(state).sort((left, right) => (
+    left.sourceStartMessageId - right.sourceStartMessageId ||
+    left.sourceEndMessageId - right.sourceEndMessageId
+  ));
+}
+
+function cleanBuildPromptMode(
+  rebuild: boolean,
+  stale: boolean,
+  continuation: boolean,
+): StorySkeletonPromptMode {
+  if (rebuild) {
+    return continuation ? 'full-rebuild-continue' : 'full-rebuild';
+  }
+  if (stale) {
+    return continuation ? 'stale-rebuild-continue' : 'stale-rebuild';
+  }
+  return continuation ? 'initial-build-continue' : 'initial-build';
 }
 
 /** Avoid serializing and hashing the same archived summaries before every reply. */
@@ -192,6 +252,7 @@ export class StorySkeletonService {
     return this.enqueue({
       force: false,
       maxChunks: 1,
+      rebuild: false,
       ...(onProgress ? { onProgress } : {}),
     });
   }
@@ -202,6 +263,18 @@ export class StorySkeletonService {
     return this.enqueue({
       force: true,
       maxChunks: Number.MAX_SAFE_INTEGER,
+      rebuild: false,
+      ...(onProgress ? { onProgress } : {}),
+    });
+  }
+
+  rebuildAll(
+    onProgress?: (progress: StorySkeletonProgress) => void,
+  ): Promise<StorySkeletonRunResult> {
+    return this.enqueue({
+      force: true,
+      maxChunks: Number.MAX_SAFE_INTEGER,
+      rebuild: true,
       ...(onProgress ? { onProgress } : {}),
     });
   }
@@ -214,6 +287,253 @@ export class StorySkeletonService {
     );
     this.queue = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  private async buildWorldBackground(
+    state: StoryEchoChatState,
+    entries: readonly StageSummaryEntry[],
+    settings: StoryEchoSettings,
+  ): Promise<string> {
+    const first = entries[0];
+    const last = entries.at(-1);
+    if (!first || !last) {
+      return '';
+    }
+    const referenceMessages: TavernChatMessage[] = entries.map((entry) => ({
+      is_user: false,
+      is_system: false,
+      mes: entry.text,
+    }));
+    try {
+      const reference = await buildStorySkeletonWorldInfoReferenceContext(
+        referenceMessages,
+        settings.extraction.reference,
+      );
+      recordDebugTrace(state, settings.debug, 'summary', '全局剧情骨架世界书背景已构建。', {
+        sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
+        tokens: reference.tokenCount,
+        worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
+        truncated: reference.truncated,
+        warnings: reference.warnings.join(' | ') || '-',
+        referencePreview: reference.text.slice(0, 4_000) || '-',
+      });
+      return reference.text;
+    } catch (error) {
+      recordDebugTrace(
+        state,
+        settings.debug,
+        'error',
+        '全局剧情骨架世界书背景构建失败，继续仅使用骨架与阶段总结。',
+        {
+          sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
+      return '';
+    }
+  }
+
+  private validateCleanBuildSources(
+    state: StoryEchoChatState,
+    sourceSnapshot: readonly StageSummaryEntry[],
+    skeletonSnapshot: StorySkeleton,
+  ): StoryEchoChatState {
+    const live = this.memoryRepository.getExisting();
+    if (!live || live.ownerChatId !== state.ownerChatId) {
+      throw new Error('全局剧情骨架生成期间聊天发生切换，已丢弃本次结果。');
+    }
+    if (!sameStageSummaryEntries(live.stageSummary.entries, sourceSnapshot)) {
+      throw new Error('全局剧情骨架生成期间阶段总结发生变化，已丢弃本次结果。');
+    }
+    if (!sameSkeletonRevision(live.storySkeleton, skeletonSnapshot)) {
+      throw new Error('全局剧情骨架生成期间骨架被人工编辑，已丢弃本次结果。');
+    }
+    return live;
+  }
+
+  private async runCleanBuild(
+    state: StoryEchoChatState,
+    settings: StoryEchoSettings,
+    options: StorySkeletonRunOptions,
+  ): Promise<StorySkeletonRunResult> {
+    const sourceEntries = orderedActiveEntries(state);
+    if (sourceEntries.length === 0) {
+      return { state, updatedChunks: 0, pendingEntries: 0 };
+    }
+    const batches = skeletonSourceBatches(sourceEntries);
+    const sourceSnapshot = state.stageSummary.entries.map((entry) => ({ ...entry }));
+    const skeletonSnapshot = { ...state.storySkeleton };
+    const staleAtStart = Boolean(state.storySkeleton.stale);
+    const startedAt = performance.now();
+    const coveredThroughMessageId = sourceEntries.at(-1)!.sourceEndMessageId;
+    const sourceHash = await storySkeletonSourceHash(
+      sourceSnapshot,
+      coveredThroughMessageId,
+    );
+    this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
+    let draft = '';
+    let processedEntries = 0;
+
+    for (const [index, batch] of batches.entries()) {
+      assertChatOwner(state);
+      const first = batch[0]!;
+      const last = batch.at(-1)!;
+      const worldBackground = await this.buildWorldBackground(state, batch, settings);
+      const mode = cleanBuildPromptMode(options.rebuild, staleAtStart, index > 0);
+      const raw = await completeWithConfiguredProvider(settings, {
+        system: STORY_SKELETON_SYSTEM_PROMPT,
+        prompt: buildStorySkeletonPrompt({
+          existingSkeleton: draft,
+          sourceEntries: batch,
+          maxTokens: settings.summary.skeletonMaxTokens,
+          mode,
+          worldBackground,
+        }),
+        maxTokens: settings.summary.skeletonMaxTokens,
+      });
+      draft = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      processedEntries += batch.length;
+      this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
+      options.onProgress?.({
+        sourceStartMessageId: first.sourceStartMessageId,
+        sourceEndMessageId: last.sourceEndMessageId,
+        pendingEntries: sourceEntries.length - processedEntries,
+      });
+    }
+
+    const live = this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
+    const updatedAt = new Date().toISOString();
+    live.storySkeleton = {
+      text: draft,
+      coveredThroughMessageId,
+      sourceHash,
+      updatedAt,
+    };
+    live.metrics.skeletonUpdates += batches.length;
+    live.metrics.totalSkeletonMs += Math.round(performance.now() - startedAt);
+    live.metrics.lastSkeletonAt = updatedAt;
+    delete live.lastInspection;
+    recordDebugTrace(live, settings.debug, 'summary', '全局剧情骨架已从阶段总结干净重建。', {
+      coveredThroughMessageId,
+      sourceEntries: sourceEntries.length,
+      sourceBatches: batches.length,
+      sourceCharacters: sourceEntries.reduce(
+        (total, entry) => total + skeletonSourceEntryCharacters(entry),
+        0,
+      ),
+      skeletonCharacters: draft.length,
+      skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+      mode: options.rebuild ? 'full-rebuild' : staleAtStart ? 'stale-rebuild' : 'initial-build',
+    });
+    await this.memoryRepository.save(live);
+    this.revisionCache.remember(live, settings.summary.skeletonMaxTokens);
+    return {
+      state: live,
+      updatedChunks: batches.length,
+      pendingEntries: pendingArchivedStageSummaryEntries(
+        live,
+        settings.summary.windowSize,
+      ).length,
+    };
+  }
+
+  private async runIncrementalUpdates(
+    state: StoryEchoChatState,
+    settings: StoryEchoSettings,
+    options: StorySkeletonRunOptions,
+  ): Promise<StorySkeletonRunResult> {
+    let updatedChunks = 0;
+
+    while (updatedChunks < options.maxChunks) {
+      assertChatOwner(state);
+      const pending = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
+      if (!storySkeletonUpdateDue(state, pending, options.force)) {
+        return { state, updatedChunks, pendingEntries: pending.length };
+      }
+      const sourceEntry = pending[0];
+      if (!sourceEntry) {
+        break;
+      }
+      // Incremental maintenance deliberately absorbs exactly the oldest newly
+      // archived, not-yet-covered summary together with the saved old skeleton.
+      skeletonSourceBatches([sourceEntry]);
+      const startedAt = performance.now();
+      const priorSkeleton = { ...state.storySkeleton };
+      const coveredThroughMessageId = sourceEntry.sourceEndMessageId;
+      const sourceSnapshot = state.stageSummary.entries
+        .filter((entry) => entry.sourceEndMessageId <= coveredThroughMessageId)
+        .map((entry) => ({ ...entry }));
+      const sourceHash = await storySkeletonSourceHash(
+        sourceSnapshot,
+        coveredThroughMessageId,
+      );
+      const worldBackground = await this.buildWorldBackground(state, [sourceEntry], settings);
+      const raw = await completeWithConfiguredProvider(settings, {
+        system: STORY_SKELETON_SYSTEM_PROMPT,
+        prompt: buildStorySkeletonPrompt({
+          existingSkeleton: priorSkeleton.text,
+          sourceEntries: [sourceEntry],
+          maxTokens: settings.summary.skeletonMaxTokens,
+          mode: 'incremental-update',
+          worldBackground,
+        }),
+        maxTokens: settings.summary.skeletonMaxTokens,
+      });
+
+      const live = this.memoryRepository.getExisting();
+      if (!live || live.ownerChatId !== state.ownerChatId) {
+        throw new Error('全局剧情骨架生成期间聊天发生切换，已丢弃本次结果。');
+      }
+      const liveArchived = archivedStageSummaryEntries(live, settings.summary.windowSize);
+      const liveEntry = liveArchived.find((entry) => sourceRangeKey(entry) === sourceRangeKey(sourceEntry));
+      if (!liveEntry || !sameStageSummaryEntries([liveEntry], [sourceEntry])) {
+        throw new Error('全局剧情骨架生成期间归档总结发生变化，已丢弃本次结果。');
+      }
+      if (!sameSkeletonRevision(live.storySkeleton, priorSkeleton)) {
+        throw new Error('全局剧情骨架生成期间骨架被人工编辑，已丢弃本次结果。');
+      }
+      const livePrefix = live.stageSummary.entries.filter(
+        (entry) => entry.sourceEndMessageId <= coveredThroughMessageId,
+      );
+      if (!sameStageSummaryEntries(livePrefix, sourceSnapshot)) {
+        throw new Error('全局剧情骨架生成期间历史来源发生变化，已丢弃本次结果。');
+      }
+
+      const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      const updatedAt = new Date().toISOString();
+      state = live;
+      state.storySkeleton = {
+        text,
+        coveredThroughMessageId,
+        sourceHash,
+        updatedAt,
+        ...(priorSkeleton.manuallyEdited ? { manuallyEdited: true } : {}),
+      };
+      state.metrics.skeletonUpdates += 1;
+      state.metrics.totalSkeletonMs += Math.round(performance.now() - startedAt);
+      state.metrics.lastSkeletonAt = updatedAt;
+      delete state.lastInspection;
+      recordDebugTrace(state, settings.debug, 'summary', '全局剧情骨架已吸收一条首次归档总结。', {
+        sourceRange: `${sourceEntry.sourceStartMessageId}-${sourceEntry.sourceEndMessageId}`,
+        coveredThroughMessageId,
+        sourceCharacters: skeletonSourceEntryCharacters(sourceEntry),
+        skeletonCharacters: text.length,
+        skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+        mode: 'incremental-update',
+      });
+      await this.memoryRepository.save(state);
+      this.revisionCache.remember(state, settings.summary.skeletonMaxTokens);
+      updatedChunks += 1;
+      const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
+      options.onProgress?.({
+        sourceStartMessageId: sourceEntry.sourceStartMessageId,
+        sourceEndMessageId: coveredThroughMessageId,
+        pendingEntries: remaining.length,
+      });
+    }
+
+    const pending = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
+    return { state, updatedChunks, pendingEntries: pending.length };
   }
 
   private async processNow(
@@ -229,118 +549,19 @@ export class StorySkeletonService {
       return { state, updatedChunks: 0, pendingEntries: 0 };
     }
     state = await this.reconcile(state) ?? state;
-    let updatedChunks = 0;
 
     try {
-      while (updatedChunks < options.maxChunks) {
-        assertChatOwner(state);
-        const pending = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
-        if (!storySkeletonUpdateDue(state, pending, options.force)) {
-          return { state, updatedChunks, pendingEntries: pending.length };
+      const pending = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
+      const cleanBuild = options.rebuild ||
+        !state.storySkeleton.text.trim() ||
+        Boolean(state.storySkeleton.stale);
+      if (cleanBuild) {
+        if (!options.rebuild && !storySkeletonUpdateDue(state, pending, options.force)) {
+          return { state, updatedChunks: 0, pendingEntries: pending.length };
         }
-        const sourceEntries = boundedSkeletonSourceEntries(pending);
-        const first = sourceEntries[0];
-        const last = sourceEntries.at(-1);
-        if (!first || !last) {
-          break;
-        }
-
-        const startedAt = performance.now();
-        const priorSkeleton = state.storySkeleton;
-        const sourceHash = await storySkeletonSourceHash(
-          state.stageSummary.entries,
-          last.sourceEndMessageId,
-        );
-        const referenceMessages: TavernChatMessage[] = [
-          ...(priorSkeleton.text.trim()
-            ? [{ is_user: false, is_system: false, mes: priorSkeleton.text }]
-            : []),
-          ...sourceEntries.map((entry) => ({
-            is_user: false,
-            is_system: false,
-            mes: entry.text,
-          })),
-        ];
-        let worldBackground = '';
-        try {
-          const reference = await buildSummaryWorldInfoReferenceContext(
-            referenceMessages,
-            settings.extraction.reference,
-          );
-          worldBackground = reference.text;
-          recordDebugTrace(state, settings.debug, 'summary', '全局剧情骨架世界书背景已构建。', {
-            sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
-            tokens: reference.tokenCount,
-            worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
-            truncated: reference.truncated,
-            warnings: reference.warnings.join(' | ') || '-',
-            referencePreview: reference.text.slice(0, 4_000) || '-',
-          });
-        } catch (error) {
-          recordDebugTrace(state, settings.debug, 'error', '全局剧情骨架世界书背景构建失败，继续仅使用骨架与阶段总结。', {
-            sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-        const raw = await completeWithConfiguredProvider(settings, {
-          system: STORY_SKELETON_SYSTEM_PROMPT,
-          prompt: buildStorySkeletonPrompt(
-            priorSkeleton.text,
-            sourceEntries,
-            settings.summary.skeletonMaxTokens,
-            Boolean(priorSkeleton.stale),
-            worldBackground,
-          ),
-          maxTokens: settings.summary.skeletonMaxTokens,
-        });
-
-        const live = this.memoryRepository.getExisting();
-        if (!live || live.ownerChatId !== state.ownerChatId) {
-          throw new Error('全局剧情骨架生成期间聊天发生切换，已丢弃本次结果。');
-        }
-        const liveArchived = archivedStageSummaryEntries(live, settings.summary.windowSize);
-        if (!liveArchived.some((entry) => entry.sourceEndMessageId === last.sourceEndMessageId)) {
-          throw new Error('全局剧情骨架生成期间总结窗口发生变化，已丢弃本次结果。');
-        }
-        const liveHash = await storySkeletonSourceHash(
-          live.stageSummary.entries,
-          last.sourceEndMessageId,
-        );
-        if (liveHash !== sourceHash || live.storySkeleton.updatedAt !== priorSkeleton.updatedAt) {
-          throw new Error('全局剧情骨架生成期间来源或人工编辑发生变化，已丢弃本次结果。');
-        }
-
-        const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
-        const updatedAt = new Date().toISOString();
-        state = live;
-        state.storySkeleton = {
-          text,
-          coveredThroughMessageId: last.sourceEndMessageId,
-          sourceHash,
-          updatedAt,
-          ...(priorSkeleton.manuallyEdited ? { manuallyEdited: true } : {}),
-        };
-        state.metrics.skeletonUpdates += 1;
-        state.metrics.totalSkeletonMs += Math.round(performance.now() - startedAt);
-        state.metrics.lastSkeletonAt = updatedAt;
-        delete state.lastInspection;
-        recordDebugTrace(state, settings.debug, 'summary', '全局剧情骨架已生成或增量更新。', {
-          sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
-          coveredThroughMessageId: last.sourceEndMessageId,
-          sourceEntries: sourceEntries.length,
-          skeletonCharacters: text.length,
-          skeletonMaxTokens: settings.summary.skeletonMaxTokens,
-        });
-        await this.memoryRepository.save(state);
-        this.revisionCache.remember(state, settings.summary.skeletonMaxTokens);
-        updatedChunks += 1;
-        const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
-        options.onProgress?.({
-          sourceStartMessageId: first.sourceStartMessageId,
-          sourceEndMessageId: last.sourceEndMessageId,
-          pendingEntries: remaining.length,
-        });
+        return await this.runCleanBuild(state, settings, options);
       }
+      return await this.runIncrementalUpdates(state, settings, options);
     } catch (error) {
       state.metrics.skeletonFailures += 1;
       recordDebugTrace(state, settings.debug, 'error', '全局剧情骨架生成失败。', {
@@ -354,9 +575,6 @@ export class StorySkeletonService {
       }
       throw error;
     }
-
-    const pending = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
-    return { state, updatedChunks, pendingEntries: pending.length };
   }
 }
 
