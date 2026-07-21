@@ -58,6 +58,19 @@ describe('settings panel editable-control contract', () => {
     expect(memorySwitch).toBeLessThan(contextWindow);
   });
 
+  it('keeps story-processing reference controls visible when memory retrieval is disabled', () => {
+    const referenceTitle = source.indexOf('>剧情处理参考</span>');
+    const sectionStart = source.lastIndexOf('<details', referenceTitle);
+    const sectionEnd = source.indexOf('</details>', referenceTitle);
+    const referenceSection = source.slice(sectionStart, sectionEnd);
+
+    expect(referenceTitle).toBeGreaterThan(0);
+    expect(referenceSection).toContain('id="story-echo-reference-mode"');
+    expect(referenceSection).toContain('id="story-echo-reference-tokens"');
+    expect(referenceSection).toContain('id="story-echo-reference-world-info"');
+    expect(referenceSection).not.toContain('data-story-echo-memory-only');
+  });
+
   it('places the memory metadata manager above the action and status blocks', () => {
     const manager = source.indexOf('${memoryManagerTemplate()}');
     const actions = source.indexOf('<div class="story-echo-actions story-echo-actions-primary"');

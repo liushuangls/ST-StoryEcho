@@ -63,7 +63,8 @@ describe('genre-neutral LLM prompts', () => {
       expect(prompt).toContain('动态小节');
       expect(prompt).toContain('分类标签');
       expect(prompt).toContain('自然段落');
-      expect(prompt).not.toContain('不要强行添加固定标题');
+      expect(prompt).toContain('自主选择');
+      expect(prompt).not.toMatch(/(?:不得|不要|不能|禁止|必须)/u);
     }
   });
 });

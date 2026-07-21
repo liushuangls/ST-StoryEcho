@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MODULE_ID } from '../src/core/constants';
 import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
+import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import {
   buildStageSummaryGrounding,
   buildStageSummaryPrompt,
@@ -40,6 +41,8 @@ function installContext(
     saveMetadata: vi.fn(async () => undefined),
     generateRaw,
     getCurrentChatId: () => 'chat-id',
+    getTokenCountAsync: vi.fn(async (text: string) => Array.from(text).length),
+    getSortedWorldInfoEntries: vi.fn(async (): Promise<SillyTavernWorldInfoEntry[]> => []),
   };
   vi.stubGlobal('SillyTavern', { getContext: () => context });
   return { context, settings, state };
@@ -47,9 +50,9 @@ function installContext(
 
 describe('independent stage summaries', () => {
   it('adapts both content and presentation to cultivation and other plot genres', () => {
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('选择最适合本阶段的组织方式');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修仙或玄幻剧情优先写清境界、功法术法');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('概括性标题、动态小节、分类标签或自然段落');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('自主选择最合适的写法');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可重点说明境界、功法术法');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('概括性标题、动态小节、内容分类、自然段落');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修炼、学习、赠礼、照料、同行');
   });
 
@@ -104,6 +107,31 @@ describe('independent stage summaries', () => {
     expect(prompt).not.toContain('previous_summary');
   });
 
+  it('sends batch-matched world info to the stage-summary model as non-evidence background', async () => {
+    const generateRaw = vi.fn(async (_options: { systemPrompt: string; prompt: string }) => (
+      '用户角色在姜梦指导下修炼无我剑诀。'
+    ));
+    const installed = installContext([
+      { is_user: true, mes: '开始修炼无我剑诀。' },
+      { is_user: false, name: '姜梦', mes: '姜梦指点了心法要领。' },
+    ], generateRaw, 1);
+    installed.context.getSortedWorldInfoEntries.mockResolvedValueOnce([{
+      world: '蜀山设定',
+      uid: 7,
+      key: ['无我剑诀'],
+      content: '无我剑诀以忘我、忘剑为核心。',
+    }]);
+
+    const result = await new StageSummaryService().processNextThrough(1);
+
+    expect(result.updatedChunks).toBe(1);
+    const request = generateRaw.mock.calls[0]?.[0];
+    expect(String(request?.prompt ?? '')).toContain('<story_echo_world_background>');
+    expect(String(request?.prompt ?? '')).toContain('无我剑诀以忘我、忘剑为核心');
+    expect(String(request?.systemPrompt ?? '')).toContain('为后续续写披露足够的上下文');
+    expect(String(request?.systemPrompt ?? '')).toContain('剧情事件与阶段结束状态以history_messages和authoritative_facts为依据');
+  });
+
   it('grounds a correction batch with user-confirmed current facts instead of assistant speculation', () => {
     const correction = memory({
       id: 'drink-correction',
@@ -143,7 +171,7 @@ describe('independent stage summaries', () => {
     expect(grounding).toContain('推测有酒 → 只有淡茶，没有酒');
     expect(grounding).not.toContain('福尔摩斯猜测');
     expect(prompt).toContain('<authoritative_facts>');
-    expect(prompt).toContain('用户明确事实优先于冲突的Assistant推测');
+    expect(prompt).toContain('以带来源的用户明确事实和较新有效状态形成最终表述');
   });
 
   it('keeps an explicit Assistant-authored before-to-after plot transition in the grounding ledger', () => {

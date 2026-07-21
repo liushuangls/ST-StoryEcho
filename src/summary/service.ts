@@ -7,6 +7,7 @@ import { countCompletedTurns, planNextChunk } from '../extraction/chunk-planner'
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
+import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
 import { firstStoryPhaseBoundary } from '../retrieval/story-phase';
 import { SettingsRepository } from '../settings/repository';
 import {
@@ -299,6 +300,28 @@ export class StageSummaryService {
               chunk.endMessageId,
             )
           : '';
+        let worldBackground = '';
+        try {
+          const reference = await buildSummaryWorldInfoReferenceContext(
+            snapshot,
+            settings.extraction.reference,
+            context,
+          );
+          worldBackground = reference.text;
+          recordDebugTrace(state, settings.debug, 'summary', '阶段总结世界书背景已构建。', {
+            range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+            tokens: reference.tokenCount,
+            worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
+            truncated: reference.truncated,
+            warnings: reference.warnings.join(' | ') || '-',
+            referencePreview: reference.text.slice(0, 4_000) || '-',
+          });
+        } catch (error) {
+          recordDebugTrace(state, settings.debug, 'error', '阶段总结世界书背景构建失败，继续仅使用聊天正文。', {
+            range: `${chunk.startMessageId}-${chunk.endMessageId}`,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         const raw = await completeWithConfiguredProvider(settings, {
           system: STAGE_SUMMARY_SYSTEM_PROMPT,
           prompt: buildStageSummaryPrompt(
@@ -306,6 +329,7 @@ export class StageSummaryService {
             chunk.startMessageId,
             identity,
             authoritativeFacts,
+            worldBackground,
           ),
           maxTokens: settings.summary.maxTokens,
         });

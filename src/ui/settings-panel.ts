@@ -203,16 +203,34 @@ function panelTemplate(): HTMLElement {
               <span>每批抽取轮数</span>
               <input id="story-echo-extraction-turns" class="text_pole" type="number" min="1" max="20" step="1">
             </label>
+            <p class="story-echo-hint story-echo-field-wide">
+              开启后自动完成抽取、整理、向量同步、检索与请求级注入。LLM查询改写失败时回退本地规则；已有元数据在关闭后仍会保留。
+            </p>
+          </div>
+        </details>
+
+        <details class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-book-atlas" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">剧情处理参考</span>
+                <span class="story-echo-section-summary-description">角色卡与当前文本命中的世界书</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-grid story-echo-section-body">
             <label class="story-echo-field">
-              <span>抽取参考上下文</span>
+              <span>参考模式</span>
               <select id="story-echo-reference-mode" class="text_pole">
-                <option value="character-world-info">角色卡精简信息 + 批次命中世界书（推荐）</option>
-                <option value="character">仅角色卡精简信息</option>
+                <option value="character-world-info">抽取使用角色卡，抽取/总结/骨架使用命中世界书（推荐）</option>
+                <option value="character">仅抽取使用角色卡</option>
                 <option value="off">关闭</option>
               </select>
             </label>
             <label class="story-echo-field">
-              <span>参考上下文总预算</span>
+              <span>每次参考 Token预算</span>
               <input id="story-echo-reference-tokens" class="text_pole" type="number" min="256" max="16000" step="100">
             </label>
             <label class="story-echo-field">
@@ -220,8 +238,7 @@ function panelTemplate(): HTMLElement {
               <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              开启后自动完成抽取、整理、向量同步、检索与请求级注入。LLM查询改写失败时回退本地规则；已有元数据在关闭后仍会保留。
-              抽取参考只读取角色精简信息和该历史批次直接命中的世界书，不传入预设、system、jailbreak、示例对话或欢迎语。
+              只读取角色精简信息和当前处理文本直接命中的世界书，不传入预设、system、jailbreak、示例对话或欢迎语。阶段总结与全局剧情骨架仅使用命中世界书作为背景，不使用角色卡，也不将背景当作剧情事实证据。
             </p>
           </div>
         </details>
@@ -505,7 +522,7 @@ function panelTemplate(): HTMLElement {
           <summary>最近调试轨迹</summary>
           <pre id="story-echo-traces">调试模式关闭或尚无轨迹。</pre>
         </details>
-        <p class="story-echo-hint">调试报告不包含API Key，但会包含全局剧情骨架、有界抽取参考预览、阶段总结、检索查询和被召回的剧情文本。</p>
+        <p class="story-echo-hint">调试报告不包含API Key，但会包含全局剧情骨架、有界剧情处理参考预览、阶段总结、检索查询和被召回的剧情文本。</p>
       </div>
     </div>
   `;

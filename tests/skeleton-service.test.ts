@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MODULE_ID } from '../src/core/constants';
 import type { StageSummaryEntry, StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import { MemoryRepository } from '../src/memory/repository';
+import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { StorySkeletonService } from '../src/summary/skeleton-service';
 import { STORY_SKELETON_SYSTEM_PROMPT } from '../src/summary/skeleton-prompts';
@@ -60,6 +61,8 @@ function installContext(
     saveMetadata: vi.fn(async () => undefined),
     generateRaw,
     getCurrentChatId: () => 'chat-id',
+    getTokenCountAsync: vi.fn(async (text: string) => Array.from(text).length),
+    getSortedWorldInfoEntries: vi.fn(async (): Promise<SillyTavernWorldInfoEntry[]> => []),
   };
   vi.stubGlobal('SillyTavern', { getContext: () => context });
   return { context, settings, state };
@@ -72,9 +75,9 @@ afterEach(() => {
 
 describe('global story skeleton lifecycle', () => {
   it('keeps a genre-adaptive long-term plot spine with cultivation progression', () => {
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('选择最适合当前故事的组织方式');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情优先修炼体系、境界与突破');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('概括性标题、动态小节、分类标签或自然段落');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择最合适的写法');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可重点说明修炼体系、境界与突破');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('概括性标题、动态小节、内容分类、自然段落');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('重大因果和成长轨迹');
   });
 
@@ -91,6 +94,41 @@ describe('global story skeleton lifecycle', () => {
     expect(result.state?.storySkeleton.stale).toBeUndefined();
     expect(storySkeletonIsUsable(result.state!)).toBe(true);
     expect(generateRaw).toHaveBeenCalledOnce();
+  });
+
+  it('sends world info matched by the existing skeleton and archived summaries as background', async () => {
+    const generateRaw = vi.fn(async (_options: { systemPrompt: string; prompt: string }) => (
+      skeletonText('命中世界书后的骨架。')
+    ));
+    const entries = Array.from({ length: 8 }, (_, index) => stageEntry(index));
+    entries[1]!.text = '用户角色开始修炼无我剑诀。';
+    const installed = installContext(entries, generateRaw);
+    installed.state.storySkeleton = {
+      text: skeletonText('用户角色长期持有太虚剑。'),
+      coveredThroughMessageId: entries[0]!.sourceEndMessageId,
+      sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
+    };
+    installed.context.getSortedWorldInfoEntries.mockResolvedValueOnce([{
+      world: '剑道设定',
+      uid: 21,
+      key: ['太虚剑'],
+      content: '太虚剑是蜀山古传法宝。',
+    }, {
+      world: '剑道设定',
+      uid: 22,
+      key: ['无我剑诀'],
+      content: '无我剑诀以忘我、忘剑为核心。',
+    }]);
+
+    const result = await new StorySkeletonService().processNextIfNeeded();
+
+    expect(result.updatedChunks).toBe(1);
+    const request = generateRaw.mock.calls[0]?.[0];
+    expect(String(request?.prompt ?? '')).toContain('<story_echo_world_background>');
+    expect(String(request?.prompt ?? '')).toContain('太虚剑是蜀山古传法宝');
+    expect(String(request?.prompt ?? '')).toContain('无我剑诀以忘我、忘剑为核心');
+    expect(String(request?.systemPrompt ?? '')).toContain('提供跨章节仍然有用的世界背景');
+    expect(String(request?.systemPrompt ?? '')).toContain('长期事件与当前状态以existing_story_skeleton和new_archived_stage_summaries为依据');
   });
 
   it('does not build while all stage summaries still fit inside S', async () => {

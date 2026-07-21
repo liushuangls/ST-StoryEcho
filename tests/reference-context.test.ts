@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildExtractionReferenceContext } from '../src/reference/context';
+import {
+  buildExtractionReferenceContext,
+  buildSummaryWorldInfoReferenceContext,
+} from '../src/reference/context';
 import type { SillyTavernContext } from '../src/platform/sillytavern';
 
 function context(overrides: Partial<SillyTavernContext> = {}): SillyTavernContext {
@@ -119,6 +122,59 @@ describe('extraction reference context', () => {
 
     expect(result.text).toBe('');
     expect(getCharacterCardFields).not.toHaveBeenCalled();
+    expect(getSortedWorldInfoEntries).not.toHaveBeenCalled();
+  });
+});
+
+describe('summary world-info background', () => {
+  it('includes only batch-matched world info without adding character-card fields', async () => {
+    const result = await buildSummaryWorldInfoReferenceContext([
+      { is_user: true, name: '刘爽', mes: '用户角色开始修炼无我剑诀。' },
+      { is_user: false, name: '姜梦', mes: '姜梦指点了第一层心法。' },
+    ], settings, context({
+      getCharacterCardFields: () => ({
+        persona: '这段角色卡信息不应进入总结背景。',
+      }),
+      getSortedWorldInfoEntries: vi.fn(async () => [{
+        world: '蜀山设定',
+        uid: 11,
+        comment: '无我剑诀',
+        key: ['无我剑诀'],
+        content: '无我剑诀以忘我、忘剑为核心。',
+      }, {
+        world: '未命中设定',
+        uid: 12,
+        key: ['太虚剑'],
+        content: '未命中内容不应进入。',
+      }, {
+        world: '常驻设定',
+        uid: 13,
+        constant: true,
+        content: '常驻内容不应无条件进入。',
+      }]),
+    }));
+
+    expect(result.text).toContain('<story_echo_world_background>');
+    expect(result.text).toContain('无我剑诀以忘我、忘剑为核心');
+    expect(result.text).toContain('静态设定语境');
+    expect(result.text).toContain('剧情事件与当前状态以随后提供的剧情原文、阶段总结或现有骨架为依据');
+    expect(result.text).not.toContain('这段角色卡信息');
+    expect(result.text).not.toContain('未命中内容');
+    expect(result.text).not.toContain('常驻内容');
+    expect(result.worldInfoEntries).toEqual(['蜀山设定#11#无我剑诀']);
+    expect(result.tokenCount).toBeLessThanOrEqual(3_000);
+  });
+
+  it('respects the shared reference-mode switch', async () => {
+    const getSortedWorldInfoEntries = vi.fn();
+    const result = await buildSummaryWorldInfoReferenceContext([
+      { is_user: true, mes: '无我剑诀' },
+    ], {
+      ...settings,
+      mode: 'character',
+    }, context({ getSortedWorldInfoEntries }));
+
+    expect(result.text).toBe('');
     expect(getSortedWorldInfoEntries).not.toHaveBeenCalled();
   });
 });

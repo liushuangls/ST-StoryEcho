@@ -1,9 +1,10 @@
 import { logger } from '../core/logger';
-import type { StoryEchoChatState } from '../core/types';
+import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
 import { recordDebugTrace } from '../debug/metrics';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getCurrentChatId } from '../platform/sillytavern';
+import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
 import {
   buildStorySkeletonPrompt,
@@ -164,6 +165,37 @@ export class StorySkeletonService {
           state.stageSummary.entries,
           last.sourceEndMessageId,
         );
+        const referenceMessages: TavernChatMessage[] = [
+          ...(priorSkeleton.text.trim()
+            ? [{ is_user: false, is_system: false, mes: priorSkeleton.text }]
+            : []),
+          ...sourceEntries.map((entry) => ({
+            is_user: false,
+            is_system: false,
+            mes: entry.text,
+          })),
+        ];
+        let worldBackground = '';
+        try {
+          const reference = await buildSummaryWorldInfoReferenceContext(
+            referenceMessages,
+            settings.extraction.reference,
+          );
+          worldBackground = reference.text;
+          recordDebugTrace(state, settings.debug, 'summary', '全局剧情骨架世界书背景已构建。', {
+            sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
+            tokens: reference.tokenCount,
+            worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
+            truncated: reference.truncated,
+            warnings: reference.warnings.join(' | ') || '-',
+            referencePreview: reference.text.slice(0, 4_000) || '-',
+          });
+        } catch (error) {
+          recordDebugTrace(state, settings.debug, 'error', '全局剧情骨架世界书背景构建失败，继续仅使用骨架与阶段总结。', {
+            sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
         const raw = await completeWithConfiguredProvider(settings, {
           system: STORY_SKELETON_SYSTEM_PROMPT,
           prompt: buildStorySkeletonPrompt(
@@ -171,6 +203,7 @@ export class StorySkeletonService {
             sourceEntries,
             settings.summary.skeletonMaxTokens,
             Boolean(priorSkeleton.stale),
+            worldBackground,
           ),
           maxTokens: settings.summary.skeletonMaxTokens,
         });
