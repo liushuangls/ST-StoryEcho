@@ -46,10 +46,10 @@ function installContext(
 }
 
 describe('independent stage summaries', () => {
-  it('adapts to cultivation and other plot genres instead of assuming a case file', () => {
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不要套用预设题材、卷宗式分类或固定栏目');
+  it('adapts both content and presentation to cultivation and other plot genres', () => {
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('选择最适合本阶段的组织方式');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修仙或玄幻剧情优先写清境界、功法术法');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('可以自由分段');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('概括性标题、动态小节、分类标签或自然段落');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修炼、学习、赠礼、照料、同行');
   });
 

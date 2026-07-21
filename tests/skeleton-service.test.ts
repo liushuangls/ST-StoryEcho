@@ -72,9 +72,9 @@ afterEach(() => {
 
 describe('global story skeleton lifecycle', () => {
   it('keeps a genre-adaptive long-term plot spine with cultivation progression', () => {
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('不要套用预设题材、卷宗式分类或固定栏目');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('选择最适合当前故事的组织方式');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情优先修炼体系、境界与突破');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('可以按时间、因果、人物成长、关系或势力线自然分段');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('概括性标题、动态小节、分类标签或自然段落');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('重大因果和成长轨迹');
   });
 
