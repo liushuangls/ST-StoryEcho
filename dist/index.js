@@ -2579,6 +2579,48 @@ async function decideConsolidation(settings, candidates, memories) {
   }
 }
 
+// src/history/source-revision-cache.ts
+var SourceRevisionCache = class {
+  ownerChatId = "";
+  sourceSignature = "";
+  endMessageId = -1;
+  messages = [];
+  matches(ownerChatId, sourceSignature, chat, endMessageId) {
+    if (!sourceSignature || ownerChatId !== this.ownerChatId || sourceSignature !== this.sourceSignature || endMessageId !== this.endMessageId || endMessageId >= chat.length || this.messages.length !== endMessageId + 1) {
+      return false;
+    }
+    for (let index = 0; index <= endMessageId; index += 1) {
+      const message = chat[index];
+      const snapshot = this.messages[index];
+      if (!message || !snapshot || message.is_user !== snapshot.isUser || Boolean(message.is_system) !== snapshot.isSystem || (message.name || "") !== snapshot.name || message.mes !== snapshot.content) {
+        return false;
+      }
+    }
+    return true;
+  }
+  remember(ownerChatId, sourceSignature, chat, endMessageId) {
+    if (!sourceSignature || endMessageId < 0 || endMessageId >= chat.length) {
+      this.clear();
+      return;
+    }
+    this.ownerChatId = ownerChatId;
+    this.sourceSignature = sourceSignature;
+    this.endMessageId = endMessageId;
+    this.messages = chat.slice(0, endMessageId + 1).map((message) => ({
+      isUser: message.is_user,
+      isSystem: Boolean(message.is_system),
+      name: message.name || "",
+      content: message.mes
+    }));
+  }
+  clear() {
+    this.ownerChatId = "";
+    this.sourceSignature = "";
+    this.endMessageId = -1;
+    this.messages = [];
+  }
+};
+
 // src/core/constants.ts
 var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
@@ -3439,11 +3481,26 @@ function normalizeStageSummary(value) {
   };
 }
 function isCurrentStageSummary(value) {
-  if (!value || !Array.isArray(value.entries) || !Number.isFinite(value.coveredThroughMessageId) || typeof value.coveredThroughHash !== "string") {
+  if (!value || !Array.isArray(value.entries) || !Number.isInteger(value.coveredThroughMessageId) || typeof value.coveredThroughHash !== "string") {
     return false;
   }
-  const normalized5 = normalizeStageSummary(value);
-  return normalized5.entries.length === value.entries.length && normalized5.coveredThroughMessageId === value.coveredThroughMessageId && normalized5.coveredThroughHash === value.coveredThroughHash;
+  let expectedStartMessageId = 0;
+  let latest;
+  for (const candidate of value.entries) {
+    if (!isRecord4(candidate)) {
+      return false;
+    }
+    const text2 = candidate["text"];
+    const deleted = candidate["deleted"];
+    const sourceStartMessageId = candidate["sourceStartMessageId"];
+    const sourceEndMessageId = candidate["sourceEndMessageId"];
+    if (typeof text2 !== "string" || text2 !== text2.trim() || (deleted === true ? text2 !== "" : !text2) || deleted !== void 0 && deleted !== true || !Number.isInteger(sourceStartMessageId) || !Number.isInteger(sourceEndMessageId) || Number(sourceStartMessageId) !== expectedStartMessageId || Number(sourceEndMessageId) < Number(sourceStartMessageId) || typeof candidate["sourceHash"] !== "string" || typeof candidate["updatedAt"] !== "string" || candidate["manuallyEdited"] !== void 0 && candidate["manuallyEdited"] !== true) {
+      return false;
+    }
+    latest = candidate;
+    expectedStartMessageId = Number(sourceEndMessageId) + 1;
+  }
+  return latest ? value.coveredThroughMessageId === latest.sourceEndMessageId && value.coveredThroughHash === latest.sourceHash && value.updatedAt === latest.updatedAt : value.coveredThroughMessageId === -1 && value.coveredThroughHash === "" && value.updatedAt === void 0;
 }
 function normalizeStorySkeleton(value) {
   const text2 = typeof value?.text === "string" ? value.text.trim() : "";
@@ -3466,11 +3523,87 @@ function normalizeStorySkeleton(value) {
   };
 }
 function isCurrentStorySkeleton(value) {
-  if (!value) {
+  if (!value || typeof value.text !== "string" || value.text !== value.text.trim() || !Number.isInteger(value.coveredThroughMessageId) || typeof value.sourceHash !== "string" || value.updatedAt !== void 0 && typeof value.updatedAt !== "string" || value.manuallyEdited !== void 0 && value.manuallyEdited !== true || value.stale !== void 0 && value.stale !== true) {
     return false;
   }
-  const normalized5 = normalizeStorySkeleton(value);
-  return normalized5.text === (typeof value.text === "string" ? value.text.trim() : "") && normalized5.coveredThroughMessageId === Number(value.coveredThroughMessageId) && normalized5.sourceHash === (typeof value.sourceHash === "string" ? value.sourceHash : "");
+  if (!value.text) {
+    return value.coveredThroughMessageId === -1 && value.sourceHash === "" && value.updatedAt === void 0 && value.manuallyEdited === void 0 && value.stale === void 0;
+  }
+  return Number(value.coveredThroughMessageId) >= 0 && (Boolean(value.sourceHash) || value.stale === true);
+}
+var METRIC_COUNT_FIELDS = [
+  "summaryUpdates",
+  "summaryFailures",
+  "summaryMessagesCovered",
+  "skeletonUpdates",
+  "skeletonFailures",
+  "extractionChunks",
+  "extractionFailures",
+  "candidatesExtracted",
+  "referenceContextBuilds",
+  "referenceContextPartialFailures",
+  "referenceContextTokens",
+  "referenceWorldInfoEntries",
+  "consolidationCalls",
+  "consolidationFailures",
+  "vectorQueries",
+  "vectorQueryFailures",
+  "vectorSyncFailures",
+  "vectorItemsInserted",
+  "vectorItemsDeleted",
+  "vectorRebuilds",
+  "queryRewriteRequests",
+  "queryRewriteFailures",
+  "queryRewriteCacheHits",
+  "generationAttempts",
+  "generationsTrimmed",
+  "generationsDeferred",
+  "messagesRemoved",
+  "memoriesInjected",
+  "estimatedRemovedTokens",
+  "estimatedInjectedTokens",
+  "totalSummaryMs",
+  "totalSkeletonMs",
+  "totalExtractionMs",
+  "totalConsolidationMs",
+  "totalRetrievalMs",
+  "totalQueryRewriteMs"
+];
+var METRIC_ACTIONS = [
+  "CREATE",
+  "MERGE",
+  "UPDATE",
+  "RESOLVE",
+  "SUPERSEDE",
+  "IGNORE"
+];
+function isCurrentMetrics(value) {
+  if (!isRecord4(value) || !isRecord4(value["actions"])) {
+    return false;
+  }
+  for (const field of METRIC_COUNT_FIELDS) {
+    const count = value[field];
+    if (typeof count !== "number" || !Number.isFinite(count) || count < 0) {
+      return false;
+    }
+  }
+  for (const action of METRIC_ACTIONS) {
+    const count = value["actions"][action];
+    if (typeof count !== "number" || !Number.isFinite(count) || count < 0) {
+      return false;
+    }
+  }
+  for (const field of [
+    "lastExtractionAt",
+    "lastSummaryAt",
+    "lastSkeletonAt",
+    "lastGenerationAt"
+  ]) {
+    if (value[field] !== void 0 && typeof value[field] !== "string") {
+      return false;
+    }
+  }
+  return true;
 }
 function isStateBase(value) {
   if (typeof value !== "object" || value === null) {
@@ -3478,6 +3611,11 @@ function isStateBase(value) {
   }
   const candidate = value;
   return candidate.schemaVersion === CHAT_STATE_VERSION && typeof candidate.chatUuid === "string" && typeof candidate.ownerChatId === "string" && typeof candidate.vectorCollectionId === "string" && typeof candidate.indexedThroughMessageId === "number" && Array.isArray(candidate.memories) && Array.isArray(candidate.pendingRanges);
+}
+function isCurrentState(stored) {
+  return Array.isArray(stored.pendingVectorHashes) && Array.isArray(stored.pendingVectorDeleteHashes) && typeof stored.vectorFingerprint === "string" && typeof stored.indexedPrefixHash === "string" && isCurrentStageSummary(stored.stageSummary) && isCurrentStorySkeleton(stored.storySkeleton) && isCurrentMetrics(stored.metrics) && Array.isArray(stored.debugTraces) && stored.debugTraces.length <= 50 && (stored.lastInspection === void 0 || Number.isFinite(stored.lastInspection.vectorResultCount) && Number.isFinite(stored.lastInspection.durationMs) && Number.isFinite(stored.lastInspection.estimatedRemovedTokens) && Number.isFinite(stored.lastInspection.estimatedInjectedTokens) && Number.isFinite(stored.lastInspection.estimatedNetSavedTokens) && Number.isFinite(stored.lastInspection.estimatedSummaryTokens) && Number.isFinite(stored.lastInspection.summaryCoveredThroughMessageId)) && stored.memories.every(
+    (memory) => Array.isArray(memory.sourceHistory) && memory.sourceHistory.length > 0 && typeof memory.logicalKey === "string" && Boolean(memory.logicalKey.trim()) && Array.isArray(memory.sourceMessageIds) && memory.sourceMessageIds.length > 0 && ["user", "assistant", "mixed", "unknown"].includes(String(memory.evidenceRole ?? "")) && Array.isArray(memory.supersedesMemoryIds) && Array.isArray(memory.unresolvedThreads) && Boolean(memory.lastOperation) && (memory.status !== "resolved" || memory.unresolvedThreads.length === 0)
+  );
 }
 function normalizeState(stored, chat = []) {
   const lastInspection = stored.lastInspection ? {
@@ -3531,7 +3669,7 @@ var MemoryRepository = class {
     if (!isStateBase(stored) || stored.ownerChatId !== getCurrentChatId(context)) {
       return null;
     }
-    return normalizeState(stored, context.chat);
+    return isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
   }
   async getOrCreate() {
     const context = getContext();
@@ -3546,10 +3684,9 @@ var MemoryRepository = class {
       await context.saveMetadata();
       return state2;
     }
-    const state = normalizeState(stored, context.chat);
-    if (!Array.isArray(stored.pendingVectorHashes) || !Array.isArray(stored.pendingVectorDeleteHashes) || typeof stored.vectorFingerprint !== "string" || typeof stored.indexedPrefixHash !== "string" || !isCurrentStageSummary(stored.stageSummary) || !isCurrentStorySkeleton(stored.storySkeleton) || !stored.metrics || !Array.isArray(stored.debugTraces) || stored.lastInspection !== void 0 && (!Number.isFinite(stored.lastInspection.vectorResultCount) || !Number.isFinite(stored.lastInspection.durationMs) || !Number.isFinite(stored.lastInspection.estimatedRemovedTokens) || !Number.isFinite(stored.lastInspection.estimatedInjectedTokens) || !Number.isFinite(stored.lastInspection.estimatedNetSavedTokens) || !Number.isFinite(stored.lastInspection.estimatedSummaryTokens) || !Number.isFinite(stored.lastInspection.summaryCoveredThroughMessageId)) || stored.memories.some(
-      (memory) => !Array.isArray(memory.sourceHistory) || memory.sourceHistory.length === 0 || typeof memory.logicalKey !== "string" || !memory.logicalKey.trim() || !Array.isArray(memory.sourceMessageIds) || memory.sourceMessageIds.length === 0 || !["user", "assistant", "mixed", "unknown"].includes(String(memory.evidenceRole ?? "")) || !Array.isArray(memory.supersedesMemoryIds) || !Array.isArray(memory.unresolvedThreads) || !memory.lastOperation || memory.status === "resolved" && memory.unresolvedThreads.length > 0
-    )) {
+    const current = isCurrentState(stored);
+    const state = current ? stored : normalizeState(stored, context.chat);
+    if (!current) {
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
     }
@@ -3841,6 +3978,14 @@ function normalized3(value, caseSensitive) {
   const normalizedValue = value.normalize("NFKC");
   return caseSensitive ? normalizedValue : normalizedValue.toLocaleLowerCase();
 }
+function prepareHistoryText(value) {
+  const caseSensitive = value.normalize("NFKC");
+  return {
+    raw: value,
+    caseSensitive,
+    caseInsensitive: caseSensitive.toLocaleLowerCase()
+  };
+}
 function regexFromWorldInfoKey(value) {
   if (!value.startsWith("/")) {
     return null;
@@ -3863,10 +4008,10 @@ function matchesKey(historyText, rawKey, entry, context) {
   const keyRegex = regexFromWorldInfoKey(substituted);
   if (keyRegex) {
     keyRegex.lastIndex = 0;
-    return keyRegex.test(historyText);
+    return keyRegex.test(historyText.raw);
   }
   const caseSensitive = entry.caseSensitive === true;
-  const haystack = normalized3(historyText, caseSensitive);
+  const haystack = caseSensitive ? historyText.caseSensitive : historyText.caseInsensitive;
   const needle = normalized3(substituted, caseSensitive);
   if (!entry.matchWholeWords || /[\u3400-\u9fff\uf900-\ufaff]/u.test(needle)) {
     return haystack.includes(needle);
@@ -4002,23 +4147,28 @@ async function truncateToTokenBudget(value, maxTokens, countTokens) {
   if (!value || maxTokens <= 0) {
     return { text: "", truncated: Boolean(value) };
   }
-  if (await countTokens(value) <= maxTokens) {
+  const fullTokens = await countTokens(value);
+  if (fullTokens <= maxTokens) {
     return { text: value, truncated: false };
   }
   const points = Array.from(value);
-  let low = 0;
-  let high = points.length;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    const candidate = `${points.slice(0, middle).join("").trimEnd()}\u2026`;
-    if (await countTokens(candidate) <= maxTokens) {
-      low = middle;
-    } else {
-      high = middle - 1;
+  let length = Math.max(1, Math.min(
+    points.length - 1,
+    Math.floor(points.length * maxTokens / Math.max(1, fullTokens) * 0.96)
+  ));
+  for (let attempt = 0; attempt < 4 && length > 0; attempt += 1) {
+    const candidate = `${points.slice(0, length).join("").trimEnd()}\u2026`;
+    const candidateTokens = await countTokens(candidate);
+    if (candidateTokens <= maxTokens) {
+      return { text: candidate, truncated: true };
     }
+    length = Math.max(0, Math.min(
+      length - 1,
+      Math.floor(length * maxTokens / Math.max(1, candidateTokens) * 0.94)
+    ));
   }
   return {
-    text: low > 0 ? `${points.slice(0, low).join("").trimEnd()}\u2026` : "",
+    text: "",
     truncated: true
   };
 }
@@ -4061,17 +4211,21 @@ async function buildReferenceContext(messages, settings, context, options) {
   let availableEntryCount = 0;
   if (options.includeWorldInfo && settings.maxWorldInfoEntries > 0) {
     try {
-      const historyText = messages.filter((message) => !message.is_system).map((message) => [clean2(message.name), storyContent(message)].filter(Boolean).join(": ")).reverse().join("\n");
+      const historyText = prepareHistoryText(messages.filter((message) => !message.is_system).map((message) => [clean2(message.name), storyContent(message)].filter(Boolean).join(": ")).reverse().join("\n"));
       const entries = await sortedWorldInfoEntries(context);
-      const allMatches = entries.flatMap((entry) => {
+      const maximumMatches = Math.min(20, Math.max(0, Math.floor(settings.maxWorldInfoEntries)));
+      const allMatches = [];
+      for (const entry of entries) {
         const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
-        return matchedKeys.length > 0 ? [{ entry, matchedKeys }] : [];
-      });
+        if (matchedKeys.length > 0) {
+          allMatches.push({ entry, matchedKeys });
+          if (allMatches.length > maximumMatches) {
+            break;
+          }
+        }
+      }
       availableEntryCount = allMatches.length;
-      matchedEntries = allMatches.slice(
-        0,
-        Math.min(20, Math.max(0, Math.floor(settings.maxWorldInfoEntries)))
-      );
+      matchedEntries = allMatches.slice(0, maximumMatches);
     } catch (error) {
       warnings.push(`\u4E16\u754C\u4E66\u53C2\u8003\u8BFB\u53D6\u5931\u8D25\uFF1A${error instanceof Error ? error.message : String(error)}`);
     }
@@ -6143,6 +6297,7 @@ var ExtractionService = class {
   settingsRepository = new SettingsRepository();
   memoryRepository = new MemoryRepository();
   vectorStore = new SillyTavernVectorStore();
+  sourceRevisionCache = new SourceRevisionCache();
   processThrough(targetEndMessageId, onProgress) {
     return this.enqueue(targetEndMessageId, {
       maxChunks: Number.MAX_SAFE_INTEGER,
@@ -6236,13 +6391,34 @@ var ExtractionService = class {
     const context = getContext();
     const settings = this.settingsRepository.get();
     const indexedPastCurrentEnd = current.indexedThroughMessageId >= context.chat.length;
+    const sourceSignature = `${current.indexedThroughMessageId}:${current.indexedPrefixHash}`;
+    if (!indexedPastCurrentEnd && this.sourceRevisionCache.matches(
+      current.ownerChatId,
+      sourceSignature,
+      context.chat,
+      current.indexedThroughMessageId
+    )) {
+      return current;
+    }
     const actualPrefixHash = indexedPastCurrentEnd ? "" : await prefixHash(context.chat, current.indexedThroughMessageId);
     if (!current.indexedPrefixHash && !indexedPastCurrentEnd) {
       current.indexedPrefixHash = actualPrefixHash;
       await this.memoryRepository.save(current);
+      this.sourceRevisionCache.remember(
+        current.ownerChatId,
+        `${current.indexedThroughMessageId}:${current.indexedPrefixHash}`,
+        context.chat,
+        current.indexedThroughMessageId
+      );
       return current;
     }
     if (!indexedPastCurrentEnd && actualPrefixHash === current.indexedPrefixHash) {
+      this.sourceRevisionCache.remember(
+        current.ownerChatId,
+        sourceSignature,
+        context.chat,
+        current.indexedThroughMessageId
+      );
       return current;
     }
     const previousIndexedThrough = current.indexedThroughMessageId;
@@ -6283,6 +6459,7 @@ var ExtractionService = class {
       purgeDeferred
     });
     await this.memoryRepository.save(current);
+    this.sourceRevisionCache.clear();
     return current;
   }
   async syncPendingVectors(state) {
@@ -6973,10 +7150,14 @@ function assertChatOwner2(state) {
     throw new Error("\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u5199\u5165\u3002");
   }
 }
+function summarySourceSignature(entries) {
+  return entries.map((entry) => `${entry.sourceStartMessageId}:${entry.sourceEndMessageId}:${entry.sourceHash}`).join("|");
+}
 var StageSummaryService = class {
   queue = Promise.resolve();
   settingsRepository = new SettingsRepository();
   memoryRepository = new MemoryRepository();
+  sourceRevisionCache = new SourceRevisionCache();
   /**
    * Validate summary entries independently from the structured-memory index.
    * This is required by the LLM-only mode, where indexedThroughMessageId is
@@ -6991,6 +7172,15 @@ var StageSummaryService = class {
       throw new Error("\u6821\u9A8C\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
     }
     const context = getContext();
+    const initialCoverage = current.stageSummary.entries.at(-1)?.sourceEndMessageId ?? -1;
+    if (this.sourceRevisionCache.matches(
+      current.ownerChatId,
+      summarySourceSignature(current.stageSummary.entries),
+      context.chat,
+      initialCoverage
+    )) {
+      return current;
+    }
     let validEntries = 0;
     let initializedHashes = 0;
     for (const entry of current.stageSummary.entries) {
@@ -7016,6 +7206,12 @@ var StageSummaryService = class {
         current.stageSummary.coveredThroughHash = latest2.sourceHash;
         await this.memoryRepository.save(current);
       }
+      this.sourceRevisionCache.remember(
+        current.ownerChatId,
+        summarySourceSignature(current.stageSummary.entries),
+        context.chat,
+        current.stageSummary.entries.at(-1)?.sourceEndMessageId ?? -1
+      );
       return current;
     }
     const removedEntries = current.stageSummary.entries.length - validEntries;
@@ -7033,6 +7229,12 @@ var StageSummaryService = class {
       coveredThroughMessageId: current.stageSummary.coveredThroughMessageId
     });
     await this.memoryRepository.save(current);
+    this.sourceRevisionCache.remember(
+      current.ownerChatId,
+      summarySourceSignature(entries),
+      context.chat,
+      latest?.sourceEndMessageId ?? -1
+    );
     return current;
   }
   processNextThrough(targetEndMessageId, onProgress) {
@@ -7279,6 +7481,46 @@ function buildStorySkeletonPrompt(existingSkeleton, archivedEntries, maxTokens, 
 }
 
 // src/summary/skeleton-service.ts
+var StorySkeletonRevisionCache = class {
+  snapshot = null;
+  matches(state, maxTokens) {
+    const snapshot = this.snapshot;
+    const skeleton = state.storySkeleton;
+    if (!snapshot || snapshot.ownerChatId !== state.ownerChatId || snapshot.coverage !== skeleton.coveredThroughMessageId || snapshot.sourceHash !== skeleton.sourceHash || snapshot.skeletonText !== skeleton.text || snapshot.stale !== Boolean(skeleton.stale) || snapshot.maxTokens !== maxTokens) {
+      return false;
+    }
+    let sourceIndex = 0;
+    for (const entry of state.stageSummary.entries) {
+      if (entry.sourceEndMessageId > snapshot.coverage) {
+        continue;
+      }
+      const source = snapshot.entries[sourceIndex];
+      if (!source || source.sourceStartMessageId !== entry.sourceStartMessageId || source.sourceEndMessageId !== entry.sourceEndMessageId || source.sourceHash !== entry.sourceHash || source.text !== (entry.deleted ? "" : entry.text) || source.deleted !== Boolean(entry.deleted)) {
+        return false;
+      }
+      sourceIndex += 1;
+    }
+    return sourceIndex === snapshot.entries.length;
+  }
+  remember(state, maxTokens) {
+    const skeleton = state.storySkeleton;
+    this.snapshot = {
+      ownerChatId: state.ownerChatId,
+      coverage: skeleton.coveredThroughMessageId,
+      sourceHash: skeleton.sourceHash,
+      skeletonText: skeleton.text,
+      stale: Boolean(skeleton.stale),
+      maxTokens,
+      entries: state.stageSummary.entries.filter((entry) => entry.sourceEndMessageId <= skeleton.coveredThroughMessageId).map((entry) => ({
+        sourceStartMessageId: entry.sourceStartMessageId,
+        sourceEndMessageId: entry.sourceEndMessageId,
+        sourceHash: entry.sourceHash,
+        text: entry.deleted ? "" : entry.text,
+        deleted: Boolean(entry.deleted)
+      }))
+    };
+  }
+};
 function assertChatOwner3(state) {
   if (getCurrentChatId() !== state.ownerChatId) {
     throw new Error("\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u5904\u7406\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u5199\u5165\u3002");
@@ -7288,6 +7530,7 @@ var StorySkeletonService = class {
   queue = Promise.resolve();
   settingsRepository = new SettingsRepository();
   memoryRepository = new MemoryRepository();
+  revisionCache = new StorySkeletonRevisionCache();
   async reconcile(state) {
     const current = state ?? await this.memoryRepository.getOrCreate();
     if (!current || !current.storySkeleton.text.trim()) {
@@ -7295,6 +7538,9 @@ var StorySkeletonService = class {
     }
     assertChatOwner3(current);
     const settings = this.settingsRepository.get();
+    if (this.revisionCache.matches(current, settings.summary.skeletonMaxTokens)) {
+      return current;
+    }
     const coverage = current.storySkeleton.coveredThroughMessageId;
     const latestStored = current.stageSummary.entries.filter((entry) => entry.sourceEndMessageId <= coverage).at(-1);
     const actualHash = coverage >= 0 && latestStored?.sourceEndMessageId === coverage ? await storySkeletonSourceHash(current.stageSummary.entries, coverage) : "";
@@ -7306,6 +7552,7 @@ var StorySkeletonService = class {
     }
     const stale = !withinConfiguredLimit || !actualHash || actualHash !== current.storySkeleton.sourceHash;
     if (Boolean(current.storySkeleton.stale) === stale) {
+      this.revisionCache.remember(current, settings.summary.skeletonMaxTokens);
       return current;
     }
     current.storySkeleton = {
@@ -7328,6 +7575,7 @@ var StorySkeletonService = class {
       }
     );
     await this.memoryRepository.save(current);
+    this.revisionCache.remember(current, settings.summary.skeletonMaxTokens);
     return current;
   }
   processNextIfNeeded(onProgress) {
@@ -7460,6 +7708,7 @@ var StorySkeletonService = class {
           skeletonMaxTokens: settings.summary.skeletonMaxTokens
         });
         await this.memoryRepository.save(state);
+        this.revisionCache.remember(state, settings.summary.skeletonMaxTokens);
         updatedChunks += 1;
         const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
         options.onProgress?.({
@@ -9955,6 +10204,26 @@ var PromptItemizationService = class {
 };
 var promptItemizationService = new PromptItemizationService();
 
+// src/ui/visibility.ts
+function isElementRendered(element5) {
+  if (!element5.isConnected) {
+    return false;
+  }
+  const view = element5.ownerDocument.defaultView;
+  for (let current = element5; current; current = current.parentElement) {
+    if (current.hidden || current.getAttribute("aria-hidden") === "true") {
+      return false;
+    }
+    if (view?.getComputedStyle) {
+      const style = view.getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden" || style.contentVisibility === "hidden") {
+        return false;
+      }
+    }
+  }
+  return Array.from(element5.getClientRects()).some((rectangle) => rectangle.width > 0 && rectangle.height > 0);
+}
+
 // src/ui/prompt-stats-card.ts
 var CATEGORY_PRESENTATION = {
   system: { label: "\u7CFB\u7EDF\u63D0\u793A\u4E0E\u9884\u8BBE", className: "system" },
@@ -10078,7 +10347,14 @@ function connectionText(value) {
 }
 var PromptTokenStatsCard = class {
   renderSequence = 0;
+  canRender(panel) {
+    const card = panel.querySelector("#story-echo-prompt-stats-card");
+    return Boolean(card?.open && isElementRendered(card));
+  }
   async render(panel) {
+    if (!this.canRender(panel)) {
+      return;
+    }
     const sequence = ++this.renderSequence;
     const requestedChatId = getCurrentChatId() ?? "";
     let breakdown = null;
@@ -10622,6 +10898,92 @@ var memoryMetadataManager = new MemoryMetadataManager(
 var cachedVectorCollectionId = "";
 var cachedVectorCountText = "\u672A\u8BFB\u53D6";
 var cachedVectorRevision = "";
+var statusRefreshScheduled = false;
+var statusRefreshRunning = false;
+var statusRefreshAgain = false;
+var statusVectorRefreshRequested = false;
+var promptStatsRenderScheduled = false;
+var promptStatsRenderRunning = false;
+var promptStatsRenderAgain = false;
+function scheduleUiTask(operation) {
+  if (typeof globalThis.requestAnimationFrame === "function") {
+    globalThis.requestAnimationFrame(() => operation());
+    return;
+  }
+  globalThis.setTimeout(operation, 0);
+}
+function scheduleUiIdleTask(operation) {
+  if (typeof globalThis.requestIdleCallback === "function") {
+    globalThis.requestIdleCallback(() => operation(), { timeout: 1500 });
+    return;
+  }
+  globalThis.setTimeout(operation, 250);
+}
+function panelIsRendered(panel) {
+  const body = panel.querySelector(".story-echo-panel-body");
+  return Boolean(body && isElementRendered(body));
+}
+function requestStatusRefresh(panel, refreshVectorCount = false) {
+  statusVectorRefreshRequested ||= refreshVectorCount;
+  if (!panelIsRendered(panel)) {
+    return;
+  }
+  if (statusRefreshRunning) {
+    statusRefreshAgain = true;
+    return;
+  }
+  if (statusRefreshScheduled) {
+    return;
+  }
+  statusRefreshScheduled = true;
+  scheduleUiTask(() => {
+    statusRefreshScheduled = false;
+    if (!panelIsRendered(panel)) {
+      return;
+    }
+    const refreshVectors = statusVectorRefreshRequested;
+    statusVectorRefreshRequested = false;
+    statusRefreshRunning = true;
+    void refreshStatus(panel, refreshVectors).finally(() => {
+      statusRefreshRunning = false;
+      if (statusRefreshAgain) {
+        statusRefreshAgain = false;
+        requestStatusRefresh(panel);
+      }
+    });
+  });
+}
+function requestPromptStatsRender(panel) {
+  if (!promptTokenStatsCard.canRender(panel)) {
+    return;
+  }
+  if (promptStatsRenderRunning) {
+    promptStatsRenderAgain = true;
+    return;
+  }
+  if (promptStatsRenderScheduled) {
+    return;
+  }
+  promptStatsRenderScheduled = true;
+  scheduleUiIdleTask(() => {
+    promptStatsRenderScheduled = false;
+    if (!promptTokenStatsCard.canRender(panel)) {
+      return;
+    }
+    promptStatsRenderRunning = true;
+    void promptTokenStatsCard.render(panel).finally(() => {
+      promptStatsRenderRunning = false;
+      if (promptStatsRenderAgain) {
+        promptStatsRenderAgain = false;
+        requestPromptStatsRender(panel);
+      }
+    });
+  });
+}
+function requestVisiblePanelRefresh(panel, refreshVectorCount = false) {
+  requestStatusRefresh(panel, refreshVectorCount);
+  requestPromptStatsRender(panel);
+}
 function vectorRevision(state) {
   return [
     state.vectorCollectionId,
@@ -10780,7 +11142,7 @@ function panelTemplate() {
           </div>
         </details>
 
-        <details class="story-echo-section story-echo-collapsible">
+        <details id="story-echo-summary-settings" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-book-open" aria-hidden="true"></i>
@@ -11043,19 +11405,19 @@ function panelTemplate() {
 
         <div id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u2026\u2026</div>
         ${promptStatsCardTemplate()}
-        <details class="story-echo-diagnostics">
+        <details id="story-echo-summary-diagnostics" class="story-echo-diagnostics">
           <summary>\u5F53\u524D\u9AA8\u67B6\u4E0E\u9636\u6BB5\u603B\u7ED3</summary>
           <pre id="story-echo-summary">\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002</pre>
         </details>
-        <details class="story-echo-diagnostics" open>
+        <details id="story-echo-stats-diagnostics" class="story-echo-diagnostics" open>
           <summary>\u6D4B\u8BD5\u7EDF\u8BA1</summary>
           <pre id="story-echo-stats">\u5C1A\u65E0\u7EDF\u8BA1\u6570\u636E\u3002</pre>
         </details>
-        <details class="story-echo-diagnostics">
+        <details id="story-echo-inspection-diagnostics" class="story-echo-diagnostics">
           <summary>\u6700\u8FD1\u4E00\u6B21\u4E0A\u4E0B\u6587\u68C0\u67E5</summary>
           <pre id="story-echo-inspection">\u5C1A\u65E0\u751F\u6210\u8BB0\u5F55\u3002</pre>
         </details>
-        <details class="story-echo-diagnostics">
+        <details id="story-echo-traces-diagnostics" class="story-echo-diagnostics">
           <summary>\u6700\u8FD1\u8C03\u8BD5\u8F68\u8FF9</summary>
           <pre id="story-echo-traces">\u8C03\u8BD5\u6A21\u5F0F\u5173\u95ED\u6216\u5C1A\u65E0\u8F68\u8FF9\u3002</pre>
         </details>
@@ -11154,7 +11516,7 @@ function syncForm(panel, settings) {
 function bindSettings(panel) {
   const scheduleDerivedUpdate = () => {
     backgroundProcessingScheduler.schedule();
-    void refreshStatus(panel);
+    requestStatusRefresh(panel);
   };
   element4(panel, "#story-echo-enabled").addEventListener("change", (event) => {
     settingsRepository2.update((settings) => {
@@ -11346,7 +11708,7 @@ function bindSettings(panel) {
       current.vector.source = event.currentTarget.value;
     });
     syncVisibility(panel, settings);
-    void refreshStatus(panel, true);
+    requestStatusRefresh(panel, true);
   });
   element4(panel, "#story-echo-embedding-base-url").addEventListener("change", (event) => {
     const input = event.currentTarget;
@@ -11697,7 +12059,12 @@ async function refreshStatus(panel, refreshVectorCount = false) {
   const stats = element4(panel, "#story-echo-stats");
   const inspection = element4(panel, "#story-echo-inspection");
   const traces = element4(panel, "#story-echo-traces");
-  void promptTokenStatsCard.render(panel);
+  const summarySettingsOpen = element4(panel, "#story-echo-summary-settings").open;
+  const memoryManagerOpen = element4(panel, "#story-echo-memory-manager").open;
+  const summaryDiagnosticsOpen = element4(panel, "#story-echo-summary-diagnostics").open;
+  const statsOpen = element4(panel, "#story-echo-stats-diagnostics").open;
+  const inspectionOpen = element4(panel, "#story-echo-inspection-diagnostics").open;
+  const tracesOpen = element4(panel, "#story-echo-traces-diagnostics").open;
   try {
     const currentSettings = settingsRepository2.get();
     syncVisibility(panel, currentSettings);
@@ -11710,12 +12077,12 @@ async function refreshStatus(panel, refreshVectorCount = false) {
         getCurrentChatId() ? "\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316StoryEcho\u6570\u636E\u3002" : "\u5F53\u524D\u6CA1\u6709\u6253\u5F00\u804A\u5929\u3002",
         ...runtimeStatusText()
       ].join("\uFF5C");
-      stats.textContent = "\u5C1A\u65E0\u7EDF\u8BA1\u6570\u636E\u3002";
-      stageSummaryTarget.textContent = "\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002";
-      inspection.textContent = "\u5C1A\u65E0\u751F\u6210\u8BB0\u5F55\u3002";
-      traces.textContent = "\u8C03\u8BD5\u6A21\u5F0F\u5173\u95ED\u6216\u5C1A\u65E0\u8F68\u8FF9\u3002";
-      stageSummaryMetadataManager.render(panel, null);
-      memoryMetadataManager.render(panel, null);
+      if (statsOpen) stats.textContent = "\u5C1A\u65E0\u7EDF\u8BA1\u6570\u636E\u3002";
+      if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = "\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002";
+      if (inspectionOpen) inspection.textContent = "\u5C1A\u65E0\u751F\u6210\u8BB0\u5F55\u3002";
+      if (tracesOpen) traces.textContent = "\u8C03\u8BD5\u6A21\u5F0F\u5173\u95ED\u6216\u5C1A\u65E0\u8F68\u8FF9\u3002";
+      if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, null);
+      if (memoryManagerOpen) memoryMetadataManager.render(panel, null);
       return;
     }
     if (cachedVectorCollectionId !== state.vectorCollectionId) {
@@ -11746,6 +12113,7 @@ async function refreshStatus(panel, refreshVectorCount = false) {
       state.indexedThroughMessageId + 1,
       backgroundTarget + 1
     )) : 0;
+    const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
     target.textContent = [
       currentSettings.memory.enabled ? "\u6A21\u5F0F\uFF1A\u5168\u5C40\u9AA8\u67B6 + \u9636\u6BB5\u603B\u7ED3 + \u5267\u60C5\u8BB0\u5FC6" : "\u6A21\u5F0F\uFF1A\u4E0A\u4E0B\u6587\u7A97\u53E3 + \u5168\u5C40\u9AA8\u67B6 + \u9636\u6BB5\u603B\u7ED3",
       ...currentSettings.memory.enabled ? [
@@ -11760,48 +12128,49 @@ async function refreshStatus(panel, refreshVectorCount = false) {
         `\u5267\u60C5\u8BB0\u5FC6\uFF1A\u5DF2\u5173\u95ED\uFF08\u4FDD\u7559 ${state.memories.length} \u6761\uFF09`,
         `\u5411\u91CF\uFF1A${cachedVectorCountText}`
       ],
-      `\u9636\u6BB5\u603B\u7ED3\uFF1A${state.stageSummary.entries.filter((entry) => !entry.deleted).length}\u6761 / \u8986\u76D6\u5230\u6D88\u606F ${state.stageSummary.coveredThroughMessageId}`,
+      `\u9636\u6BB5\u603B\u7ED3\uFF1A${activeSummaries.length}\u6761 / \u8986\u76D6\u5230\u6D88\u606F ${state.stageSummary.coveredThroughMessageId}`,
       `\u5168\u5C40\u9AA8\u67B6\uFF1A${state.storySkeleton.text ? state.storySkeleton.stale ? "\u5F85\u91CD\u5EFA\uFF08\u5F53\u524D\u4E0D\u6CE8\u5165\uFF09" : `\u8986\u76D6\u5230\u6D88\u606F ${state.storySkeleton.coveredThroughMessageId}` : "\u5C1A\u672A\u751F\u6210"}`,
       ...runtimeStatusText()
     ].join("\uFF5C");
-    const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
-    const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
-    const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
-    const pendingArchived = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
-    const skeletonUsable = storySkeletonIsUsable(state);
-    const currentStateCorrection = currentSettings.memory.enabled ? renderCurrentStateCoordinationBlock(state.memories) : "";
-    stageSummaryTarget.textContent = skeletonUsable || activeSummaries.length > 0 ? [
-      skeletonUsable ? `\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\uFF08\u8986\u76D6\u5230\u6D88\u606F ${state.storySkeleton.coveredThroughMessageId}\uFF09\uFF1A
+    if (summaryDiagnosticsOpen) {
+      const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
+      const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
+      const pendingArchived = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
+      const skeletonUsable = storySkeletonIsUsable(state);
+      const currentStateCorrection = currentSettings.memory.enabled ? renderCurrentStateCoordinationBlock(state.memories) : "";
+      stageSummaryTarget.textContent = skeletonUsable || activeSummaries.length > 0 ? [
+        skeletonUsable ? `\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\uFF08\u8986\u76D6\u5230\u6D88\u606F ${state.storySkeleton.coveredThroughMessageId}\uFF09\uFF1A
 ${state.storySkeleton.text}` : state.storySkeleton.text ? "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u6765\u6E90\u5DF2\u5931\u6548\uFF0C\u91CD\u5EFA\u6210\u529F\u524D\u4E0D\u4F1A\u6CE8\u5165\u3002" : "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u5C1A\u672A\u751F\u6210\u3002",
-      ...pendingArchived.length > 0 ? [
-        `\u5F85\u6C47\u5165\u9AA8\u67B6\u4F46\u5F53\u524D\u4ECD\u4F1A\u76F4\u63A5\u643A\u5E26\u7684\u9636\u6BB5\u603B\u7ED3 ${pendingArchived.length} \u6761\uFF1A`,
-        ...pendingArchived.map((entry) => [
-          `\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
+        ...pendingArchived.length > 0 ? [
+          `\u5F85\u6C47\u5165\u9AA8\u67B6\u4F46\u5F53\u524D\u4ECD\u4F1A\u76F4\u63A5\u643A\u5E26\u7684\u9636\u6BB5\u603B\u7ED3 ${pendingArchived.length} \u6761\uFF1A`,
+          ...pendingArchived.map((entry) => [
+            `\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
+            entry.text
+          ].join("\n"))
+        ] : [],
+        `\u5DF2\u4FDD\u5B58 ${activeSummaries.length} \u6761\uFF1B\u4E00\u822C\u8BF7\u6C42\u53E6\u643A\u5E26\u6700\u8FD1 ${visibleSummaries.length} \u6761\u3002`,
+        ...visibleSummaries.map((entry, index) => [
+          `#${activeSummaries.length - visibleSummaries.length + index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
           entry.text
-        ].join("\n"))
-      ] : [],
-      `\u5DF2\u4FDD\u5B58 ${activeSummaries.length} \u6761\uFF1B\u4E00\u822C\u8BF7\u6C42\u53E6\u643A\u5E26\u6700\u8FD1 ${visibleSummaries.length} \u6761\u3002`,
-      ...visibleSummaries.map((entry, index) => [
-        `#${activeSummaries.length - visibleSummaries.length + index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
-        entry.text
-      ].join("\n")),
-      ...currentStateCorrection ? [`\u8BF7\u6C42\u8FD8\u4F1A\u5728\u603B\u7ED3\u540E\u9644\u52A0\u4EE5\u4E0B\u5F53\u524D\u72B6\u6001\u6821\u6B63\uFF1A
+        ].join("\n")),
+        ...currentStateCorrection ? [`\u8BF7\u6C42\u8FD8\u4F1A\u5728\u603B\u7ED3\u540E\u9644\u52A0\u4EE5\u4E0B\u5F53\u524D\u72B6\u6001\u6821\u6B63\uFF1A
 ${currentStateCorrection}`] : []
-    ].join("\n\n") : "\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002";
-    stats.textContent = statsText(state);
-    inspection.textContent = inspectionText(state);
-    traces.textContent = tracesText(state);
-    stageSummaryMetadataManager.render(panel, state);
-    memoryMetadataManager.render(panel, state);
+      ].join("\n\n") : "\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002";
+    }
+    if (statsOpen) stats.textContent = statsText(state);
+    if (inspectionOpen) inspection.textContent = inspectionText(state);
+    if (tracesOpen) traces.textContent = tracesText(state);
+    if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, state);
+    if (memoryManagerOpen) memoryMetadataManager.render(panel, state);
   } catch (error) {
     const message = error instanceof Error ? error.message : "\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u5931\u8D25\u3002";
     target.textContent = message;
-    stageSummaryTarget.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
-    stats.textContent = `\u8BFB\u53D6\u5931\u8D25\uFF1A${message}`;
-    inspection.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
-    traces.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
-    stageSummaryMetadataManager.render(panel, null);
-    memoryMetadataManager.render(panel, null);
+    if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
+    if (statsOpen) stats.textContent = `\u8BFB\u53D6\u5931\u8D25\uFF1A${message}`;
+    if (inspectionOpen) inspection.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
+    if (tracesOpen) traces.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
+    if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, null);
+    if (memoryManagerOpen) memoryMetadataManager.render(panel, null);
   }
 }
 async function findSettingsHost() {
@@ -11831,7 +12200,29 @@ async function registerSettingsPanel() {
   stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
   memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
-    void refreshStatus(panel);
+    requestStatusRefresh(panel);
+  });
+  panel.querySelector(".inline-drawer-toggle")?.addEventListener("click", () => {
+    globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
+  });
+  for (const selector of [
+    "#story-echo-summary-settings",
+    "#story-echo-memory-manager",
+    "#story-echo-summary-diagnostics",
+    "#story-echo-stats-diagnostics",
+    "#story-echo-inspection-diagnostics",
+    "#story-echo-traces-diagnostics"
+  ]) {
+    element4(panel, selector).addEventListener("toggle", (event) => {
+      if (event.currentTarget.open) {
+        requestStatusRefresh(panel);
+      }
+    });
+  }
+  element4(panel, "#story-echo-prompt-stats-card").addEventListener("toggle", (event) => {
+    if (event.currentTarget.open) {
+      requestPromptStatsRender(panel);
+    }
   });
   const context = getContext();
   const chatRefreshEvents = new Set([
@@ -11841,7 +12232,7 @@ async function registerSettingsPanel() {
   for (const eventName of chatRefreshEvents) {
     context.eventSource?.on(eventName, () => {
       promptTokenStatsCard.invalidate();
-      globalThis.setTimeout(() => void refreshStatus(panel, true), 0);
+      globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
     });
   }
   const promptRefreshEvents = new Set([
@@ -11857,10 +12248,10 @@ async function registerSettingsPanel() {
   ].filter((eventName) => Boolean(eventName)));
   for (const eventName of promptRefreshEvents) {
     context.eventSource?.on(eventName, () => {
-      globalThis.setTimeout(() => void promptTokenStatsCard.render(panel), 0);
+      requestPromptStatsRender(panel);
     });
   }
-  await refreshStatus(panel, true);
+  requestVisiblePanelRefresh(panel, true);
 }
 
 // src/index.ts

@@ -177,4 +177,50 @@ describe('summary world-info background', () => {
     expect(result.text).toBe('');
     expect(getSortedWorldInfoEntries).not.toHaveBeenCalled();
   });
+
+  it('stops scanning after one match beyond the configured world-info limit', async () => {
+    const substituteParams = vi.fn((value: string) => value);
+    const result = await buildSummaryWorldInfoReferenceContext([
+      { is_user: true, mes: '无我剑诀' },
+    ], {
+      ...settings,
+      maxWorldInfoEntries: 2,
+    }, context({
+      substituteParams,
+      getSortedWorldInfoEntries: vi.fn(async () => Array.from({ length: 100 }, (_, index) => ({
+        world: '大型世界书',
+        uid: index,
+        key: ['无我剑诀'],
+        content: `设定${index}`,
+      }))),
+    }));
+
+    const keyChecks = substituteParams.mock.calls.filter(([value]) => value === '无我剑诀');
+    expect(keyChecks).toHaveLength(3);
+    expect(result.worldInfoEntries).toHaveLength(2);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('fits a long world-info entry with a bounded number of tokenizer calls', async () => {
+    const getTokenCountAsync = vi.fn(async (text: string) => Array.from(text).length);
+    const result = await buildSummaryWorldInfoReferenceContext([
+      { is_user: true, mes: '无我剑诀' },
+    ], {
+      ...settings,
+      maxTokens: 1_000,
+      maxWorldInfoEntries: 1,
+    }, context({
+      getTokenCountAsync,
+      getSortedWorldInfoEntries: vi.fn(async () => [{
+        world: '大型世界书',
+        uid: 1,
+        key: ['无我剑诀'],
+        content: '详细世界设定'.repeat(5_000),
+      }]),
+    }));
+
+    expect(result.tokenCount).toBeLessThanOrEqual(1_000);
+    expect(result.truncated).toBe(true);
+    expect(getTokenCountAsync.mock.calls.length).toBeLessThanOrEqual(8);
+  });
 });

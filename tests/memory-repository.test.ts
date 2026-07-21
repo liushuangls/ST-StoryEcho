@@ -31,6 +31,43 @@ describe('MemoryRepository migration', () => {
     globalThis.SillyTavern = undefined;
   });
 
+  it('returns an already-current state without cloning all metadata', () => {
+    const state = chatState([memory()]);
+    const context: SillyTavernContext = {
+      chat: [],
+      chatId: 'chat-id',
+      extensionSettings: {},
+      chatMetadata: { story_echo: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+
+    expect(new MemoryRepository().getExisting()).toBe(state);
+  });
+
+  it('still migrates a state whose diagnostics object predates newer counters', async () => {
+    const state = chatState([memory()]);
+    delete (state.metrics as Partial<typeof state.metrics>).skeletonUpdates;
+    const saveMetadata = vi.fn(async () => undefined);
+    const context: SillyTavernContext = {
+      chat: [],
+      chatId: 'chat-id',
+      extensionSettings: {},
+      chatMetadata: { story_echo: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata,
+      generateRaw: vi.fn(async () => ''),
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+
+    const migrated = await new MemoryRepository().getOrCreate();
+
+    expect(migrated?.metrics.skeletonUpdates).toBe(0);
+    expect(saveMetadata).toHaveBeenCalledOnce();
+  });
+
   it('upgrades legacy chat state with diagnostics and consolidation fields', async () => {
     const legacyMemory = { ...memory() } as Record<string, unknown>;
     legacyMemory['status'] = 'resolved';

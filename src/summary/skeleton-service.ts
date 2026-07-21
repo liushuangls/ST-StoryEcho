@@ -38,6 +38,86 @@ interface StorySkeletonRunOptions {
   onProgress?: (progress: StorySkeletonProgress) => void;
 }
 
+interface SkeletonSourceSnapshot {
+  sourceStartMessageId: number;
+  sourceEndMessageId: number;
+  sourceHash: string;
+  text: string;
+  deleted: boolean;
+}
+
+interface SkeletonRevisionSnapshot {
+  ownerChatId: string;
+  coverage: number;
+  sourceHash: string;
+  skeletonText: string;
+  stale: boolean;
+  maxTokens: number;
+  entries: SkeletonSourceSnapshot[];
+}
+
+/** Avoid serializing and hashing the same archived summaries before every reply. */
+class StorySkeletonRevisionCache {
+  private snapshot: SkeletonRevisionSnapshot | null = null;
+
+  matches(state: StoryEchoChatState, maxTokens: number): boolean {
+    const snapshot = this.snapshot;
+    const skeleton = state.storySkeleton;
+    if (
+      !snapshot ||
+      snapshot.ownerChatId !== state.ownerChatId ||
+      snapshot.coverage !== skeleton.coveredThroughMessageId ||
+      snapshot.sourceHash !== skeleton.sourceHash ||
+      snapshot.skeletonText !== skeleton.text ||
+      snapshot.stale !== Boolean(skeleton.stale) ||
+      snapshot.maxTokens !== maxTokens
+    ) {
+      return false;
+    }
+
+    let sourceIndex = 0;
+    for (const entry of state.stageSummary.entries) {
+      if (entry.sourceEndMessageId > snapshot.coverage) {
+        continue;
+      }
+      const source = snapshot.entries[sourceIndex];
+      if (
+        !source ||
+        source.sourceStartMessageId !== entry.sourceStartMessageId ||
+        source.sourceEndMessageId !== entry.sourceEndMessageId ||
+        source.sourceHash !== entry.sourceHash ||
+        source.text !== (entry.deleted ? '' : entry.text) ||
+        source.deleted !== Boolean(entry.deleted)
+      ) {
+        return false;
+      }
+      sourceIndex += 1;
+    }
+    return sourceIndex === snapshot.entries.length;
+  }
+
+  remember(state: StoryEchoChatState, maxTokens: number): void {
+    const skeleton = state.storySkeleton;
+    this.snapshot = {
+      ownerChatId: state.ownerChatId,
+      coverage: skeleton.coveredThroughMessageId,
+      sourceHash: skeleton.sourceHash,
+      skeletonText: skeleton.text,
+      stale: Boolean(skeleton.stale),
+      maxTokens,
+      entries: state.stageSummary.entries
+        .filter((entry) => entry.sourceEndMessageId <= skeleton.coveredThroughMessageId)
+        .map((entry) => ({
+          sourceStartMessageId: entry.sourceStartMessageId,
+          sourceEndMessageId: entry.sourceEndMessageId,
+          sourceHash: entry.sourceHash,
+          text: entry.deleted ? '' : entry.text,
+          deleted: Boolean(entry.deleted),
+        })),
+    };
+  }
+}
+
 function assertChatOwner(state: StoryEchoChatState): void {
   if (getCurrentChatId() !== state.ownerChatId) {
     throw new Error('全局剧情骨架处理期间聊天发生切换，已取消写入。');
@@ -48,6 +128,7 @@ export class StorySkeletonService {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly settingsRepository = new SettingsRepository();
   private readonly memoryRepository = new MemoryRepository();
+  private readonly revisionCache = new StorySkeletonRevisionCache();
 
   async reconcile(
     state?: StoryEchoChatState,
@@ -58,6 +139,9 @@ export class StorySkeletonService {
     }
     assertChatOwner(current);
     const settings = this.settingsRepository.get();
+    if (this.revisionCache.matches(current, settings.summary.skeletonMaxTokens)) {
+      return current;
+    }
     const coverage = current.storySkeleton.coveredThroughMessageId;
     const latestStored = current.stageSummary.entries
       .filter((entry) => entry.sourceEndMessageId <= coverage)
@@ -73,6 +157,7 @@ export class StorySkeletonService {
     }
     const stale = !withinConfiguredLimit || !actualHash || actualHash !== current.storySkeleton.sourceHash;
     if (Boolean(current.storySkeleton.stale) === stale) {
+      this.revisionCache.remember(current, settings.summary.skeletonMaxTokens);
       return current;
     }
     current.storySkeleton = {
@@ -97,6 +182,7 @@ export class StorySkeletonService {
       },
     );
     await this.memoryRepository.save(current);
+    this.revisionCache.remember(current, settings.summary.skeletonMaxTokens);
     return current;
   }
 
@@ -246,6 +332,7 @@ export class StorySkeletonService {
           skeletonMaxTokens: settings.summary.skeletonMaxTokens,
         });
         await this.memoryRepository.save(state);
+        this.revisionCache.remember(state, settings.summary.skeletonMaxTokens);
         updatedChunks += 1;
         const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
         options.onProgress?.({

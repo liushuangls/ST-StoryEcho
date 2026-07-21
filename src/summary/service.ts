@@ -1,9 +1,10 @@
 import { sha256 } from '../core/hash';
 import { logger } from '../core/logger';
-import type { StoryEchoChatState, TavernChatMessage } from '../core/types';
+import type { StageSummaryEntry, StoryEchoChatState, TavernChatMessage } from '../core/types';
 import { storyContent } from '../content/story-content';
 import { recordDebugTrace } from '../debug/metrics';
 import { countCompletedTurns, planNextChunk } from '../extraction/chunk-planner';
+import { SourceRevisionCache } from '../history/source-revision-cache';
 import { completeWithConfiguredProvider } from '../llm/complete';
 import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
@@ -97,10 +98,17 @@ function assertChatOwner(state: StoryEchoChatState): void {
   }
 }
 
+function summarySourceSignature(entries: readonly StageSummaryEntry[]): string {
+  return entries
+    .map((entry) => `${entry.sourceStartMessageId}:${entry.sourceEndMessageId}:${entry.sourceHash}`)
+    .join('|');
+}
+
 export class StageSummaryService {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly settingsRepository = new SettingsRepository();
   private readonly memoryRepository = new MemoryRepository();
+  private readonly sourceRevisionCache = new SourceRevisionCache();
 
   /**
    * Validate summary entries independently from the structured-memory index.
@@ -119,6 +127,15 @@ export class StageSummaryService {
     }
 
     const context = getContext();
+    const initialCoverage = current.stageSummary.entries.at(-1)?.sourceEndMessageId ?? -1;
+    if (this.sourceRevisionCache.matches(
+      current.ownerChatId,
+      summarySourceSignature(current.stageSummary.entries),
+      context.chat,
+      initialCoverage,
+    )) {
+      return current;
+    }
     let validEntries = 0;
     let initializedHashes = 0;
     for (const entry of current.stageSummary.entries) {
@@ -149,6 +166,12 @@ export class StageSummaryService {
         current.stageSummary.coveredThroughHash = latest.sourceHash;
         await this.memoryRepository.save(current);
       }
+      this.sourceRevisionCache.remember(
+        current.ownerChatId,
+        summarySourceSignature(current.stageSummary.entries),
+        context.chat,
+        current.stageSummary.entries.at(-1)?.sourceEndMessageId ?? -1,
+      );
       return current;
     }
 
@@ -167,6 +190,12 @@ export class StageSummaryService {
       coveredThroughMessageId: current.stageSummary.coveredThroughMessageId,
     });
     await this.memoryRepository.save(current);
+    this.sourceRevisionCache.remember(
+      current.ownerChatId,
+      summarySourceSignature(entries),
+      context.chat,
+      latest?.sourceEndMessageId ?? -1,
+    );
     return current;
   }
 

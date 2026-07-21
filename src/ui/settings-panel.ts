@@ -50,6 +50,7 @@ import {
   StageSummaryMetadataManager,
   stageSummaryManagerTemplate,
 } from './summary-manager';
+import { isElementRendered } from './visibility';
 
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
@@ -83,6 +84,100 @@ const memoryMetadataManager = new MemoryMetadataManager(
 let cachedVectorCollectionId = '';
 let cachedVectorCountText = '未读取';
 let cachedVectorRevision = '';
+let statusRefreshScheduled = false;
+let statusRefreshRunning = false;
+let statusRefreshAgain = false;
+let statusVectorRefreshRequested = false;
+let promptStatsRenderScheduled = false;
+let promptStatsRenderRunning = false;
+let promptStatsRenderAgain = false;
+
+function scheduleUiTask(operation: () => void): void {
+  if (typeof globalThis.requestAnimationFrame === 'function') {
+    globalThis.requestAnimationFrame(() => operation());
+    return;
+  }
+  globalThis.setTimeout(operation, 0);
+}
+
+function scheduleUiIdleTask(operation: () => void): void {
+  if (typeof globalThis.requestIdleCallback === 'function') {
+    globalThis.requestIdleCallback(() => operation(), { timeout: 1_500 });
+    return;
+  }
+  // Safari/iOS has no requestIdleCallback. Let the newly rendered chat frame
+  // paint before tokenizing a potentially very large final prompt.
+  globalThis.setTimeout(operation, 250);
+}
+
+function panelIsRendered(panel: HTMLElement): boolean {
+  const body = panel.querySelector<HTMLElement>('.story-echo-panel-body');
+  return Boolean(body && isElementRendered(body));
+}
+
+function requestStatusRefresh(panel: HTMLElement, refreshVectorCount = false): void {
+  statusVectorRefreshRequested ||= refreshVectorCount;
+  if (!panelIsRendered(panel)) {
+    return;
+  }
+  if (statusRefreshRunning) {
+    statusRefreshAgain = true;
+    return;
+  }
+  if (statusRefreshScheduled) {
+    return;
+  }
+  statusRefreshScheduled = true;
+  scheduleUiTask(() => {
+    statusRefreshScheduled = false;
+    if (!panelIsRendered(panel)) {
+      return;
+    }
+    const refreshVectors = statusVectorRefreshRequested;
+    statusVectorRefreshRequested = false;
+    statusRefreshRunning = true;
+    void refreshStatus(panel, refreshVectors).finally(() => {
+      statusRefreshRunning = false;
+      if (statusRefreshAgain) {
+        statusRefreshAgain = false;
+        requestStatusRefresh(panel);
+      }
+    });
+  });
+}
+
+function requestPromptStatsRender(panel: HTMLElement): void {
+  if (!promptTokenStatsCard.canRender(panel)) {
+    return;
+  }
+  if (promptStatsRenderRunning) {
+    promptStatsRenderAgain = true;
+    return;
+  }
+  if (promptStatsRenderScheduled) {
+    return;
+  }
+  promptStatsRenderScheduled = true;
+  scheduleUiIdleTask(() => {
+    promptStatsRenderScheduled = false;
+    if (!promptTokenStatsCard.canRender(panel)) {
+      return;
+    }
+    promptStatsRenderRunning = true;
+    void promptTokenStatsCard.render(panel).finally(() => {
+      promptStatsRenderRunning = false;
+      if (promptStatsRenderAgain) {
+        promptStatsRenderAgain = false;
+        requestPromptStatsRender(panel);
+      }
+    });
+  });
+}
+
+function requestVisiblePanelRefresh(panel: HTMLElement, refreshVectorCount = false): void {
+  requestStatusRefresh(panel, refreshVectorCount);
+  requestPromptStatsRender(panel);
+}
 
 function vectorRevision(state: NonNullable<ReturnType<MemoryRepository['getExisting']>>): string {
   return [
@@ -243,7 +338,7 @@ function panelTemplate(): HTMLElement {
           </div>
         </details>
 
-        <details class="story-echo-section story-echo-collapsible">
+        <details id="story-echo-summary-settings" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-book-open" aria-hidden="true"></i>
@@ -506,19 +601,19 @@ function panelTemplate(): HTMLElement {
 
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
         ${promptStatsCardTemplate()}
-        <details class="story-echo-diagnostics">
+        <details id="story-echo-summary-diagnostics" class="story-echo-diagnostics">
           <summary>当前骨架与阶段总结</summary>
           <pre id="story-echo-summary">尚无全局骨架或阶段总结。</pre>
         </details>
-        <details class="story-echo-diagnostics" open>
+        <details id="story-echo-stats-diagnostics" class="story-echo-diagnostics" open>
           <summary>测试统计</summary>
           <pre id="story-echo-stats">尚无统计数据。</pre>
         </details>
-        <details class="story-echo-diagnostics">
+        <details id="story-echo-inspection-diagnostics" class="story-echo-diagnostics">
           <summary>最近一次上下文检查</summary>
           <pre id="story-echo-inspection">尚无生成记录。</pre>
         </details>
-        <details class="story-echo-diagnostics">
+        <details id="story-echo-traces-diagnostics" class="story-echo-diagnostics">
           <summary>最近调试轨迹</summary>
           <pre id="story-echo-traces">调试模式关闭或尚无轨迹。</pre>
         </details>
@@ -646,7 +741,7 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
 function bindSettings(panel: HTMLElement): void {
   const scheduleDerivedUpdate = (): void => {
     backgroundProcessingScheduler.schedule();
-    void refreshStatus(panel);
+    requestStatusRefresh(panel);
   };
   element<HTMLInputElement>(panel, '#story-echo-enabled').addEventListener('change', (event) => {
     settingsRepository.update((settings) => {
@@ -864,7 +959,7 @@ function bindSettings(panel: HTMLElement): void {
       current.vector.source = (event.currentTarget as HTMLSelectElement).value as VectorSourceMode;
     });
     syncVisibility(panel, settings);
-    void refreshStatus(panel, true);
+    requestStatusRefresh(panel, true);
   });
 
   element<HTMLInputElement>(panel, '#story-echo-embedding-base-url').addEventListener('change', (event) => {
@@ -1254,7 +1349,12 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
   const stats = element<HTMLElement>(panel, '#story-echo-stats');
   const inspection = element<HTMLElement>(panel, '#story-echo-inspection');
   const traces = element<HTMLElement>(panel, '#story-echo-traces');
-  void promptTokenStatsCard.render(panel);
+  const summarySettingsOpen = element<HTMLDetailsElement>(panel, '#story-echo-summary-settings').open;
+  const memoryManagerOpen = element<HTMLDetailsElement>(panel, '#story-echo-memory-manager').open;
+  const summaryDiagnosticsOpen = element<HTMLDetailsElement>(panel, '#story-echo-summary-diagnostics').open;
+  const statsOpen = element<HTMLDetailsElement>(panel, '#story-echo-stats-diagnostics').open;
+  const inspectionOpen = element<HTMLDetailsElement>(panel, '#story-echo-inspection-diagnostics').open;
+  const tracesOpen = element<HTMLDetailsElement>(panel, '#story-echo-traces-diagnostics').open;
   try {
     const currentSettings = settingsRepository.get();
     syncVisibility(panel, currentSettings);
@@ -1269,12 +1369,12 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
           : '当前没有打开聊天。',
         ...runtimeStatusText(),
       ].join('｜');
-      stats.textContent = '尚无统计数据。';
-      stageSummaryTarget.textContent = '尚无全局骨架或阶段总结。';
-      inspection.textContent = '尚无生成记录。';
-      traces.textContent = '调试模式关闭或尚无轨迹。';
-      stageSummaryMetadataManager.render(panel, null);
-      memoryMetadataManager.render(panel, null);
+      if (statsOpen) stats.textContent = '尚无统计数据。';
+      if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = '尚无全局骨架或阶段总结。';
+      if (inspectionOpen) inspection.textContent = '尚无生成记录。';
+      if (tracesOpen) traces.textContent = '调试模式关闭或尚无轨迹。';
+      if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, null);
+      if (memoryManagerOpen) memoryMetadataManager.render(panel, null);
       return;
     }
 
@@ -1311,6 +1411,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
           backgroundTarget + 1,
         ))
       : 0;
+    const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
     target.textContent = [
       currentSettings.memory.enabled ? '模式：全局骨架 + 阶段总结 + 剧情记忆' : '模式：上下文窗口 + 全局骨架 + 阶段总结',
       ...(currentSettings.memory.enabled
@@ -1327,7 +1428,7 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
             `剧情记忆：已关闭（保留 ${state.memories.length} 条）`,
             `向量：${cachedVectorCountText}`,
           ]),
-      `阶段总结：${state.stageSummary.entries.filter((entry) => !entry.deleted).length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
+      `阶段总结：${activeSummaries.length}条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
       `全局骨架：${state.storySkeleton.text
         ? state.storySkeleton.stale
           ? '待重建（当前不注入）'
@@ -1335,52 +1436,53 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
         : '尚未生成'}`,
       ...runtimeStatusText(),
     ].join('｜');
-    const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
-    const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
-    const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
-    const pendingArchived = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
-    const skeletonUsable = storySkeletonIsUsable(state);
-    const currentStateCorrection = currentSettings.memory.enabled
-      ? renderCurrentStateCoordinationBlock(state.memories)
-      : '';
-    stageSummaryTarget.textContent = skeletonUsable || activeSummaries.length > 0
-      ? [
-          skeletonUsable
-            ? `全局剧情骨架（覆盖到消息 ${state.storySkeleton.coveredThroughMessageId}）：\n${state.storySkeleton.text}`
-            : state.storySkeleton.text
-              ? '全局剧情骨架来源已失效，重建成功前不会注入。'
-              : '全局剧情骨架尚未生成。',
-          ...(pendingArchived.length > 0 ? [
-            `待汇入骨架但当前仍会直接携带的阶段总结 ${pendingArchived.length} 条：`,
-            ...pendingArchived.map((entry) => [
-              `消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
+    if (summaryDiagnosticsOpen) {
+      const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
+      const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
+      const pendingArchived = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
+      const skeletonUsable = storySkeletonIsUsable(state);
+      const currentStateCorrection = currentSettings.memory.enabled
+        ? renderCurrentStateCoordinationBlock(state.memories)
+        : '';
+      stageSummaryTarget.textContent = skeletonUsable || activeSummaries.length > 0
+        ? [
+            skeletonUsable
+              ? `全局剧情骨架（覆盖到消息 ${state.storySkeleton.coveredThroughMessageId}）：\n${state.storySkeleton.text}`
+              : state.storySkeleton.text
+                ? '全局剧情骨架来源已失效，重建成功前不会注入。'
+                : '全局剧情骨架尚未生成。',
+            ...(pendingArchived.length > 0 ? [
+              `待汇入骨架但当前仍会直接携带的阶段总结 ${pendingArchived.length} 条：`,
+              ...pendingArchived.map((entry) => [
+                `消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
+                entry.text,
+              ].join('\n')),
+            ] : []),
+            `已保存 ${activeSummaries.length} 条；一般请求另携带最近 ${visibleSummaries.length} 条。`,
+            ...visibleSummaries.map((entry, index) => [
+              `#${activeSummaries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
               entry.text,
             ].join('\n')),
-          ] : []),
-          `已保存 ${activeSummaries.length} 条；一般请求另携带最近 ${visibleSummaries.length} 条。`,
-          ...visibleSummaries.map((entry, index) => [
-            `#${activeSummaries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
-            entry.text,
-          ].join('\n')),
-          ...(currentStateCorrection
-            ? [`请求还会在总结后附加以下当前状态校正：\n${currentStateCorrection}`]
-            : []),
-        ].join('\n\n')
-      : '尚无全局骨架或阶段总结。';
-    stats.textContent = statsText(state);
-    inspection.textContent = inspectionText(state);
-    traces.textContent = tracesText(state);
-    stageSummaryMetadataManager.render(panel, state);
-    memoryMetadataManager.render(panel, state);
+            ...(currentStateCorrection
+              ? [`请求还会在总结后附加以下当前状态校正：\n${currentStateCorrection}`]
+              : []),
+          ].join('\n\n')
+        : '尚无全局骨架或阶段总结。';
+    }
+    if (statsOpen) stats.textContent = statsText(state);
+    if (inspectionOpen) inspection.textContent = inspectionText(state);
+    if (tracesOpen) traces.textContent = tracesText(state);
+    if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, state);
+    if (memoryManagerOpen) memoryMetadataManager.render(panel, state);
   } catch (error) {
     const message = error instanceof Error ? error.message : '读取当前聊天状态失败。';
     target.textContent = message;
-    stageSummaryTarget.textContent = '读取失败。';
-    stats.textContent = `读取失败：${message}`;
-    inspection.textContent = '读取失败。';
-    traces.textContent = '读取失败。';
-    stageSummaryMetadataManager.render(panel, null);
-    memoryMetadataManager.render(panel, null);
+    if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = '读取失败。';
+    if (statsOpen) stats.textContent = `读取失败：${message}`;
+    if (inspectionOpen) inspection.textContent = '读取失败。';
+    if (tracesOpen) traces.textContent = '读取失败。';
+    if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, null);
+    if (memoryManagerOpen) memoryMetadataManager.render(panel, null);
   }
 }
 
@@ -1413,7 +1515,31 @@ export async function registerSettingsPanel(): Promise<void> {
   stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
   memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
   globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
-    void refreshStatus(panel);
+    requestStatusRefresh(panel);
+  });
+  panel.querySelector<HTMLElement>('.inline-drawer-toggle')?.addEventListener('click', () => {
+    // SillyTavern toggles the drawer after the click handlers have run. Defer
+    // the visibility check until the updated display state is observable.
+    globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
+  });
+  for (const selector of [
+    '#story-echo-summary-settings',
+    '#story-echo-memory-manager',
+    '#story-echo-summary-diagnostics',
+    '#story-echo-stats-diagnostics',
+    '#story-echo-inspection-diagnostics',
+    '#story-echo-traces-diagnostics',
+  ]) {
+    element<HTMLDetailsElement>(panel, selector).addEventListener('toggle', (event) => {
+      if ((event.currentTarget as HTMLDetailsElement).open) {
+        requestStatusRefresh(panel);
+      }
+    });
+  }
+  element<HTMLDetailsElement>(panel, '#story-echo-prompt-stats-card').addEventListener('toggle', (event) => {
+    if ((event.currentTarget as HTMLDetailsElement).open) {
+      requestPromptStatsRender(panel);
+    }
   });
   const context = getContext();
   const chatRefreshEvents = new Set([
@@ -1423,7 +1549,7 @@ export async function registerSettingsPanel(): Promise<void> {
   for (const eventName of chatRefreshEvents) {
     context.eventSource?.on(eventName, () => {
       promptTokenStatsCard.invalidate();
-      globalThis.setTimeout(() => void refreshStatus(panel, true), 0);
+      globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
     });
   }
   const promptRefreshEvents = new Set([
@@ -1439,8 +1565,8 @@ export async function registerSettingsPanel(): Promise<void> {
   ].filter((eventName): eventName is string => Boolean(eventName)));
   for (const eventName of promptRefreshEvents) {
     context.eventSource?.on(eventName, () => {
-      globalThis.setTimeout(() => void promptTokenStatsCard.render(panel), 0);
+      requestPromptStatsRender(panel);
     });
   }
-  await refreshStatus(panel, true);
+  requestVisiblePanelRefresh(panel, true);
 }

@@ -113,6 +113,13 @@ describe('settings panel editable-control contract', () => {
       expect(source).toContain(`context.event_types?.['${eventName}']`);
     }
     expect(source).toContain('promptTokenStatsCard.render(panel)');
+    expect(source).toContain('promptTokenStatsCard.canRender(panel)');
+    const refreshStatusSource = source.slice(
+      source.indexOf('async function refreshStatus('),
+      source.indexOf('async function findSettingsHost('),
+    );
+    expect(refreshStatusSource).not.toContain('promptTokenStatsCard.render(panel)');
+    expect(source).toContain('requestStatusRefresh(panel)');
   });
 
   it('uses each field default while a numeric input is temporarily empty', () => {

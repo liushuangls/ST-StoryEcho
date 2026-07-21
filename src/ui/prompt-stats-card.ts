@@ -5,6 +5,7 @@ import type {
 } from '../prompt/itemization';
 import { promptItemizationService } from '../prompt/itemization';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import { isElementRendered } from './visibility';
 
 const CATEGORY_PRESENTATION: Record<PromptTokenCategoryId, { label: string; className: string }> = {
   system: { label: '系统提示与预设', className: 'system' },
@@ -139,7 +140,15 @@ function connectionText(value: LatestPromptTokenBreakdown): string {
 export class PromptTokenStatsCard {
   private renderSequence = 0;
 
+  canRender(panel: HTMLElement): boolean {
+    const card = panel.querySelector<HTMLDetailsElement>('#story-echo-prompt-stats-card');
+    return Boolean(card?.open && isElementRendered(card));
+  }
+
   async render(panel: HTMLElement): Promise<void> {
+    if (!this.canRender(panel)) {
+      return;
+    }
     const sequence = ++this.renderSequence;
     const requestedChatId = getCurrentChatId() ?? '';
     let breakdown: LatestPromptTokenBreakdown | null = null;

@@ -33,6 +33,12 @@ interface MatchedWorldInfoEntry {
   matchedKeys: string[];
 }
 
+interface PreparedHistoryText {
+  raw: string;
+  caseSensitive: string;
+  caseInsensitive: string;
+}
+
 type ReferenceContextPurpose = 'extraction' | 'summary';
 
 interface ReferenceContextBuildOptions {
@@ -77,6 +83,15 @@ function normalized(value: string, caseSensitive: boolean): string {
   return caseSensitive ? normalizedValue : normalizedValue.toLocaleLowerCase();
 }
 
+function prepareHistoryText(value: string): PreparedHistoryText {
+  const caseSensitive = value.normalize('NFKC');
+  return {
+    raw: value,
+    caseSensitive,
+    caseInsensitive: caseSensitive.toLocaleLowerCase(),
+  };
+}
+
 function regexFromWorldInfoKey(value: string): RegExp | null {
   if (!value.startsWith('/')) {
     return null;
@@ -93,7 +108,7 @@ function regexFromWorldInfoKey(value: string): RegExp | null {
 }
 
 function matchesKey(
-  historyText: string,
+  historyText: PreparedHistoryText,
   rawKey: string,
   entry: SillyTavernWorldInfoEntry,
   context: SillyTavernContext,
@@ -105,11 +120,11 @@ function matchesKey(
   const keyRegex = regexFromWorldInfoKey(substituted);
   if (keyRegex) {
     keyRegex.lastIndex = 0;
-    return keyRegex.test(historyText);
+    return keyRegex.test(historyText.raw);
   }
 
   const caseSensitive = entry.caseSensitive === true;
-  const haystack = normalized(historyText, caseSensitive);
+  const haystack = caseSensitive ? historyText.caseSensitive : historyText.caseInsensitive;
   const needle = normalized(substituted, caseSensitive);
   if (!entry.matchWholeWords || /[\u3400-\u9fff\uf900-\ufaff]/u.test(needle)) {
     return haystack.includes(needle);
@@ -161,7 +176,7 @@ function passesCharacterFilter(
 
 function matchedWorldInfoKeys(
   entry: SillyTavernWorldInfoEntry,
-  historyText: string,
+  historyText: PreparedHistoryText,
   context: SillyTavernContext,
   batchNames: string[],
 ): string[] {
@@ -286,23 +301,31 @@ async function truncateToTokenBudget(
   if (!value || maxTokens <= 0) {
     return { text: '', truncated: Boolean(value) };
   }
-  if (await countTokens(value) <= maxTokens) {
+  const fullTokens = await countTokens(value);
+  if (fullTokens <= maxTokens) {
     return { text: value, truncated: false };
   }
   const points = Array.from(value);
-  let low = 0;
-  let high = points.length;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    const candidate = `${points.slice(0, middle).join('').trimEnd()}…`;
-    if (await countTokens(candidate) <= maxTokens) {
-      low = middle;
-    } else {
-      high = middle - 1;
+  let length = Math.max(1, Math.min(
+    points.length - 1,
+    Math.floor(points.length * maxTokens / Math.max(1, fullTokens) * 0.96),
+  ));
+  for (let attempt = 0; attempt < 4 && length > 0; attempt += 1) {
+    const candidate = `${points.slice(0, length).join('').trimEnd()}…`;
+    const candidateTokens = await countTokens(candidate);
+    if (candidateTokens <= maxTokens) {
+      // Reference context does not need a character-perfect boundary. Keeping
+      // a small safety margin saves the 10-17 tokenizer calls required by a
+      // full binary search on long world-book entries.
+      return { text: candidate, truncated: true };
     }
+    length = Math.max(0, Math.min(
+      length - 1,
+      Math.floor(length * maxTokens / Math.max(1, candidateTokens) * 0.94),
+    ));
   }
   return {
-    text: low > 0 ? `${points.slice(0, low).join('').trimEnd()}…` : '',
+    text: '',
     truncated: true,
   };
 }
@@ -356,21 +379,28 @@ async function buildReferenceContext(
   let availableEntryCount = 0;
   if (options.includeWorldInfo && settings.maxWorldInfoEntries > 0) {
     try {
-      const historyText = messages
+      const historyText = prepareHistoryText(messages
         .filter((message) => !message.is_system)
         .map((message) => [clean(message.name), storyContent(message)].filter(Boolean).join(': '))
         .reverse()
-        .join('\n');
+        .join('\n'));
       const entries = await sortedWorldInfoEntries(context);
-      const allMatches = entries.flatMap((entry) => {
+      const maximumMatches = Math.min(20, Math.max(0, Math.floor(settings.maxWorldInfoEntries)));
+      const allMatches: MatchedWorldInfoEntry[] = [];
+      for (const entry of entries) {
         const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
-        return matchedKeys.length > 0 ? [{ entry, matchedKeys }] : [];
-      });
+        if (matchedKeys.length > 0) {
+          allMatches.push({ entry, matchedKeys });
+          // Only one extra match is needed to report that the configured list
+          // was truncated; scanning the rest of a large world book adds no UI
+          // or prompt value.
+          if (allMatches.length > maximumMatches) {
+            break;
+          }
+        }
+      }
       availableEntryCount = allMatches.length;
-      matchedEntries = allMatches.slice(
-        0,
-        Math.min(20, Math.max(0, Math.floor(settings.maxWorldInfoEntries))),
-      );
+      matchedEntries = allMatches.slice(0, maximumMatches);
     } catch (error) {
       warnings.push(`世界书参考读取失败：${error instanceof Error ? error.message : String(error)}`);
     }

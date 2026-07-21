@@ -229,4 +229,32 @@ describe('global story skeleton lifecycle', () => {
     expect(reconciled?.storySkeleton.stale).toBe(true);
     expect(storySkeletonIsUsable(reconciled!)).toBe(false);
   });
+
+  it('does not hash an unchanged skeleton source again when newer summaries are appended', async () => {
+    const digest = vi.fn(async () => new Uint8Array(32).buffer);
+    vi.stubGlobal('crypto', { subtle: { digest } });
+    const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
+    const { state } = installContext(entries, vi.fn(async () => skeletonText()));
+    state.storySkeleton = {
+      text: skeletonText(),
+      coveredThroughMessageId: entries[0]!.sourceEndMessageId,
+      sourceHash: '00'.repeat(32),
+    };
+    const service = new StorySkeletonService();
+
+    await service.reconcile(state);
+    const callsAfterInitialVerification = digest.mock.calls.length;
+    const next = stageEntry(5);
+    state.stageSummary.entries.push(next);
+    state.stageSummary.coveredThroughMessageId = next.sourceEndMessageId;
+    state.stageSummary.coveredThroughHash = next.sourceHash;
+    await service.reconcile(state);
+
+    expect(digest).toHaveBeenCalledTimes(callsAfterInitialVerification);
+
+    entries[0]!.text = '用户编辑了已经汇入骨架的阶段总结。';
+    await service.reconcile(state);
+
+    expect(digest.mock.calls.length).toBeGreaterThan(callsAfterInitialVerification);
+  });
 });

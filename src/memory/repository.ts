@@ -6,6 +6,7 @@ import type {
   MemoryType,
   StageSummaryEntry,
   StoryEchoChatState,
+  StoryEchoMetrics,
   StoryMemory,
   TavernChatMessage,
   TruthStatus,
@@ -330,17 +331,46 @@ function isCurrentStageSummary(value: StoredStageSummary | undefined): boolean {
   if (
     !value ||
     !Array.isArray(value.entries) ||
-    !Number.isFinite(value.coveredThroughMessageId) ||
+    !Number.isInteger(value.coveredThroughMessageId) ||
     typeof value.coveredThroughHash !== 'string'
   ) {
     return false;
   }
-  const normalized = normalizeStageSummary(value);
-  return (
-    normalized.entries.length === value.entries.length &&
-    normalized.coveredThroughMessageId === value.coveredThroughMessageId &&
-    normalized.coveredThroughHash === value.coveredThroughHash
-  );
+  let expectedStartMessageId = 0;
+  let latest: StageSummaryEntry | undefined;
+  for (const candidate of value.entries) {
+    if (!isRecord(candidate)) {
+      return false;
+    }
+    const text = candidate['text'];
+    const deleted = candidate['deleted'];
+    const sourceStartMessageId = candidate['sourceStartMessageId'];
+    const sourceEndMessageId = candidate['sourceEndMessageId'];
+    if (
+      typeof text !== 'string' ||
+      text !== text.trim() ||
+      (deleted === true ? text !== '' : !text) ||
+      (deleted !== undefined && deleted !== true) ||
+      !Number.isInteger(sourceStartMessageId) ||
+      !Number.isInteger(sourceEndMessageId) ||
+      Number(sourceStartMessageId) !== expectedStartMessageId ||
+      Number(sourceEndMessageId) < Number(sourceStartMessageId) ||
+      typeof candidate['sourceHash'] !== 'string' ||
+      typeof candidate['updatedAt'] !== 'string' ||
+      (candidate['manuallyEdited'] !== undefined && candidate['manuallyEdited'] !== true)
+    ) {
+      return false;
+    }
+    latest = candidate as unknown as StageSummaryEntry;
+    expectedStartMessageId = Number(sourceEndMessageId) + 1;
+  }
+  return latest
+    ? value.coveredThroughMessageId === latest.sourceEndMessageId &&
+      value.coveredThroughHash === latest.sourceHash &&
+      value.updatedAt === latest.updatedAt
+    : value.coveredThroughMessageId === -1 &&
+      value.coveredThroughHash === '' &&
+      value.updatedAt === undefined;
 }
 
 function normalizeStorySkeleton(
@@ -367,13 +397,103 @@ function normalizeStorySkeleton(
 }
 
 function isCurrentStorySkeleton(value: StoredStorySkeleton | undefined): boolean {
-  if (!value) {
+  if (
+    !value ||
+    typeof value.text !== 'string' ||
+    value.text !== value.text.trim() ||
+    !Number.isInteger(value.coveredThroughMessageId) ||
+    typeof value.sourceHash !== 'string' ||
+    (value.updatedAt !== undefined && typeof value.updatedAt !== 'string') ||
+    (value.manuallyEdited !== undefined && value.manuallyEdited !== true) ||
+    (value.stale !== undefined && value.stale !== true)
+  ) {
     return false;
   }
-  const normalized = normalizeStorySkeleton(value);
-  return normalized.text === (typeof value.text === 'string' ? value.text.trim() : '') &&
-    normalized.coveredThroughMessageId === Number(value.coveredThroughMessageId) &&
-    normalized.sourceHash === (typeof value.sourceHash === 'string' ? value.sourceHash : '');
+  if (!value.text) {
+    return value.coveredThroughMessageId === -1 &&
+      value.sourceHash === '' &&
+      value.updatedAt === undefined &&
+      value.manuallyEdited === undefined &&
+      value.stale === undefined;
+  }
+  return Number(value.coveredThroughMessageId) >= 0 && (Boolean(value.sourceHash) || value.stale === true);
+}
+
+const METRIC_COUNT_FIELDS = [
+  'summaryUpdates',
+  'summaryFailures',
+  'summaryMessagesCovered',
+  'skeletonUpdates',
+  'skeletonFailures',
+  'extractionChunks',
+  'extractionFailures',
+  'candidatesExtracted',
+  'referenceContextBuilds',
+  'referenceContextPartialFailures',
+  'referenceContextTokens',
+  'referenceWorldInfoEntries',
+  'consolidationCalls',
+  'consolidationFailures',
+  'vectorQueries',
+  'vectorQueryFailures',
+  'vectorSyncFailures',
+  'vectorItemsInserted',
+  'vectorItemsDeleted',
+  'vectorRebuilds',
+  'queryRewriteRequests',
+  'queryRewriteFailures',
+  'queryRewriteCacheHits',
+  'generationAttempts',
+  'generationsTrimmed',
+  'generationsDeferred',
+  'messagesRemoved',
+  'memoriesInjected',
+  'estimatedRemovedTokens',
+  'estimatedInjectedTokens',
+  'totalSummaryMs',
+  'totalSkeletonMs',
+  'totalExtractionMs',
+  'totalConsolidationMs',
+  'totalRetrievalMs',
+  'totalQueryRewriteMs',
+] as const satisfies readonly (keyof StoryEchoMetrics)[];
+
+const METRIC_ACTIONS = [
+  'CREATE',
+  'MERGE',
+  'UPDATE',
+  'RESOLVE',
+  'SUPERSEDE',
+  'IGNORE',
+] as const;
+
+function isCurrentMetrics(value: unknown): value is StoryEchoMetrics {
+  if (!isRecord(value) || !isRecord(value['actions'])) {
+    return false;
+  }
+  for (const field of METRIC_COUNT_FIELDS) {
+    const count = value[field];
+    if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) {
+      return false;
+    }
+  }
+  for (const action of METRIC_ACTIONS) {
+    const count = value['actions'][action];
+    if (typeof count !== 'number' || !Number.isFinite(count) || count < 0) {
+      return false;
+    }
+  }
+  for (const field of [
+    'lastExtractionAt',
+    'lastSummaryAt',
+    'lastSkeletonAt',
+    'lastGenerationAt',
+  ]) {
+    if (value[field] !== undefined && typeof value[field] !== 'string') {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isStateBase(value: unknown): value is StoredState {
@@ -389,6 +509,43 @@ function isStateBase(value: unknown): value is StoredState {
     typeof candidate.indexedThroughMessageId === 'number' &&
     Array.isArray(candidate.memories) &&
     Array.isArray(candidate.pendingRanges)
+  );
+}
+
+function isCurrentState(stored: StoredState): stored is StoredState & StoryEchoChatState {
+  return (
+    Array.isArray(stored.pendingVectorHashes) &&
+    Array.isArray(stored.pendingVectorDeleteHashes) &&
+    typeof stored.vectorFingerprint === 'string' &&
+    typeof stored.indexedPrefixHash === 'string' &&
+    isCurrentStageSummary(stored.stageSummary) &&
+    isCurrentStorySkeleton(stored.storySkeleton) &&
+    isCurrentMetrics(stored.metrics) &&
+    Array.isArray(stored.debugTraces) &&
+    stored.debugTraces.length <= 50 &&
+    (stored.lastInspection === undefined || (
+      Number.isFinite(stored.lastInspection.vectorResultCount) &&
+      Number.isFinite(stored.lastInspection.durationMs) &&
+      Number.isFinite(stored.lastInspection.estimatedRemovedTokens) &&
+      Number.isFinite(stored.lastInspection.estimatedInjectedTokens) &&
+      Number.isFinite(stored.lastInspection.estimatedNetSavedTokens) &&
+      Number.isFinite(stored.lastInspection.estimatedSummaryTokens) &&
+      Number.isFinite(stored.lastInspection.summaryCoveredThroughMessageId)
+    )) &&
+    stored.memories.every(
+      (memory) =>
+        Array.isArray(memory.sourceHistory) &&
+        memory.sourceHistory.length > 0 &&
+        typeof memory.logicalKey === 'string' &&
+        Boolean(memory.logicalKey.trim()) &&
+        Array.isArray(memory.sourceMessageIds) &&
+        memory.sourceMessageIds.length > 0 &&
+        ['user', 'assistant', 'mixed', 'unknown'].includes(String(memory.evidenceRole ?? '')) &&
+        Array.isArray(memory.supersedesMemoryIds) &&
+        Array.isArray(memory.unresolvedThreads) &&
+        Boolean(memory.lastOperation) &&
+        (memory.status !== 'resolved' || memory.unresolvedThreads.length === 0),
+    )
   );
 }
 
@@ -488,7 +645,7 @@ export class MemoryRepository {
     if (!isStateBase(stored) || stored.ownerChatId !== getCurrentChatId(context)) {
       return null;
     }
-    return normalizeState(stored, context.chat);
+    return isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
   }
 
   async getOrCreate(): Promise<StoryEchoChatState | null> {
@@ -506,39 +663,9 @@ export class MemoryRepository {
       return state;
     }
 
-    const state = normalizeState(stored, context.chat);
-    if (
-      !Array.isArray(stored.pendingVectorHashes) ||
-      !Array.isArray(stored.pendingVectorDeleteHashes) ||
-      typeof stored.vectorFingerprint !== 'string' ||
-      typeof stored.indexedPrefixHash !== 'string' ||
-      !isCurrentStageSummary(stored.stageSummary) ||
-      !isCurrentStorySkeleton(stored.storySkeleton) ||
-      !stored.metrics ||
-      !Array.isArray(stored.debugTraces) ||
-      (stored.lastInspection !== undefined &&
-        (!Number.isFinite(stored.lastInspection.vectorResultCount) ||
-          !Number.isFinite(stored.lastInspection.durationMs) ||
-          !Number.isFinite(stored.lastInspection.estimatedRemovedTokens) ||
-          !Number.isFinite(stored.lastInspection.estimatedInjectedTokens) ||
-          !Number.isFinite(stored.lastInspection.estimatedNetSavedTokens) ||
-          !Number.isFinite(stored.lastInspection.estimatedSummaryTokens) ||
-          !Number.isFinite(stored.lastInspection.summaryCoveredThroughMessageId))) ||
-      stored.memories.some(
-        (memory) =>
-          !Array.isArray(memory.sourceHistory) ||
-          memory.sourceHistory.length === 0 ||
-          typeof memory.logicalKey !== 'string' ||
-          !memory.logicalKey.trim() ||
-          !Array.isArray(memory.sourceMessageIds) ||
-          memory.sourceMessageIds.length === 0 ||
-          !['user', 'assistant', 'mixed', 'unknown'].includes(String(memory.evidenceRole ?? '')) ||
-          !Array.isArray(memory.supersedesMemoryIds) ||
-          !Array.isArray(memory.unresolvedThreads) ||
-          !memory.lastOperation ||
-          (memory.status === 'resolved' && memory.unresolvedThreads.length > 0),
-      )
-    ) {
+    const current = isCurrentState(stored);
+    const state = current ? stored : normalizeState(stored, context.chat);
+    if (!current) {
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
     }

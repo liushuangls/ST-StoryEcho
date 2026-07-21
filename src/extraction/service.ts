@@ -6,6 +6,7 @@ import { applyConsolidationDecisions } from '../consolidation/apply';
 import { decideConsolidation } from '../consolidation/service';
 import { shortlistMemories } from '../consolidation/shortlist';
 import { recordDebugTrace } from '../debug/metrics';
+import { SourceRevisionCache } from '../history/source-revision-cache';
 import { completeStructuredWithConfiguredProvider } from '../llm/complete';
 import { recordAdaptiveExtractionSplit } from '../llm/structured-diagnostics';
 import { MemoryRepository } from '../memory/repository';
@@ -155,6 +156,7 @@ export class ExtractionService {
   private readonly settingsRepository = new SettingsRepository();
   private readonly memoryRepository = new MemoryRepository();
   private readonly vectorStore = new SillyTavernVectorStore();
+  private readonly sourceRevisionCache = new SourceRevisionCache();
 
   processThrough(
     targetEndMessageId: number,
@@ -284,6 +286,15 @@ export class ExtractionService {
     const context = getContext();
     const settings = this.settingsRepository.get();
     const indexedPastCurrentEnd = current.indexedThroughMessageId >= context.chat.length;
+    const sourceSignature = `${current.indexedThroughMessageId}:${current.indexedPrefixHash}`;
+    if (!indexedPastCurrentEnd && this.sourceRevisionCache.matches(
+      current.ownerChatId,
+      sourceSignature,
+      context.chat,
+      current.indexedThroughMessageId,
+    )) {
+      return current;
+    }
     const actualPrefixHash = indexedPastCurrentEnd
       ? ''
       : await prefixHash(context.chat, current.indexedThroughMessageId);
@@ -294,9 +305,21 @@ export class ExtractionService {
     if (!current.indexedPrefixHash && !indexedPastCurrentEnd) {
       current.indexedPrefixHash = actualPrefixHash;
       await this.memoryRepository.save(current);
+      this.sourceRevisionCache.remember(
+        current.ownerChatId,
+        `${current.indexedThroughMessageId}:${current.indexedPrefixHash}`,
+        context.chat,
+        current.indexedThroughMessageId,
+      );
       return current;
     }
     if (!indexedPastCurrentEnd && actualPrefixHash === current.indexedPrefixHash) {
+      this.sourceRevisionCache.remember(
+        current.ownerChatId,
+        sourceSignature,
+        context.chat,
+        current.indexedThroughMessageId,
+      );
       return current;
     }
 
@@ -339,6 +362,7 @@ export class ExtractionService {
       purgeDeferred,
     });
     await this.memoryRepository.save(current);
+    this.sourceRevisionCache.clear();
     return current;
   }
 

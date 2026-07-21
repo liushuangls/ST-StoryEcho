@@ -338,6 +338,39 @@ describe('independent stage summaries', () => {
     expect(generateRaw.mock.calls[0]?.[0]).toMatchObject({ responseLength: 1_600 });
   });
 
+  it('does not hash an unchanged summarized prefix again after new messages are appended', async () => {
+    const digest = vi.fn(async () => new Uint8Array(32).buffer);
+    vi.stubGlobal('crypto', { subtle: { digest } });
+    const installed = installContext([
+      { is_user: true, mes: '已总结的用户消息' },
+      { is_user: false, mes: '已总结的角色回复' },
+    ], vi.fn(async () => '不应调用'), 1);
+    installed.state.stageSummary = {
+      entries: [{
+        text: '已经保存的阶段总结。',
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 1,
+        sourceHash: '',
+        updatedAt: '2026-07-21T00:00:00.000Z',
+      }],
+      coveredThroughMessageId: 1,
+      coveredThroughHash: '',
+    };
+    const service = new StageSummaryService();
+
+    await service.reconcileHistory(installed.state);
+    const callsAfterInitialVerification = digest.mock.calls.length;
+    installed.context.chat.push({ is_user: true, mes: '尚未总结的新消息' });
+    await service.reconcileHistory(installed.state);
+
+    expect(digest).toHaveBeenCalledTimes(callsAfterInitialVerification);
+
+    installed.context.chat[0]!.mes = '用户编辑了已总结的原文';
+    await service.reconcileHistory(installed.state);
+
+    expect(digest.mock.calls.length).toBeGreaterThan(callsAfterInitialVerification);
+  });
+
   it('stores a provider free-form recap unchanged', async () => {
     const recap = '刘爽完成第一轮修炼，境界保持稳定。\n姜梦准备继续指导剑诀。';
     const generateRaw = vi.fn(async () => recap);
