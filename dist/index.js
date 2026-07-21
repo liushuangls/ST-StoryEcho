@@ -1147,6 +1147,58 @@ async function withInternalGeneration(request, operation) {
   }
 }
 
+// src/runtime/task-cancellation.ts
+var StoryEchoTaskCancelledError = class extends Error {
+  constructor(reason) {
+    super(`StoryEcho\u540E\u53F0\u4EFB\u52A1\u5DF2\u53D6\u6D88\uFF1A${reason}\u3002`);
+    this.name = "StoryEchoTaskCancelledError";
+  }
+};
+function isStoryEchoTaskCancelledError(error) {
+  return error instanceof StoryEchoTaskCancelledError;
+}
+function abortReason(signal) {
+  return signal.reason ?? new StoryEchoTaskCancelledError("\u8BF7\u6C42\u5DF2\u5931\u6548");
+}
+function throwIfStoryEchoTaskCancelled(signal) {
+  if (signal?.aborted) {
+    throw abortReason(signal);
+  }
+}
+function runStoryEchoTaskAbortable(operation, signal) {
+  if (!signal) {
+    return operation();
+  }
+  if (signal.aborted) {
+    return Promise.reject(abortReason(signal));
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    let pending;
+    try {
+      pending = operation();
+    } catch (error) {
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+      return;
+    }
+    pending.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
 // src/llm/main-provider.ts
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1268,7 +1320,10 @@ var MainLlmProvider = class {
     const response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
       context,
       request,
-      () => context.generateRaw(options)
+      () => runStoryEchoTaskAbortable(
+        () => context.generateRaw(options),
+        request.signal
+      )
     ));
     return response.replaceAll(`[${markedRequest.marker}]`, "").trim();
   }
@@ -1541,13 +1596,28 @@ var StoryEchoTaskCoordinator = class {
   lastQueueWaitMs = 0;
   maximumQueueWaitMs = 0;
   enqueueForeground(name, operation, options = {}) {
-    return this.enqueue("foreground", name, operation, options);
+    const queued = this.enqueue("foreground", name, operation, options);
+    this.cancelRunningBackground("\u65B0\u7684\u89D2\u8272\u751F\u6210\u9700\u8981\u4F18\u5148\u6267\u884C");
+    return queued;
   }
   enqueueManual(name, operation) {
     return this.enqueue("manual", name, operation);
   }
   enqueueBackground(name, operation) {
     return this.enqueue("background", name, operation);
+  }
+  activeTaskSignal() {
+    return this.running?.controller.signal;
+  }
+  cancelRunningBackground(reason) {
+    const running = this.running;
+    if (!running || running.kind !== "background" || running.controller.signal.aborted) {
+      return false;
+    }
+    running.controller.abort(new StoryEchoTaskCancelledError(reason));
+    logger.info(`\u5DF2\u53D6\u6D88\u5931\u6548\u7684\u540E\u53F0\u4EFB\u52A1\u201C${running.name}\u201D\uFF1A${reason}\u3002`);
+    emitDiagnosticsUpdated();
+    return true;
   }
   releaseForegroundLease(reason) {
     const lease = this.foregroundLease;
@@ -1583,6 +1653,7 @@ var StoryEchoTaskCoordinator = class {
       clearTimeout(this.foregroundLease.timeout);
       this.foregroundLease = void 0;
     }
+    this.running?.controller.abort(new StoryEchoTaskCancelledError("\u6D4B\u8BD5\u73AF\u5883\u91CD\u7F6E"));
     for (const queue of Object.values(this.queues)) {
       queue.splice(0, queue.length);
     }
@@ -1636,15 +1707,17 @@ var StoryEchoTaskCoordinator = class {
     const waitMs = Math.max(0, Date.now() - task.enqueuedAt);
     this.lastQueueWaitMs = waitMs;
     this.maximumQueueWaitMs = Math.max(this.maximumQueueWaitMs, waitMs);
+    const controller = new AbortController();
     this.running = {
       id: task.id,
       kind: task.kind,
       name: task.name,
-      enqueuedAt: task.enqueuedAt
+      enqueuedAt: task.enqueuedAt,
+      controller
     };
     emitDiagnosticsUpdated();
     try {
-      const result = await task.operation();
+      const result = await task.operation(controller.signal);
       const shouldHoldLease = task.kind === "foreground" && (task.holdForegroundLease?.(result) ?? true);
       if (shouldHoldLease) {
         this.acquireForegroundLease(task.id);
@@ -1889,6 +1962,13 @@ function repairedJsonText(raw) {
 
 // src/llm/complete.ts
 var MAX_RETRY_TOKENS = 1e4;
+function withActiveTaskSignal(request) {
+  if (request.signal) {
+    return request;
+  }
+  const signal = storyEchoTaskCoordinator.activeTaskSignal();
+  return signal ? { ...request, signal } : request;
+}
 function yieldBackgroundAtRetryBoundary() {
   if (storyEchoTaskCoordinator.shouldYieldBackgroundToForeground()) {
     recordBackgroundYield();
@@ -1900,9 +1980,7 @@ async function completeNonEmpty(provider, request) {
   if (first.trim()) {
     return first;
   }
-  if (request.signal?.aborted) {
-    throw new Error("LLM\u8BF7\u6C42\u5DF2\u53D6\u6D88\u3002");
-  }
+  throwIfStoryEchoTaskCancelled(request.signal);
   yieldBackgroundAtRetryBoundary();
   const initialBudget = Math.max(128, Math.floor(request.maxTokens ?? 1024));
   const retryBudget = Math.min(MAX_RETRY_TOKENS, initialBudget * 2);
@@ -2003,9 +2081,7 @@ async function completeStructuredWithProvider(provider, request, parse) {
       recordStructuredSuccess(provider.id, mode);
       return parsed;
     } catch (error) {
-      if (request.signal?.aborted) {
-        throw error;
-      }
+      throwIfStoryEchoTaskCancelled(request.signal);
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${mode}: ${message}`);
       recordStructuredFailure(provider.id, mode);
@@ -2015,13 +2091,12 @@ async function completeStructuredWithProvider(provider, request, parse) {
   throw new Error(`${provider.id}\u7684\u7ED3\u6784\u5316\u8F93\u51FA\u5168\u90E8\u5931\u8D25\uFF1A${failures.join(" | ")}`);
 }
 async function completeStructuredWithConfiguredProvider(settings, request, parse) {
+  request = withActiveTaskSignal(request);
   const provider = createLlmProvider(settings);
   try {
     return await completeStructuredWithProvider(provider, request, parse);
   } catch (error) {
-    if (request.signal?.aborted) {
-      throw error;
-    }
+    throwIfStoryEchoTaskCancelled(request.signal);
     if (provider.id !== "openai-compatible" || !settings.llm.custom.fallbackToMain) {
       throw error;
     }
@@ -2032,13 +2107,12 @@ async function completeStructuredWithConfiguredProvider(settings, request, parse
   }
 }
 async function completeWithConfiguredProvider(settings, request) {
+  request = withActiveTaskSignal(request);
   const provider = createLlmProvider(settings);
   try {
     return await completeNonEmpty(provider, request);
   } catch (error) {
-    if (request.signal?.aborted) {
-      throw error;
-    }
+    throwIfStoryEchoTaskCancelled(request.signal);
     if (provider.id !== "openai-compatible" || !settings.llm.custom.fallbackToMain) {
       throw error;
     }
@@ -2570,6 +2644,9 @@ async function decideConsolidation(settings, candidates, memories) {
       durationMs: Math.round(performance.now() - startedAt)
     };
   } catch (error) {
+    if (isStoryEchoTaskCancelledError(error)) {
+      throw error;
+    }
     return {
       decisions: fallback,
       usedLlm: true,
@@ -2627,7 +2704,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 8;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.3";
+var EXTENSION_VERSION = "0.20.4";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -6465,6 +6542,9 @@ async function extractCandidatesAdaptive(settings, messages, sourceStartMessageI
       maxTokens: 8192
     }, parseExtractionResponse);
   } catch (error) {
+    if (isStoryEchoTaskCancelledError(error)) {
+      throw error;
+    }
     const splitIndex = turnAlignedSplitIndex(messages);
     if (splitIndex === null) {
       throw error;
@@ -6967,6 +7047,9 @@ var ExtractionService = class {
         start = chunk.endMessageId + 1;
       }
     } catch (error) {
+      if (isStoryEchoTaskCancelledError(error)) {
+        throw error;
+      }
       state.metrics.extractionFailures += 1;
       recordDebugTrace(state, settings.debug, "error", "\u5267\u60C5\u62BD\u53D6\u5206\u5757\u5931\u8D25\u3002", {
         error: error instanceof Error ? error.message : String(error),
@@ -7645,6 +7728,9 @@ ${prompt}`;
         start = chunk.endMessageId + 1;
       }
     } catch (error) {
+      if (isStoryEchoTaskCancelledError(error)) {
+        throw error;
+      }
       state.metrics.summaryFailures += 1;
       recordDebugTrace(state, settings.debug, "error", "\u9636\u6BB5\u603B\u7ED3\u6761\u76EE\u751F\u6210\u5931\u8D25\u3002", {
         error: error instanceof Error ? error.message : String(error),
@@ -8136,6 +8222,9 @@ var StorySkeletonService = class {
       }
       return await this.runIncrementalUpdates(state, settings, options);
     } catch (error) {
+      if (isStoryEchoTaskCancelledError(error)) {
+        throw error;
+      }
       state.metrics.skeletonFailures += 1;
       recordDebugTrace(state, settings.debug, "error", "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u751F\u6210\u5931\u8D25\u3002", {
         error: error instanceof Error ? error.message : String(error)
@@ -8220,11 +8309,12 @@ var BackgroundProcessingScheduler = class {
     };
     eventSource.on(eventName, handler);
     this.registeredEvents.push({ eventName, eventSource, handler });
-    const markHistoryDirty = () => {
+    const markHistoryDirty = (reason) => {
       this.historyRequiresReconcile = true;
       this.verifiedPrefix = void 0;
       this.extractionCooldown = void 0;
       this.historyRevision += 1;
+      storyEchoTaskCoordinator.cancelRunningBackground(reason);
     };
     const mutationEvents = [
       "CHAT_CHANGED",
@@ -8240,10 +8330,10 @@ var BackgroundProcessingScheduler = class {
         continue;
       }
       const mutationHandler = eventKey === "CHAT_CHANGED" ? () => {
-        markHistoryDirty();
+        markHistoryDirty("\u804A\u5929\u5206\u652F\u5DF2\u7ECF\u5207\u6362");
         storyEchoTaskCoordinator.releaseForegroundLease("chat-changed");
         this.schedule();
-      } : markHistoryDirty;
+      } : () => markHistoryDirty(`\u804A\u5929\u5386\u53F2\u4E8B\u4EF6\uFF1A${eventKey}`);
       eventSource.on(mutationEventName, mutationHandler);
       this.registeredEvents.push({
         eventName: mutationEventName,
@@ -8332,6 +8422,11 @@ var BackgroundProcessingScheduler = class {
         }
         await this.processCurrentChat();
       } catch (error) {
+        if (isStoryEchoTaskCancelledError(error)) {
+          this.rerunRequested = true;
+          logger.info("\u5931\u6548\u7684\u540E\u53F0\u5267\u60C5\u6574\u7406\u5DF2\u53D6\u6D88\uFF0C\u5C06\u5728\u5F53\u524D\u89D2\u8272\u56DE\u590D\u7ED3\u675F\u540E\u91CD\u8BD5\u3002");
+          return;
+        }
         if (isBackgroundYieldForForegroundError(error)) {
           this.rerunRequested = true;
           logger.info("\u540E\u53F0\u5267\u60C5\u6574\u7406\u5DF2\u5728LLM\u91CD\u8BD5\u8FB9\u754C\u8BA9\u884C\uFF0C\u7A0D\u540E\u4ECE\u672A\u63D0\u4EA4\u5206\u5757\u91CD\u8BD5\u3002");
@@ -8399,6 +8494,9 @@ var BackgroundProcessingScheduler = class {
           state = await extractionService.processNextThroughVerifiedHistory(targetEndMessageId) ?? state;
           this.extractionCooldown = void 0;
         } catch (error) {
+          if (isStoryEchoTaskCancelledError(error)) {
+            throw error;
+          }
           if (isBackgroundYieldForForegroundError(error)) {
             throw error;
           }

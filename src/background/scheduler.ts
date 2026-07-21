@@ -11,6 +11,7 @@ import {
   isBackgroundYieldForForegroundError,
   storyEchoTaskCoordinator,
 } from '../runtime/task-coordinator';
+import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
 import { storySkeletonService } from '../summary/skeleton-service';
@@ -130,11 +131,12 @@ export class BackgroundProcessingScheduler {
     };
     eventSource.on(eventName, handler);
     this.registeredEvents.push({ eventName, eventSource, handler });
-    const markHistoryDirty = (): void => {
+    const markHistoryDirty = (reason: string): void => {
       this.historyRequiresReconcile = true;
       this.verifiedPrefix = undefined;
       this.extractionCooldown = undefined;
       this.historyRevision += 1;
+      storyEchoTaskCoordinator.cancelRunningBackground(reason);
     };
     const mutationEvents = [
       'CHAT_CHANGED',
@@ -151,11 +153,11 @@ export class BackgroundProcessingScheduler {
       }
       const mutationHandler = eventKey === 'CHAT_CHANGED'
         ? (): void => {
-            markHistoryDirty();
+            markHistoryDirty('聊天分支已经切换');
             storyEchoTaskCoordinator.releaseForegroundLease('chat-changed');
             this.schedule();
           }
-        : markHistoryDirty;
+        : (): void => markHistoryDirty(`聊天历史事件：${eventKey}`);
       eventSource.on(mutationEventName, mutationHandler);
       this.registeredEvents.push({
         eventName: mutationEventName,
@@ -254,6 +256,11 @@ export class BackgroundProcessingScheduler {
         }
         await this.processCurrentChat();
       } catch (error) {
+        if (isStoryEchoTaskCancelledError(error)) {
+          this.rerunRequested = true;
+          logger.info('失效的后台剧情整理已取消，将在当前角色回复结束后重试。');
+          return;
+        }
         if (isBackgroundYieldForForegroundError(error)) {
           // End this coordinator task so the already-queued foreground task
           // can run. The same uncommitted history block is requeued after the
@@ -336,6 +343,9 @@ export class BackgroundProcessingScheduler {
           state = await extractionService.processNextThroughVerifiedHistory(targetEndMessageId) ?? state;
           this.extractionCooldown = undefined;
         } catch (error) {
+          if (isStoryEchoTaskCancelledError(error)) {
+            throw error;
+          }
           if (isBackgroundYieldForForegroundError(error)) {
             throw error;
           }

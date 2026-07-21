@@ -5,6 +5,7 @@ import {
   type MainConnectionIdentity,
 } from '../platform/sillytavern';
 import { markInternalGenerationRequest, withInternalGeneration } from './internal-generation';
+import { runStoryEchoTaskAbortable } from '../runtime/task-cancellation';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -171,7 +172,10 @@ export class MainLlmProvider implements LlmProvider {
     const response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
       context,
       request,
-      () => context.generateRaw(options),
+      () => runStoryEchoTaskAbortable(
+        () => context.generateRaw(options),
+        request.signal,
+      ),
     ));
     // The marker exists only for request routing. A model may occasionally
     // echo the final prompt line, so strip the exact request nonce before any

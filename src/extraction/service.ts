@@ -13,6 +13,7 @@ import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { buildExtractionReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
+import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { resolveVectorConfig, vectorConfigFingerprint } from '../vector/config';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { countCompletedTurns, planNextChunk } from './chunk-planner';
@@ -125,6 +126,9 @@ export async function extractCandidatesAdaptive(
       maxTokens: 8_192,
     }, parseExtractionResponse);
   } catch (error) {
+    if (isStoryEchoTaskCancelledError(error)) {
+      throw error;
+    }
     const splitIndex = turnAlignedSplitIndex(messages);
     if (splitIndex === null) {
       throw error;
@@ -735,6 +739,9 @@ export class ExtractionService {
         start = chunk.endMessageId + 1;
       }
     } catch (error) {
+      if (isStoryEchoTaskCancelledError(error)) {
+        throw error;
+      }
       state.metrics.extractionFailures += 1;
       recordDebugTrace(state, settings.debug, 'error', '剧情抽取分块失败。', {
         error: error instanceof Error ? error.message : String(error),

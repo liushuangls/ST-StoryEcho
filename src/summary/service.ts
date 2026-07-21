@@ -12,6 +12,7 @@ import { estimateTokens } from '../prompt/render';
 import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
 import { firstStoryPhaseBoundary } from '../retrieval/story-phase';
 import { SettingsRepository } from '../settings/repository';
+import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import {
   buildStageSummaryGrounding,
   buildStageSummaryPrompt,
@@ -463,6 +464,9 @@ export class StageSummaryService {
         start = chunk.endMessageId + 1;
       }
     } catch (error) {
+      if (isStoryEchoTaskCancelledError(error)) {
+        throw error;
+      }
       state.metrics.summaryFailures += 1;
       recordDebugTrace(state, settings.debug, 'error', '阶段总结条目生成失败。', {
         error: error instanceof Error ? error.message : String(error),

@@ -229,7 +229,7 @@ describe('structured LLM completion', () => {
       },
       { holdForegroundLease: (prepared) => prepared },
     );
-    const rejected = expect(background).rejects.toThrow(/前台生成已排队/);
+    const rejected = expect(background).rejects.toThrow(/后台任务已取消/);
     releaseResponse(new Response(JSON.stringify({
       choices: [{ message: { content: 'not json' } }],
     }), { status: 200 }));
@@ -238,6 +238,6 @@ describe('structured LLM completion', () => {
     await foreground;
     expect(order).toEqual(['background', 'foreground']);
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(structuredOutputDiagnosticsSnapshot().backgroundYields).toBe(1);
+    expect(structuredOutputDiagnosticsSnapshot().backgroundYields).toBe(0);
   });
 });

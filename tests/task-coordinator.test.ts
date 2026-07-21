@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { StoryEchoTaskCoordinator } from '../src/runtime/task-coordinator';
+import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
 
 function deferred<T = void>(): {
   promise: Promise<T>;
@@ -18,7 +19,43 @@ async function flushQueue(): Promise<void> {
 }
 
 describe('StoryEchoTaskCoordinator', () => {
-  it('finishes the active background batch, runs foreground next, and holds later work for the reply', async () => {
+  it('cancels an active background task when foreground generation arrives', async () => {
+    const coordinator = new StoryEchoTaskCoordinator(60_000);
+    const started = deferred();
+    const order: string[] = [];
+    const background = coordinator.enqueueBackground('background', async (signal) => {
+      order.push('background');
+      started.resolve(undefined);
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const backgroundOutcome = background.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await started.promise;
+
+    const foreground = coordinator.enqueueForeground(
+      'foreground',
+      async () => {
+        order.push('foreground');
+        return false;
+      },
+      { holdForegroundLease: (prepared) => prepared },
+    );
+
+    expect(await backgroundOutcome).toBeInstanceOf(StoryEchoTaskCancelledError);
+    await foreground;
+    expect(order).toEqual(['background', 'foreground']);
+    expect(coordinator.snapshot()).toMatchObject({
+      runningKind: null,
+      queuedForeground: 0,
+      foregroundLeaseActive: false,
+    });
+  });
+
+  it('waits for a non-cooperative background operation, then runs foreground and holds later work', async () => {
     const coordinator = new StoryEchoTaskCoordinator(60_000);
     const backgroundGate = deferred();
     const order: string[] = [];

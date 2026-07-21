@@ -10,6 +10,7 @@ import {
   BackgroundYieldForForegroundError,
   storyEchoTaskCoordinator,
 } from '../runtime/task-coordinator';
+import { throwIfStoryEchoTaskCancelled } from '../runtime/task-cancellation';
 import {
   recordBackgroundYield,
   recordLocalJsonRepair,
@@ -21,6 +22,14 @@ import {
 import { repairedJsonText } from './json-repair';
 
 const MAX_RETRY_TOKENS = 10_000;
+
+function withActiveTaskSignal(request: LlmRequest): LlmRequest {
+  if (request.signal) {
+    return request;
+  }
+  const signal = storyEchoTaskCoordinator.activeTaskSignal();
+  return signal ? { ...request, signal } : request;
+}
 
 function yieldBackgroundAtRetryBoundary(): void {
   if (storyEchoTaskCoordinator.shouldYieldBackgroundToForeground()) {
@@ -37,9 +46,7 @@ async function completeNonEmpty(
   if (first.trim()) {
     return first;
   }
-  if (request.signal?.aborted) {
-    throw new Error('LLM请求已取消。');
-  }
+  throwIfStoryEchoTaskCancelled(request.signal);
   yieldBackgroundAtRetryBoundary();
 
   const initialBudget = Math.max(128, Math.floor(request.maxTokens ?? 1_024));
@@ -150,9 +157,7 @@ async function completeStructuredWithProvider<T>(
       recordStructuredSuccess(provider.id, mode);
       return parsed;
     } catch (error) {
-      if (request.signal?.aborted) {
-        throw error;
-      }
+      throwIfStoryEchoTaskCancelled(request.signal);
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${mode}: ${message}`);
       recordStructuredFailure(provider.id, mode);
@@ -167,13 +172,12 @@ export async function completeStructuredWithConfiguredProvider<T>(
   request: LlmRequest,
   parse: (raw: string) => T,
 ): Promise<T> {
+  request = withActiveTaskSignal(request);
   const provider = createLlmProvider(settings);
   try {
     return await completeStructuredWithProvider(provider, request, parse);
   } catch (error) {
-    if (request.signal?.aborted) {
-      throw error;
-    }
+    throwIfStoryEchoTaskCancelled(request.signal);
     if (provider.id !== 'openai-compatible' || !settings.llm.custom.fallbackToMain) {
       throw error;
     }
@@ -188,13 +192,12 @@ export async function completeWithConfiguredProvider(
   settings: StoryEchoSettings,
   request: LlmRequest,
 ): Promise<string> {
+  request = withActiveTaskSignal(request);
   const provider = createLlmProvider(settings);
   try {
     return await completeNonEmpty(provider, request);
   } catch (error) {
-    if (request.signal?.aborted) {
-      throw error;
-    }
+    throwIfStoryEchoTaskCancelled(request.signal);
     if (provider.id !== 'openai-compatible' || !settings.llm.custom.fallbackToMain) {
       throw error;
     }

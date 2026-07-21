@@ -1,5 +1,6 @@
 import { logger } from '../core/logger';
 import { emitDiagnosticsUpdated } from '../debug/events';
+import { StoryEchoTaskCancelledError } from './task-cancellation';
 
 export type StoryEchoTaskKind = 'foreground' | 'manual' | 'background';
 
@@ -24,7 +25,7 @@ interface QueuedTask<T> {
   kind: StoryEchoTaskKind;
   name: string;
   enqueuedAt: number;
-  operation: () => Promise<T>;
+  operation: (signal: AbortSignal) => Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
   holdForegroundLease?: (result: T) => boolean;
@@ -58,7 +59,11 @@ export class StoryEchoTaskCoordinator {
     background: [],
   };
   private nextTaskId = 1;
-  private running: Pick<QueuedTask<unknown>, 'id' | 'kind' | 'name' | 'enqueuedAt'> | undefined;
+  private running:
+    | (Pick<QueuedTask<unknown>, 'id' | 'kind' | 'name' | 'enqueuedAt'> & {
+        controller: AbortController;
+      })
+    | undefined;
   private foregroundLease:
     | {
         taskId: number;
@@ -76,18 +81,38 @@ export class StoryEchoTaskCoordinator {
 
   enqueueForeground<T>(
     name: string,
-    operation: () => Promise<T>,
+    operation: (signal: AbortSignal) => Promise<T>,
     options: EnqueueOptions<T> = {},
   ): Promise<T> {
-    return this.enqueue('foreground', name, operation, options);
+    const queued = this.enqueue('foreground', name, operation, options);
+    // A real character generation must never wait forever behind a stale
+    // internal request. The background scheduler will retry its uncommitted
+    // block after the foreground lease is released.
+    this.cancelRunningBackground('新的角色生成需要优先执行');
+    return queued;
   }
 
-  enqueueManual<T>(name: string, operation: () => Promise<T>): Promise<T> {
+  enqueueManual<T>(name: string, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
     return this.enqueue('manual', name, operation);
   }
 
-  enqueueBackground<T>(name: string, operation: () => Promise<T>): Promise<T> {
+  enqueueBackground<T>(name: string, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
     return this.enqueue('background', name, operation);
+  }
+
+  activeTaskSignal(): AbortSignal | undefined {
+    return this.running?.controller.signal;
+  }
+
+  cancelRunningBackground(reason: string): boolean {
+    const running = this.running;
+    if (!running || running.kind !== 'background' || running.controller.signal.aborted) {
+      return false;
+    }
+    running.controller.abort(new StoryEchoTaskCancelledError(reason));
+    logger.info(`已取消失效的后台任务“${running.name}”：${reason}。`);
+    emitDiagnosticsUpdated();
+    return true;
   }
 
   releaseForegroundLease(reason: string): boolean {
@@ -129,6 +154,7 @@ export class StoryEchoTaskCoordinator {
       clearTimeout(this.foregroundLease.timeout);
       this.foregroundLease = undefined;
     }
+    this.running?.controller.abort(new StoryEchoTaskCancelledError('测试环境重置'));
     for (const queue of Object.values(this.queues)) {
       queue.splice(0, queue.length);
     }
@@ -141,7 +167,7 @@ export class StoryEchoTaskCoordinator {
   private enqueue<T>(
     kind: StoryEchoTaskKind,
     name: string,
-    operation: () => Promise<T>,
+    operation: (signal: AbortSignal) => Promise<T>,
     options: EnqueueOptions<T> = {},
   ): Promise<T> {
     const promise = new Promise<T>((resolve, reject) => {
@@ -193,16 +219,18 @@ export class StoryEchoTaskCoordinator {
     const waitMs = Math.max(0, Date.now() - task.enqueuedAt);
     this.lastQueueWaitMs = waitMs;
     this.maximumQueueWaitMs = Math.max(this.maximumQueueWaitMs, waitMs);
+    const controller = new AbortController();
     this.running = {
       id: task.id,
       kind: task.kind,
       name: task.name,
       enqueuedAt: task.enqueuedAt,
+      controller,
     };
     emitDiagnosticsUpdated();
 
     try {
-      const result = await task.operation();
+      const result = await task.operation(controller.signal);
       const shouldHoldLease = task.kind === 'foreground'
         && (task.holdForegroundLease?.(result) ?? true);
       if (shouldHoldLease) {

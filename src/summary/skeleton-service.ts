@@ -12,6 +12,7 @@ import { MemoryRepository } from '../memory/repository';
 import { getCurrentChatId } from '../platform/sillytavern';
 import { buildStorySkeletonWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
+import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import {
   buildStorySkeletonPrompt,
   STORY_SKELETON_SYSTEM_PROMPT,
@@ -567,6 +568,9 @@ export class StorySkeletonService {
       }
       return await this.runIncrementalUpdates(state, settings, options);
     } catch (error) {
+      if (isStoryEchoTaskCancelledError(error)) {
+        throw error;
+      }
       state.metrics.skeletonFailures += 1;
       recordDebugTrace(state, settings.debug, 'error', '全局剧情骨架生成失败。', {
         error: error instanceof Error ? error.message : String(error),

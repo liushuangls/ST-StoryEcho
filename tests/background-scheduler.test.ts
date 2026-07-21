@@ -16,6 +16,7 @@ import { stageSummaryService } from '../src/summary/service';
 import { chatState } from './fixtures';
 
 afterEach(() => {
+  storyEchoTaskCoordinator.resetForTests();
   resetStructuredOutputDiagnostics();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -29,6 +30,57 @@ function turn(user: string, assistant: string): TavernChatMessage[] {
 }
 
 describe('backgroundTargetMessageId', () => {
+  it('cancels a hanging stage-summary request when the chat branch changes', async () => {
+    const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.enabled = true;
+    settings.memory.enabled = false;
+    settings.recentWindow = { size: 1, unit: 'turns' };
+    settings.summary.targetTurnsPerUpdate = 1;
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    state.stageSummary.coveredThroughMessageId = -1;
+    const handlers = new Map<string, (...args: unknown[]) => void | Promise<void>>();
+    const generateRaw = vi.fn(() => new Promise<string>(() => undefined));
+    const context = {
+      chat,
+      chatId: 'chat-id',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: { [MODULE_ID]: state },
+      event_types: {
+        MESSAGE_RECEIVED: 'message-received',
+        CHAT_CHANGED: 'chat-changed',
+      },
+      eventSource: {
+        on: vi.fn((event: string, handler: (...args: unknown[]) => void | Promise<void>) => {
+          handlers.set(event, handler);
+        }),
+        off: vi.fn(),
+      },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw,
+      getCurrentChatId: () => 'chat-id',
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const scheduler = new BackgroundProcessingScheduler();
+    vi.spyOn(scheduler, 'schedule').mockImplementation(() => undefined);
+    scheduler.register();
+
+    const running = scheduler.runNow();
+    await vi.waitFor(() => expect(generateRaw).toHaveBeenCalledOnce());
+    (context.extensionSettings[MODULE_ID] as StoryEchoSettings).enabled = false;
+    handlers.get('chat-changed')?.();
+
+    await running;
+    await vi.waitFor(() => {
+      expect(storyEchoTaskCoordinator.snapshot().runningKind).toBeNull();
+    });
+    scheduler.unregister();
+    expect(state.stageSummary.entries).toHaveLength(0);
+    expect(state.metrics.summaryFailures).toBe(0);
+  });
+
   it('only prepares complete history outside the minimum turn window', () => {
     const chat = [
       ...turn('u1', 'a1'),
@@ -409,6 +461,7 @@ describe('backgroundTargetMessageId', () => {
     };
     vi.stubGlobal('SillyTavern', { getContext: () => context });
     const releaseLease = vi.spyOn(storyEchoTaskCoordinator, 'releaseForegroundLease');
+    const cancelBackground = vi.spyOn(storyEchoTaskCoordinator, 'cancelRunningBackground');
     const reconcile = vi.spyOn(extractionService, 'reconcileHistory').mockResolvedValue(state);
     vi.spyOn(extractionService, 'processNextThroughVerifiedHistory')
       .mockImplementation(async (target) => {
@@ -441,6 +494,7 @@ describe('backgroundTargetMessageId', () => {
 
     expect(reconcile).toHaveBeenCalledTimes(2);
     expect(releaseLease).toHaveBeenCalledWith('chat-changed');
+    expect(cancelBackground).toHaveBeenCalledWith('聊天分支已经切换');
   });
 
   it('forces reconciliation when history mutates during background extraction', async () => {

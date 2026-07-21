@@ -7,6 +7,7 @@ import { buildConsolidationPrompt, CONSOLIDATION_SYSTEM_PROMPT } from './prompts
 import { CONSOLIDATION_SCHEMA } from './schema';
 import { normalizedFact } from './shortlist';
 import type { ConsolidationDecisionResult } from './types';
+import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 
 export async function decideConsolidation(
   settings: StoryEchoSettings,
@@ -55,6 +56,9 @@ export async function decideConsolidation(
       durationMs: Math.round(performance.now() - startedAt),
     };
   } catch (error) {
+    if (isStoryEchoTaskCancelledError(error)) {
+      throw error;
+    }
     return {
       decisions: fallback,
       usedLlm: true,
