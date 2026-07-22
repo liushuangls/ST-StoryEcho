@@ -162,4 +162,20 @@ describe('OpenAiCompatibleProvider', () => {
     expect(error).toBeInstanceOf(LlmRequestTimeoutError);
     expect(error).toMatchObject({ timeoutMs: 1_000 });
   });
+
+  it('marks a SillyTavern-wrapped upstream 524 as the same retriable timeout', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'Got response status 524' },
+    }), { status: 500 }));
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'model-name';
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    const error = await provider.complete({ system: 'system', prompt: 'prompt' })
+      .catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(LlmRequestTimeoutError);
+    expect(error).toMatchObject({ timeoutMs: 300_000, upstreamStatus: 524 });
+  });
 });

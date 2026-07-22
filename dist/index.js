@@ -1390,14 +1390,38 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
 
 // src/llm/errors.ts
 var LlmRequestTimeoutError = class extends Error {
-  constructor(timeoutMs) {
-    super(`\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+  constructor(timeoutMs, upstreamStatus) {
+    super(upstreamStatus ? `\u81EA\u5B9A\u4E49LLM\u4E0A\u6E38\u6682\u65F6\u4E0D\u53EF\u7528\uFF08HTTP ${upstreamStatus}\uFF09\uFF0C\u6309\u8D85\u65F6\u5904\u7406\u3002` : `\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
     this.timeoutMs = timeoutMs;
+    this.upstreamStatus = upstreamStatus;
     this.name = "LlmRequestTimeoutError";
   }
 };
 function isLlmRequestTimeoutError(error) {
   return error instanceof LlmRequestTimeoutError;
+}
+var RETRIABLE_UPSTREAM_TIMEOUT_STATUSES = /* @__PURE__ */ new Set([
+  408,
+  502,
+  503,
+  504,
+  520,
+  521,
+  522,
+  523,
+  524
+]);
+function isRetriableUpstreamTimeoutStatus(status) {
+  return RETRIABLE_UPSTREAM_TIMEOUT_STATUSES.has(status);
+}
+function findRetriableUpstreamTimeoutStatus(message) {
+  for (const match of message.matchAll(/\b(?:HTTP|status)\s*[:=]?\s*(\d{3})\b/gi)) {
+    const status = Number(match[1]);
+    if (isRetriableUpstreamTimeoutStatus(status)) {
+      return status;
+    }
+  }
+  return null;
 }
 
 // src/llm/openai-compatible-provider.ts
@@ -1539,6 +1563,10 @@ var OpenAiCompatibleProvider = class {
       if (!response.ok) {
         const fallback = `\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u3002`;
         const detail = responseError(payload, "", apiKey);
+        const upstreamStatus = isRetriableUpstreamTimeoutStatus(response.status) ? response.status : findRetriableUpstreamTimeoutStatus(detail);
+        if (upstreamStatus !== null) {
+          throw new LlmRequestTimeoutError(timeoutMs, upstreamStatus);
+        }
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
       }
       const content = responseContent(payload);
@@ -2733,7 +2761,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.7";
+var EXTENSION_VERSION = "0.20.8";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({

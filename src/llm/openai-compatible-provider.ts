@@ -6,7 +6,11 @@ import type {
 } from '../core/types';
 import { getRequestHeaders } from '../platform/sillytavern';
 import { normalizeChatCompletionsBaseUrl } from './url';
-import { LlmRequestTimeoutError } from './errors';
+import {
+  findRetriableUpstreamTimeoutStatus,
+  isRetriableUpstreamTimeoutStatus,
+  LlmRequestTimeoutError,
+} from './errors';
 
 type FetchLike = typeof fetch;
 type RequestHeadersProvider = () => Promise<Record<string, string>>;
@@ -168,6 +172,12 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       if (!response.ok) {
         const fallback = `自定义LLM请求失败（HTTP ${response.status}）。`;
         const detail = responseError(payload, '', apiKey);
+        const upstreamStatus = isRetriableUpstreamTimeoutStatus(response.status)
+          ? response.status
+          : findRetriableUpstreamTimeoutStatus(detail);
+        if (upstreamStatus !== null) {
+          throw new LlmRequestTimeoutError(timeoutMs, upstreamStatus);
+        }
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
       }
       const content = responseContent(payload);
