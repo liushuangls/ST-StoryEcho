@@ -102,10 +102,13 @@ afterEach(() => {
 describe('global story skeleton lifecycle', () => {
   it('defines a genre-adaptive historical outline instead of a status or NPC profile', () => {
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('长期的重要历史事件记录与剧情大纲');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('人物档案、NPC介绍');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前境界、属性数值、生命状态');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('完整人物资料');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('最新境界、属性数值、生命状态');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可突出重要历练');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择合适的标题');
+    expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('每个段落至少说明一项已经发生的重要变化');
+    expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('属性与好感数值');
+    expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('可全面重编的工作草稿');
   });
 
   it('first builds at S+1 but includes every current summary regardless of S', async () => {
