@@ -105,6 +105,10 @@ describe('global story skeleton lifecycle', () => {
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('内容上限而非填充目标');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每条关系句都以可观察互动、明确原话、决定或行动为主体');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每件历史事件选择一个主要叙述位置');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('标题与正文以来源中已经实际发生的事件及其持久影响为依据');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前限制、等待事项、未来计划和下一阶段安排由近期上下文与MVU继续承载');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('同一关系线或训练线用一次累计变化结论呈现');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('其余用稳定的定性成果表达');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('在这一次生成中同时完成');
     expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('下一触发条件');
     expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('其持有傀儡的阶位');
