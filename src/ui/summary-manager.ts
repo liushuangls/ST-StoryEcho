@@ -1,8 +1,13 @@
 import type { StageSummaryEntry, StoryEchoChatState } from '../core/types';
+import { extractionService } from '../extraction/service';
 import { MemoryRepository } from '../memory/repository';
-import { getCurrentChatId } from '../platform/sillytavern';
+import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import { selectRecentWindow } from '../prompt/window';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
+import { SettingsRepository } from '../settings/repository';
+import { stageSummaryService } from '../summary/service';
 import { storySkeletonService } from '../summary/skeleton-service';
+import { storySkeletonIsUsable } from '../summary/skeleton-state';
 import { paginateItems } from './memory-manager';
 import { notify } from './notifications';
 
@@ -23,6 +28,41 @@ export function stageSummaryDeletionMode(
   return entries.at(-1)?.sourceStartMessageId === entry.sourceStartMessageId
     ? 'restore-raw-tail'
     : 'keep-covered-tombstone';
+}
+
+export type StageSummaryDeliveryStatus =
+  | '已汇入骨架'
+  | '随请求携带'
+  | '随请求携带（待汇入骨架）';
+
+export function stageSummaryDeliveryStatus(
+  entry: StageSummaryEntry,
+  activeIndex: number,
+  activeEntryCount: number,
+  windowSize: number,
+  skeletonCoverage: number,
+  skeletonUsable: boolean,
+): StageSummaryDeliveryStatus {
+  const retained = Math.max(1, Math.floor(windowSize));
+  const recentStartIndex = Math.max(0, activeEntryCount - retained);
+  if (activeIndex >= recentStartIndex) {
+    return '随请求携带';
+  }
+  if (skeletonUsable && entry.sourceEndMessageId <= skeletonCoverage) {
+    return '已汇入骨架';
+  }
+  return '随请求携带（待汇入骨架）';
+}
+
+export function stageSummaryFullRebuildConfirmation(hasUnsavedChanges: boolean): string {
+  return [
+    ...(hasUnsavedChanges
+      ? ['当前还有尚未保存的阶段总结或骨架修改，继续会放弃这些修改。']
+      : []),
+    '将依据当前聊天原文重新生成全部可归档阶段总结，再用新总结干净重建全局剧情骨架。',
+    '现有阶段总结的人工修改会被替换；聊天原文不会改变。阶段总结会在全部成功后一次性替换，骨架重建失败时新总结仍会保留且旧骨架停止注入。',
+    '这可能需要多次 LLM 请求，确定继续吗？',
+  ].join('\n\n');
 }
 
 function summaryPreview(text: string): string {
@@ -114,6 +154,14 @@ export function stageSummaryManagerTemplate(): string {
           <i class="fa-solid fa-rotate" aria-hidden="true"></i><span>刷新列表</span>
         </button>
       </div>
+      <div class="story-echo-summary-maintenance-actions">
+        <button id="story-echo-summary-rebuild-all" class="menu_button story-echo-summary-rebuild-all" type="button">
+          <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>重建全部阶段总结与骨架</span>
+        </button>
+      </div>
+      <p class="story-echo-hint">
+        最近 S 条会随请求携带；更老的总结在骨架吸收后标记为“已汇入骨架”。全部重建会依据当前聊天原文重新生成所有可归档阶段总结，阶段总结会在全部成功后一次性替换，再从新总结干净重建骨架。
+      </p>
       <div id="story-echo-summary-count" class="story-echo-summary-count">尚无阶段总结。</div>
       <div id="story-echo-summary-list" class="story-echo-summary-list"></div>
       <nav id="story-echo-summary-pagination" class="story-echo-summary-pagination" aria-label="阶段总结分页" hidden>
@@ -183,6 +231,7 @@ export class StageSummaryMetadataManager {
   private skeletonDirty = false;
   private skeletonRevision = 0;
   private populatedSkeletonUpdatedAt: string | null = null;
+  private readonly settingsRepository = new SettingsRepository();
 
   constructor(private readonly repository: MemoryRepository) {}
 
@@ -301,6 +350,91 @@ export class StageSummaryMetadataManager {
     element<HTMLButtonElement>(panel, '#story-echo-summary-reload').addEventListener('click', () => {
       this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
+    });
+    element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all').addEventListener('click', async (event) => {
+      const confirmation = stageSummaryFullRebuildConfirmation(
+        this.editorDirty || this.skeletonDirty,
+      );
+      if (!globalThis.confirm(confirmation)) {
+        return;
+      }
+      const button = event.currentTarget as HTMLButtonElement;
+      const label = button.querySelector<HTMLElement>('span');
+      const idleLabel = label?.textContent ?? '重建全部阶段总结与骨架';
+      let summariesRebuilt = false;
+      button.disabled = true;
+      if (label) {
+        label.textContent = '正在重建…';
+      }
+      try {
+        const requestedChatId = getCurrentChatId();
+        const result = await storyEchoTaskCoordinator.enqueueManual(
+          '重建全部阶段总结与骨架',
+          async () => {
+            if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+              throw new Error('等待全部重建期间聊天已切换，已取消任务。');
+            }
+            const settings = this.settingsRepository.get();
+            const chat = getContext().chat;
+            const state = this.repository.getExisting();
+            const recent = selectRecentWindow(
+              chat,
+              settings.recentWindow.size,
+              settings.recentWindow.unit,
+            );
+            const outsideWindowTarget = recent && recent.retainedStartIndex > 0
+              ? recent.retainedStartIndex - 1
+              : -1;
+            const targetEndMessageId = Math.min(
+              chat.length - 1,
+              Math.max(
+                outsideWindowTarget,
+                state?.stageSummary.coveredThroughMessageId ?? -1,
+              ),
+            );
+            if (targetEndMessageId < 0) {
+              throw new Error('当前聊天还没有可用于重建阶段总结的窗口外历史。');
+            }
+            if (settings.memory.enabled) {
+              await extractionService.processThrough(targetEndMessageId);
+            }
+            const summaryResult = await stageSummaryService.rebuildAllThrough(
+              targetEndMessageId,
+            );
+            if (summaryResult.updatedChunks === 0) {
+              throw new Error('窗口外历史尚不足一个完整阶段总结批次，未替换现有结果。');
+            }
+            summariesRebuilt = true;
+            const skeletonResult = await storySkeletonService.rebuildAll();
+            return { summaryResult, skeletonResult };
+          },
+        );
+        this.resetSelection();
+        this.skeletonDirty = false;
+        notify.success(
+          `全部重建完成：生成 ${result.summaryResult.updatedChunks} 条阶段总结，骨架处理 ${result.skeletonResult.updatedChunks} 批。`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '全部重建失败。';
+        if (summariesRebuilt) {
+          this.resetSelection();
+          this.skeletonDirty = false;
+        }
+        notify.error(summariesRebuilt
+          ? `阶段总结已重建，但骨架重建失败并已停止注入：${message}`
+          : message);
+      } finally {
+        try {
+          await onChanged();
+        } catch {
+          // The operation result is already persisted; a later panel refresh
+          // will render it if the current refresh is interrupted.
+        }
+        if (label) {
+          label.textContent = idleLabel;
+        }
+        button.disabled = !this.repository.getExisting();
+      }
     });
     element<HTMLButtonElement>(panel, '#story-echo-summary-previous').addEventListener('click', () => {
       this.changePage(panel, this.currentPage - 1);
@@ -429,11 +563,13 @@ export class StageSummaryMetadataManager {
     const skeletonSave = element<HTMLButtonElement>(panel, '#story-echo-skeleton-save');
     const skeletonUpdate = element<HTMLButtonElement>(panel, '#story-echo-skeleton-update');
     const skeletonRebuild = element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild');
+    const summaryRebuildAll = element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all');
     const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
     skeletonText.disabled = !skeleton?.text;
     skeletonSave.disabled = !skeleton?.text;
     skeletonUpdate.disabled = !state;
     skeletonRebuild.disabled = !state;
+    summaryRebuildAll.disabled = !state;
     skeletonStatus.textContent = skeleton?.text
       ? [
           skeleton.stale ? '待重建，当前不会注入' : `覆盖到消息 ${skeleton.coveredThroughMessageId}`,
@@ -447,6 +583,8 @@ export class StageSummaryMetadataManager {
     }
 
     const entries = (state?.stageSummary.entries ?? []).filter((entry) => !entry.deleted);
+    const summaryWindowSize = this.settingsRepository.get().summary.windowSize;
+    const skeletonUsable = Boolean(state && storySkeletonIsUsable(state));
     const selected = entries.find((entry) => stageSummaryKey(entry) === this.selectedSummaryKey);
     if (this.selectedSummaryKey && !selected) {
       this.resetSelection();
@@ -501,6 +639,14 @@ export class StageSummaryMetadataManager {
       metadata.textContent = [
         `#${item.index + 1}`,
         `消息 ${item.entry.sourceStartMessageId}～${item.entry.sourceEndMessageId}`,
+        stageSummaryDeliveryStatus(
+          item.entry,
+          item.index,
+          entries.length,
+          summaryWindowSize,
+          skeleton?.coveredThroughMessageId ?? -1,
+          skeletonUsable,
+        ),
         formattedTime(item.entry.updatedAt),
         item.entry.manuallyEdited ? '人工编辑' : '',
       ].filter(Boolean).join(' · ');

@@ -3,8 +3,10 @@ import { MODULE_ID } from '../src/core/constants';
 import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import {
+  boundedPreviousStageSummary,
   buildStageSummaryGrounding,
   buildStageSummaryPrompt,
+  MAX_PREVIOUS_STAGE_SUMMARY_CHARACTERS,
   STAGE_SUMMARY_SYSTEM_PROMPT,
 } from '../src/summary/prompts';
 import {
@@ -141,8 +143,8 @@ describe('independent stage summaries', () => {
     expect(String(request?.prompt ?? '')).toContain('<matched_world_info>');
     expect(String(request?.prompt ?? '')).toContain('无我剑诀以忘我、忘剑为核心');
     expect(String(request?.systemPrompt ?? '')).toContain('为后续续写披露足够的上下文');
-    expect(String(request?.systemPrompt ?? '')).toContain('剧情事件与阶段结束状态以history_messages和authoritative_facts为依据');
-    expect(String(request?.systemPrompt ?? '')).toContain('不证明预设事件已经发生');
+    expect(String(request?.systemPrompt ?? '')).toContain('history_messages和authoritative_facts提供已经发生的剧情与有效变化');
+    expect(String(request?.systemPrompt ?? '')).toContain('世界书补足这些事件所在的设定语境');
   });
 
   it('grounds a correction batch with user-confirmed current facts instead of assistant speculation', () => {
@@ -463,7 +465,7 @@ describe('independent stage summaries', () => {
     expect(Number(warning?.details?.sourceCharacters)).toBeGreaterThan(100_000);
   });
 
-  it('creates immutable entries for successive batches without feeding an old summary back', async () => {
+  it('creates immutable entries and uses only the adjacent old summary for continuity', async () => {
     const generateRaw = vi.fn()
       .mockResolvedValueOnce(sectionedSummary('第一阶段总结'))
       .mockResolvedValueOnce(sectionedSummary('第二阶段总结'));
@@ -494,8 +496,160 @@ describe('independent stage summaries', () => {
       },
     ]);
     const secondPrompt = String(generateRaw.mock.calls[1]?.[0]?.prompt ?? '');
-    expect(secondPrompt).not.toContain('第一阶段总结');
+    expect(secondPrompt).toContain('<previous_stage_summary>\n第一阶段总结\n</previous_stage_summary>');
+    expect(secondPrompt).toContain('history_messages是本批剧情事实与较新变化的最高依据');
     expect(secondPrompt).toContain('消息 4 到 7');
+    expect(secondPrompt).not.toContain('"content":"u1"');
+  });
+
+  it('bounds adjacent-summary continuity context to 5000 characters from the tail', () => {
+    const previous = `开头线索-${'甲'.repeat(5_200)}-末尾伏笔`;
+    const bounded = boundedPreviousStageSummary(previous);
+
+    expect(MAX_PREVIOUS_STAGE_SUMMARY_CHARACTERS).toBe(5_000);
+    expect(Array.from(bounded)).toHaveLength(5_000);
+    expect(bounded).toContain('仅保留与本批衔接最相关的末尾内容');
+    expect(bounded).not.toContain('开头线索');
+    expect(bounded).toContain('末尾伏笔');
+  });
+
+  it('keeps an explicitly tiny adjacent-summary bound exact', () => {
+    const bounded = boundedPreviousStageSummary('开头内容-中间内容-末尾伏笔', 4);
+
+    expect(Array.from(bounded)).toHaveLength(4);
+    expect(bounded).toBe('末尾伏笔');
+  });
+
+  it('atomically replaces all stage summaries and marks the old skeleton stale', async () => {
+    const generateRaw = vi.fn()
+      .mockResolvedValueOnce('重建后的第一阶段。')
+      .mockResolvedValueOnce('重建后的第二阶段。');
+    const installed = installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+      { is_user: true, mes: 'u2' },
+      { is_user: false, mes: 'a2' },
+      { is_user: true, mes: 'u3' },
+      { is_user: false, mes: 'a3' },
+      { is_user: true, mes: 'u4' },
+      { is_user: false, mes: 'a4' },
+    ], generateRaw, 2);
+    installed.state.stageSummary = {
+      entries: [{
+        text: '旧第一阶段。',
+        sourceStartMessageId: 0,
+        sourceEndMessageId: 3,
+        sourceHash: 'old-1',
+        updatedAt: '2026-07-20T00:00:00.000Z',
+      }, {
+        text: '旧第二阶段。',
+        sourceStartMessageId: 4,
+        sourceEndMessageId: 7,
+        sourceHash: 'old-2',
+        updatedAt: '2026-07-20T01:00:00.000Z',
+        manuallyEdited: true,
+      }],
+      coveredThroughMessageId: 7,
+      coveredThroughHash: 'old-2',
+      updatedAt: '2026-07-20T01:00:00.000Z',
+    };
+    installed.state.storySkeleton = {
+      text: '仍由旧阶段总结支撑的骨架。',
+      coveredThroughMessageId: 3,
+      sourceHash: 'old-skeleton',
+      updatedAt: '2026-07-20T02:00:00.000Z',
+    };
+    installed.context.saveMetadata.mockClear();
+
+    const result = await new StageSummaryService().rebuildAllThrough(7);
+
+    expect(result.updatedChunks).toBe(2);
+    expect(result.state?.stageSummary.entries.map((entry) => entry.text)).toEqual([
+      '重建后的第一阶段。',
+      '重建后的第二阶段。',
+    ]);
+    expect(result.state?.stageSummary.entries.some((entry) => entry.manuallyEdited)).toBe(false);
+    expect(result.state?.storySkeleton).toMatchObject({
+      text: '仍由旧阶段总结支撑的骨架。',
+      stale: true,
+    });
+    expect(installed.context.saveMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the complete old summary set when a rebuild batch fails', async () => {
+    const generateRaw = vi.fn()
+      .mockResolvedValueOnce('尚未提交的第一阶段。')
+      .mockRejectedValueOnce(new Error('provider unavailable'));
+    const installed = installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+      { is_user: true, mes: 'u2' },
+      { is_user: false, mes: 'a2' },
+      { is_user: true, mes: 'u3' },
+      { is_user: false, mes: 'a3' },
+      { is_user: true, mes: 'u4' },
+      { is_user: false, mes: 'a4' },
+    ], generateRaw, 2);
+    const oldEntries = [{
+      text: '必须保留的旧总结。',
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 7,
+      sourceHash: 'old-all',
+      updatedAt: '2026-07-20T00:00:00.000Z',
+    }];
+    installed.state.stageSummary = {
+      entries: oldEntries.map((entry) => ({ ...entry })),
+      coveredThroughMessageId: 7,
+      coveredThroughHash: 'old-all',
+      updatedAt: oldEntries[0]!.updatedAt,
+    };
+    installed.state.storySkeleton = {
+      text: '必须保留的旧骨架。',
+      coveredThroughMessageId: 7,
+      sourceHash: 'old-skeleton',
+    };
+
+    await expect(new StageSummaryService().rebuildAllThrough(7)).rejects.toThrow(
+      'provider unavailable',
+    );
+
+    expect(installed.state.stageSummary.entries).toEqual(oldEntries);
+    expect(installed.state.storySkeleton).toEqual({
+      text: '必须保留的旧骨架。',
+      coveredThroughMessageId: 7,
+      sourceHash: 'old-skeleton',
+    });
+    expect(installed.state.metrics.summaryFailures).toBe(1);
+  });
+
+  it('discards a full rebuild when an earlier completed source batch changes later', async () => {
+    let context: ReturnType<typeof installContext>['context'];
+    const generateRaw = vi.fn(async () => {
+      if (generateRaw.mock.calls.length === 2) {
+        context.chat[0]!.mes = '第一批已在后续请求期间被编辑';
+      }
+      return generateRaw.mock.calls.length === 1
+        ? '尚未提交的第一阶段。'
+        : '尚未提交的第二阶段。';
+    });
+    const installed = installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+      { is_user: true, mes: 'u2' },
+      { is_user: false, mes: 'a2' },
+      { is_user: true, mes: 'u3' },
+      { is_user: false, mes: 'a3' },
+      { is_user: true, mes: 'u4' },
+      { is_user: false, mes: 'a4' },
+    ], generateRaw, 2);
+    context = installed.context;
+
+    await expect(new StageSummaryService().rebuildAllThrough(7))
+      .rejects.toThrow(/历史原文发生变化/);
+
+    expect(installed.state.stageSummary.entries).toEqual([]);
+    expect(installed.state.stageSummary.coveredThroughMessageId).toBe(-1);
+    expect(installed.state.metrics.summaryFailures).toBe(1);
   });
 
   it('splits summary batches at an explicit story-phase boundary', async () => {

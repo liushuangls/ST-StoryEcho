@@ -449,6 +449,28 @@
   white-space: nowrap;
 }
 
+#story-echo-settings .story-echo-summary-maintenance-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+#story-echo-settings .story-echo-summary-maintenance-actions .menu_button {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 2.55rem;
+  margin: 0;
+}
+
+#story-echo-settings .story-echo-summary-rebuild-all {
+  border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 72%, var(--SmartThemeBorderColor));
+}
+
 #story-echo-settings .story-echo-summary-list {
   display: flex;
   flex-direction: column;

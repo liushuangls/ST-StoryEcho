@@ -3,7 +3,9 @@ import type { StageSummaryEntry } from '../src/core/types';
 import { paginateItems } from '../src/ui/memory-manager';
 import {
   SUMMARY_PAGE_SIZE,
+  stageSummaryDeliveryStatus,
   stageSummaryDeletionMode,
+  stageSummaryFullRebuildConfirmation,
   stageSummaryKey,
   stageSummaryManagerTemplate,
   toggleSummarySelection,
@@ -35,6 +37,26 @@ describe('stage summary manager selection', () => {
 
     expect(stageSummaryDeletionMode(entries, entries[2]!)).toBe('restore-raw-tail');
     expect(stageSummaryDeletionMode(entries, entries[0]!)).toBe('keep-covered-tombstone');
+  });
+
+  it('labels recent, absorbed, and pending summaries by their real request path', () => {
+    const entries = Array.from({ length: 6 }, (_, index) => summary(index));
+
+    expect(stageSummaryDeliveryStatus(entries[0]!, 0, entries.length, 4, 19, true))
+      .toBe('已汇入骨架');
+    expect(stageSummaryDeliveryStatus(entries[1]!, 1, entries.length, 4, 9, true))
+      .toBe('随请求携带（待汇入骨架）');
+    expect(stageSummaryDeliveryStatus(entries[2]!, 2, entries.length, 4, 59, true))
+      .toBe('随请求携带');
+    expect(stageSummaryDeliveryStatus(entries[0]!, 0, entries.length, 4, 59, false))
+      .toBe('随请求携带（待汇入骨架）');
+  });
+
+  it('warns before a full rebuild discards unsaved editor changes', () => {
+    expect(stageSummaryFullRebuildConfirmation(true))
+      .toContain('尚未保存的阶段总结或骨架修改');
+    expect(stageSummaryFullRebuildConfirmation(false))
+      .not.toContain('尚未保存的阶段总结或骨架修改');
   });
 });
 
@@ -72,6 +94,9 @@ describe('stage summary manager pagination and template', () => {
     expect(template).toContain('正文可按剧情需要自由分段');
     expect(template).not.toContain('必须保留六个分级标题');
     expect(template).toContain('id="story-echo-summary-search"');
+    expect(template).toContain('id="story-echo-summary-rebuild-all"');
+    expect(template).toContain('重建全部阶段总结与骨架');
+    expect(template).toContain('全部成功后一次性替换');
     expect(template).toContain('id="story-echo-summary-list"');
     expect(template).toContain('aria-label="阶段总结分页"');
     expect(template).toContain('id="story-echo-summary-editor-text"');

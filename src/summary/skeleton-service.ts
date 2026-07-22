@@ -15,7 +15,9 @@ import { SettingsRepository } from '../settings/repository';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import {
   buildStorySkeletonPrompt,
+  buildStorySkeletonVerificationPrompt,
   STORY_SKELETON_SYSTEM_PROMPT,
+  STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
   type StorySkeletonPromptMode,
 } from './skeleton-prompts';
 import {
@@ -338,6 +340,27 @@ export class StorySkeletonService {
     }
   }
 
+  private async verifyDraft(
+    settings: StoryEchoSettings,
+    options: {
+      existingSkeleton: string;
+      sourceEntries: readonly StageSummaryEntry[];
+      mode: StorySkeletonPromptMode;
+      worldBackground: string;
+      candidateSkeleton: string;
+    },
+  ): Promise<string> {
+    const raw = await completeWithConfiguredProvider(settings, {
+      system: STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
+      prompt: buildStorySkeletonVerificationPrompt({
+        ...options,
+        maxTokens: settings.summary.skeletonMaxTokens,
+      }),
+      maxTokens: settings.summary.skeletonMaxTokens,
+    });
+    return normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+  }
+
   private validateCleanBuildSources(
     state: StoryEchoChatState,
     sourceSnapshot: readonly StageSummaryEntry[],
@@ -352,6 +375,38 @@ export class StorySkeletonService {
     }
     if (!sameSkeletonRevision(live.storySkeleton, skeletonSnapshot)) {
       throw new Error('全局剧情骨架生成期间骨架被人工编辑，已丢弃本次结果。');
+    }
+    return live;
+  }
+
+  private validateIncrementalSources(
+    state: StoryEchoChatState,
+    settings: StoryEchoSettings,
+    sourceEntry: StageSummaryEntry,
+    priorSkeleton: StorySkeleton,
+    sourceSnapshot: readonly StageSummaryEntry[],
+    coveredThroughMessageId: number,
+    phase: '生成' | '校验',
+  ): StoryEchoChatState {
+    const live = this.memoryRepository.getExisting();
+    if (!live || live.ownerChatId !== state.ownerChatId) {
+      throw new Error(`全局剧情骨架${phase}期间聊天发生切换，已丢弃本次结果。`);
+    }
+    const liveArchived = archivedStageSummaryEntries(live, settings.summary.windowSize);
+    const liveEntry = liveArchived.find(
+      (entry) => sourceRangeKey(entry) === sourceRangeKey(sourceEntry),
+    );
+    if (!liveEntry || !sameStageSummaryEntries([liveEntry], [sourceEntry])) {
+      throw new Error(`全局剧情骨架${phase}期间归档总结发生变化，已丢弃本次结果。`);
+    }
+    if (!sameSkeletonRevision(live.storySkeleton, priorSkeleton)) {
+      throw new Error(`全局剧情骨架${phase}期间骨架被人工编辑，已丢弃本次结果。`);
+    }
+    const livePrefix = live.stageSummary.entries.filter(
+      (entry) => entry.sourceEndMessageId <= coveredThroughMessageId,
+    );
+    if (!sameStageSummaryEntries(livePrefix, sourceSnapshot)) {
+      throw new Error(`全局剧情骨架${phase}期间历史来源发生变化，已丢弃本次结果。`);
     }
     return live;
   }
@@ -385,10 +440,11 @@ export class StorySkeletonService {
       const last = batch.at(-1)!;
       const worldBackground = await this.buildWorldBackground(state, batch, settings);
       const mode = cleanBuildPromptMode(options.rebuild, staleAtStart, index > 0);
+      const acceptedPreviousSkeleton = draft;
       const raw = await completeWithConfiguredProvider(settings, {
         system: STORY_SKELETON_SYSTEM_PROMPT,
         prompt: buildStorySkeletonPrompt({
-          existingSkeleton: draft,
+          existingSkeleton: acceptedPreviousSkeleton,
           sourceEntries: batch,
           maxTokens: settings.summary.skeletonMaxTokens,
           mode,
@@ -396,7 +452,18 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
       });
-      draft = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      const candidateSkeleton = normalizeStorySkeletonText(
+        raw,
+        settings.summary.skeletonMaxTokens,
+      );
+      this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
+      draft = await this.verifyDraft(settings, {
+        existingSkeleton: acceptedPreviousSkeleton,
+        sourceEntries: batch,
+        mode,
+        worldBackground,
+        candidateSkeleton,
+      });
       processedEntries += batch.length;
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       options.onProgress?.({
@@ -428,6 +495,7 @@ export class StorySkeletonService {
       ),
       skeletonCharacters: draft.length,
       skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+      factVerified: true,
       mode: options.rebuild ? 'full-rebuild' : staleAtStart ? 'stale-rebuild' : 'initial-build',
     });
     await this.memoryRepository.save(live);
@@ -484,27 +552,35 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
       });
-
-      const live = this.memoryRepository.getExisting();
-      if (!live || live.ownerChatId !== state.ownerChatId) {
-        throw new Error('全局剧情骨架生成期间聊天发生切换，已丢弃本次结果。');
-      }
-      const liveArchived = archivedStageSummaryEntries(live, settings.summary.windowSize);
-      const liveEntry = liveArchived.find((entry) => sourceRangeKey(entry) === sourceRangeKey(sourceEntry));
-      if (!liveEntry || !sameStageSummaryEntries([liveEntry], [sourceEntry])) {
-        throw new Error('全局剧情骨架生成期间归档总结发生变化，已丢弃本次结果。');
-      }
-      if (!sameSkeletonRevision(live.storySkeleton, priorSkeleton)) {
-        throw new Error('全局剧情骨架生成期间骨架被人工编辑，已丢弃本次结果。');
-      }
-      const livePrefix = live.stageSummary.entries.filter(
-        (entry) => entry.sourceEndMessageId <= coveredThroughMessageId,
+      const candidateSkeleton = normalizeStorySkeletonText(
+        raw,
+        settings.summary.skeletonMaxTokens,
       );
-      if (!sameStageSummaryEntries(livePrefix, sourceSnapshot)) {
-        throw new Error('全局剧情骨架生成期间历史来源发生变化，已丢弃本次结果。');
-      }
-
-      const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      this.validateIncrementalSources(
+        state,
+        settings,
+        sourceEntry,
+        priorSkeleton,
+        sourceSnapshot,
+        coveredThroughMessageId,
+        '生成',
+      );
+      const text = await this.verifyDraft(settings, {
+        existingSkeleton: priorSkeleton.text,
+        sourceEntries: [sourceEntry],
+        mode: 'incremental-update',
+        worldBackground,
+        candidateSkeleton,
+      });
+      const live = this.validateIncrementalSources(
+        state,
+        settings,
+        sourceEntry,
+        priorSkeleton,
+        sourceSnapshot,
+        coveredThroughMessageId,
+        '校验',
+      );
       const updatedAt = new Date().toISOString();
       state = live;
       state.storySkeleton = {
@@ -524,6 +600,7 @@ export class StorySkeletonService {
         sourceCharacters: skeletonSourceEntryCharacters(sourceEntry),
         skeletonCharacters: text.length,
         skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+        factVerified: true,
         mode: 'incremental-update',
       });
       await this.memoryRepository.save(state);

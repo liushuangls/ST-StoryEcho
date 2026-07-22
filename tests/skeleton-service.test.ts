@@ -5,7 +5,10 @@ import { MemoryRepository } from '../src/memory/repository';
 import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { StorySkeletonService } from '../src/summary/skeleton-service';
-import { STORY_SKELETON_SYSTEM_PROMPT } from '../src/summary/skeleton-prompts';
+import {
+  STORY_SKELETON_SYSTEM_PROMPT,
+  STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
+} from '../src/summary/skeleton-prompts';
 import {
   MAX_SKELETON_SOURCE_BATCH_CHARACTERS,
   skeletonSourceBatchCharacters,
@@ -37,7 +40,12 @@ function stageEntry(index: number): StageSummaryEntry {
 function installContext(
   entries: StageSummaryEntry[],
   generateRaw: ReturnType<typeof vi.fn>,
-  options: { windowSize?: number; skeletonMaxTokens?: number } = {},
+  options: {
+    windowSize?: number;
+    skeletonMaxTokens?: number;
+    verificationRaw?: string;
+    verificationError?: Error;
+  } = {},
 ) {
   const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
   settings.enabled = true;
@@ -55,6 +63,21 @@ function installContext(
     { length: (entries.at(-1)?.sourceEndMessageId ?? -1) + 1 },
     (_, index) => ({ is_user: index % 2 === 0, mes: `消息${index}` }),
   );
+  const routedGenerateRaw = vi.fn(async (request: { prompt?: string; systemPrompt?: string }) => {
+    if (String(request.systemPrompt ?? '').includes(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT)) {
+      if (options.verificationError) {
+        throw options.verificationError;
+      }
+      if (options.verificationRaw !== undefined) {
+        return options.verificationRaw;
+      }
+      const candidate = String(request.prompt ?? '').match(
+        /<candidate_story_skeleton>\n([\s\S]*?)\n<\/candidate_story_skeleton>/u,
+      )?.[1];
+      return candidate ?? skeletonText();
+    }
+    return generateRaw(request);
+  });
   const context = {
     chat,
     chatId: 'chat-id',
@@ -62,13 +85,13 @@ function installContext(
     chatMetadata: { [MODULE_ID]: state },
     saveSettingsDebounced: vi.fn(),
     saveMetadata: vi.fn(async () => undefined),
-    generateRaw,
+    generateRaw: routedGenerateRaw,
     getCurrentChatId: () => 'chat-id',
     getTokenCountAsync: vi.fn(async (text: string) => Array.from(text).length),
     getSortedWorldInfoEntries: vi.fn(async (): Promise<SillyTavernWorldInfoEntry[]> => []),
   };
   vi.stubGlobal('SillyTavern', { getContext: () => context });
-  return { context, settings, state };
+  return { context, settings, state, routedGenerateRaw };
 }
 
 afterEach(() => {
@@ -144,7 +167,28 @@ describe('global story skeleton lifecycle', () => {
     expect(prompt).toContain('用户角色长期持有太虚剑');
     expect(prompt).toContain('用户角色开始修炼无我剑诀');
     expect(prompt).not.toContain('第3阶段');
-    expect(String(request?.systemPrompt ?? '')).toContain('背景设定，不是已经发生剧情的证据');
+    expect(String(request?.systemPrompt ?? '')).toContain('旧骨架与阶段总结提供已经发生的剧情');
+  });
+
+  it('fact-checks every generated skeleton draft before committing it', async () => {
+    const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
+    entries[0]!.text = '海伊是金丹中期修士；她携带一具元婴中期玄冰傀儡。';
+    const candidate = skeletonText('海伊是元婴中期修士，并已经开始炼化异界碎片。');
+    const corrected = skeletonText('海伊是金丹中期修士，携带一具元婴中期玄冰傀儡；炼化异界碎片仍只是讨论。');
+    const installed = installContext(
+      entries,
+      vi.fn(async () => candidate),
+      { windowSize: 4, verificationRaw: corrected },
+    );
+
+    const result = await new StorySkeletonService().processNextIfNeeded();
+
+    expect(result.state?.storySkeleton.text).toBe(corrected);
+    expect(installed.routedGenerateRaw).toHaveBeenCalledTimes(2);
+    const verificationRequest = installed.routedGenerateRaw.mock.calls[1]?.[0];
+    expect(String(verificationRequest?.systemPrompt ?? '')).toContain('事实一致性编辑器');
+    expect(String(verificationRequest?.prompt ?? '')).toContain(candidate);
+    expect(String(verificationRequest?.prompt ?? '')).toContain(entries[0]!.text);
   });
 
   it('fully rebuilds cleanly from all summaries and discards the saved old skeleton', async () => {
@@ -254,6 +298,28 @@ describe('global story skeleton lifecycle', () => {
 
     expect(state.storySkeleton.text).toBe(originalText);
     expect(state.storySkeleton.coveredThroughMessageId).toBe(entries[0]!.sourceEndMessageId);
+    expect(state.storySkeleton.manuallyEdited).toBe(true);
+  });
+
+  it('keeps the saved skeleton intact when fact verification fails', async () => {
+    const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
+    const originalText = skeletonText('核验失败后应继续保留的旧骨架。');
+    const { state } = installContext(
+      entries,
+      vi.fn(async () => skeletonText('尚未通过核验的草稿。')),
+      { windowSize: 4, verificationError: new Error('verification unavailable') },
+    );
+    state.storySkeleton = {
+      text: originalText,
+      coveredThroughMessageId: entries[0]!.sourceEndMessageId,
+      sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
+      manuallyEdited: true,
+    };
+
+    await expect(new StorySkeletonService().rebuildAll())
+      .rejects.toThrow('verification unavailable');
+
+    expect(state.storySkeleton.text).toBe(originalText);
     expect(state.storySkeleton.manuallyEdited).toBe(true);
   });
 
