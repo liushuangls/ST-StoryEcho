@@ -417,7 +417,7 @@ export class StageSummaryMetadataManager {
               if (label) {
                 label.textContent = progress.pendingEntries > 0
                   ? `全局骨架：剩余 ${progress.pendingEntries} 条总结`
-                  : '正在核验并保存全局骨架…';
+                  : '正在保存全局骨架…';
               }
             });
             return { summaryResult, skeletonResult };

@@ -14,19 +14,13 @@ import { buildStorySkeletonWorldInfoReferenceContext } from '../reference/contex
 import { SettingsRepository } from '../settings/repository';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import {
-  buildStorySkeletonQualityRepairPrompt,
   buildStorySkeletonPrompt,
-  buildStorySkeletonVerificationPrompt,
-  STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT,
   STORY_SKELETON_SYSTEM_PROMPT,
-  STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
   type StorySkeletonPromptMode,
 } from './skeleton-prompts';
-import { storySkeletonQualityIssues } from './skeleton-quality';
 import {
   activeStageSummaryEntries,
   archivedStageSummaryEntries,
-  normalizeStorySkeletonDraft,
   normalizeStorySkeletonText,
   pendingArchivedStageSummaryEntries,
   skeletonSourceBatches,
@@ -344,62 +338,6 @@ export class StorySkeletonService {
     }
   }
 
-  private async verifyDraft(
-    settings: StoryEchoSettings,
-    options: {
-      state: StoryEchoChatState;
-      existingSkeleton: string;
-      sourceEntries: readonly StageSummaryEntry[];
-      mode: StorySkeletonPromptMode;
-      worldBackground: string;
-      candidateSkeleton: string;
-    },
-  ): Promise<string> {
-    const candidateQualityFindings = storySkeletonQualityIssues(options.candidateSkeleton);
-    const raw = await completeWithConfiguredProvider(settings, {
-      system: STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
-      prompt: buildStorySkeletonVerificationPrompt({
-        ...options,
-        maxTokens: settings.summary.skeletonMaxTokens,
-        qualityFindings: candidateQualityFindings,
-      }),
-      maxTokens: settings.summary.skeletonMaxTokens,
-    });
-    const verified = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
-    const qualityFindings = storySkeletonQualityIssues(verified);
-    if (qualityFindings.length === 0) {
-      return verified;
-    }
-
-    logger.info('全局剧情骨架事实校对后命中质量复核，将定向修订当前骨架。', {
-      findings: qualityFindings.map((finding) => finding.kind),
-    });
-    recordDebugTrace(options.state, settings.debug, 'summary', '全局剧情骨架进入定向质量修订。', {
-      findings: qualityFindings.map((finding) => `${finding.kind}: ${finding.excerpt}`).join(' | '),
-    });
-    const repairedRaw = await completeWithConfiguredProvider(settings, {
-      system: STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT,
-      prompt: buildStorySkeletonQualityRepairPrompt({
-        ...options,
-        maxTokens: settings.summary.skeletonMaxTokens,
-        candidateSkeleton: verified,
-        qualityFindings,
-      }),
-      maxTokens: settings.summary.skeletonMaxTokens,
-    });
-    const repaired = normalizeStorySkeletonText(
-      repairedRaw,
-      settings.summary.skeletonMaxTokens,
-    );
-    const remainingFindings = storySkeletonQualityIssues(repaired);
-    if (remainingFindings.length > 0) {
-      throw new Error(
-        `全局剧情骨架定向修订后仍有 ${remainingFindings.length} 处关系或状态内容未完成事件化，已保留旧骨架。`,
-      );
-    }
-    return repaired;
-  }
-
   private validateCleanBuildSources(
     state: StoryEchoChatState,
     sourceSnapshot: readonly StageSummaryEntry[],
@@ -425,27 +363,26 @@ export class StorySkeletonService {
     priorSkeleton: StorySkeleton,
     sourceSnapshot: readonly StageSummaryEntry[],
     coveredThroughMessageId: number,
-    phase: '生成' | '校验',
   ): StoryEchoChatState {
     const live = this.memoryRepository.getExisting();
     if (!live || live.ownerChatId !== state.ownerChatId) {
-      throw new Error(`全局剧情骨架${phase}期间聊天发生切换，已丢弃本次结果。`);
+      throw new Error('全局剧情骨架生成期间聊天发生切换，已丢弃本次结果。');
     }
     const liveArchived = archivedStageSummaryEntries(live, settings.summary.windowSize);
     const liveEntry = liveArchived.find(
       (entry) => sourceRangeKey(entry) === sourceRangeKey(sourceEntry),
     );
     if (!liveEntry || !sameStageSummaryEntries([liveEntry], [sourceEntry])) {
-      throw new Error(`全局剧情骨架${phase}期间归档总结发生变化，已丢弃本次结果。`);
+      throw new Error('全局剧情骨架生成期间归档总结发生变化，已丢弃本次结果。');
     }
     if (!sameSkeletonRevision(live.storySkeleton, priorSkeleton)) {
-      throw new Error(`全局剧情骨架${phase}期间骨架被人工编辑，已丢弃本次结果。`);
+      throw new Error('全局剧情骨架生成期间骨架被人工编辑，已丢弃本次结果。');
     }
     const livePrefix = live.stageSummary.entries.filter(
       (entry) => entry.sourceEndMessageId <= coveredThroughMessageId,
     );
     if (!sameStageSummaryEntries(livePrefix, sourceSnapshot)) {
-      throw new Error(`全局剧情骨架${phase}期间历史来源发生变化，已丢弃本次结果。`);
+      throw new Error('全局剧情骨架生成期间历史来源发生变化，已丢弃本次结果。');
     }
     return live;
   }
@@ -491,20 +428,7 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
       });
-      // The first-pass draft may overshoot the configured budget because the
-      // provider tokenizer and StoryEcho's conservative estimator differ.
-      // Let the mandatory verification pass compress it; only the verified
-      // result must satisfy the configured injection limit.
-      const candidateSkeleton = normalizeStorySkeletonDraft(raw);
-      this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
-      draft = await this.verifyDraft(settings, {
-        state,
-        existingSkeleton: acceptedPreviousSkeleton,
-        sourceEntries: batch,
-        mode,
-        worldBackground,
-        candidateSkeleton,
-      });
+      draft = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
       processedEntries += batch.length;
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       options.onProgress?.({
@@ -536,7 +460,7 @@ export class StorySkeletonService {
       ),
       skeletonCharacters: draft.length,
       skeletonMaxTokens: settings.summary.skeletonMaxTokens,
-      factVerified: true,
+      llmCallsPerBatch: 1,
       mode: options.rebuild ? 'full-rebuild' : staleAtStart ? 'stale-rebuild' : 'initial-build',
     });
     await this.memoryRepository.save(live);
@@ -593,24 +517,7 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
       });
-      const candidateSkeleton = normalizeStorySkeletonDraft(raw);
-      this.validateIncrementalSources(
-        state,
-        settings,
-        sourceEntry,
-        priorSkeleton,
-        sourceSnapshot,
-        coveredThroughMessageId,
-        '生成',
-      );
-      const text = await this.verifyDraft(settings, {
-        state,
-        existingSkeleton: priorSkeleton.text,
-        sourceEntries: [sourceEntry],
-        mode: 'incremental-update',
-        worldBackground,
-        candidateSkeleton,
-      });
+      const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
       const live = this.validateIncrementalSources(
         state,
         settings,
@@ -618,7 +525,6 @@ export class StorySkeletonService {
         priorSkeleton,
         sourceSnapshot,
         coveredThroughMessageId,
-        '校验',
       );
       const updatedAt = new Date().toISOString();
       state = live;
@@ -639,7 +545,7 @@ export class StorySkeletonService {
         sourceCharacters: skeletonSourceEntryCharacters(sourceEntry),
         skeletonCharacters: text.length,
         skeletonMaxTokens: settings.summary.skeletonMaxTokens,
-        factVerified: true,
+        llmCallsPerBatch: 1,
         mode: 'incremental-update',
       });
       await this.memoryRepository.save(state);
