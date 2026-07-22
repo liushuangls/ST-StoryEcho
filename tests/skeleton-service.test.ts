@@ -6,6 +6,7 @@ import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { StorySkeletonService } from '../src/summary/skeleton-service';
 import {
+  STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT,
   STORY_SKELETON_SYSTEM_PROMPT,
   STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
 } from '../src/summary/skeleton-prompts';
@@ -45,6 +46,8 @@ function installContext(
     skeletonMaxTokens?: number;
     verificationRaw?: string;
     verificationError?: Error;
+    qualityRepairRaw?: string;
+    qualityRepairError?: Error;
   } = {},
 ) {
   const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
@@ -64,6 +67,18 @@ function installContext(
     (_, index) => ({ is_user: index % 2 === 0, mes: `消息${index}` }),
   );
   const routedGenerateRaw = vi.fn(async (request: { prompt?: string; systemPrompt?: string }) => {
+    if (String(request.systemPrompt ?? '').includes(STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT)) {
+      if (options.qualityRepairError) {
+        throw options.qualityRepairError;
+      }
+      if (options.qualityRepairRaw !== undefined) {
+        return options.qualityRepairRaw;
+      }
+      const candidate = String(request.prompt ?? '').match(
+        /<candidate_story_skeleton>\n([\s\S]*?)\n<\/candidate_story_skeleton>/u,
+      )?.[1];
+      return candidate ?? skeletonText();
+    }
     if (String(request.systemPrompt ?? '').includes(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT)) {
       if (options.verificationError) {
         throw options.verificationError;
@@ -121,6 +136,8 @@ describe('global story skeleton lifecycle', () => {
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('每条关系句的主体是可见互动、明确原话、决定或行动');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('最后一节直接以既有起因事件或已安排的下一触发点开篇');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).not.toContain('恋爱确认');
+    expect(STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT).toContain('定向修订');
+    expect(STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT).toContain('关系类片段');
   });
 
   it('first builds at S+1 but includes every current summary regardless of S', async () => {
@@ -226,6 +243,62 @@ describe('global story skeleton lifecycle', () => {
     expect(installed.routedGenerateRaw).toHaveBeenCalledTimes(2);
     const verificationRequest = installed.routedGenerateRaw.mock.calls[1]?.[0];
     expect(String(verificationRequest?.prompt ?? '')).toContain(overBudgetCandidate);
+  });
+
+  it('repairs relationship labels and state snapshots only when verification leaves them behind', async () => {
+    const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
+    const verifiedWithQualityIssues = [
+      '# 蜀山纪事',
+      '刘爽赠出雪莲簪，姜梦收下并当面佩戴；两人已进入信任期，但没有恋爱确认。',
+      '截至当日晚间，刘爽已是金丹后期，灵力稳定，银纹长剑正在器堂修复。',
+    ].join('\n\n');
+    const repaired = skeletonText(
+      '刘爽赠出雪莲簪，姜梦收下并当面佩戴；这次回应使二人相处更自然。',
+    );
+    const installed = installContext(
+      entries,
+      vi.fn(async () => skeletonText('第一遍候选骨架。')),
+      {
+        windowSize: 4,
+        verificationRaw: verifiedWithQualityIssues,
+        qualityRepairRaw: repaired,
+      },
+    );
+
+    const result = await new StorySkeletonService().processNextIfNeeded();
+
+    expect(result.state?.storySkeleton.text).toBe(repaired);
+    expect(installed.routedGenerateRaw).toHaveBeenCalledTimes(3);
+    const repairRequest = installed.routedGenerateRaw.mock.calls[2]?.[0];
+    expect(String(repairRequest?.systemPrompt ?? '')).toContain('质量修订编辑器');
+    expect(String(repairRequest?.prompt ?? '')).toContain('relationship-stage');
+    expect(String(repairRequest?.prompt ?? '')).toContain('没有恋爱确认');
+    expect(String(repairRequest?.prompt ?? '')).toContain('state-snapshot');
+    expect(String(repairRequest?.prompt ?? '')).toContain(entries[0]!.text);
+  });
+
+  it('keeps the saved skeleton when targeted quality repair still leaves a known issue', async () => {
+    const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
+    const unresolved = skeletonText('两人已进入信任期，但没有恋爱确认。');
+    const installed = installContext(
+      entries,
+      vi.fn(async () => skeletonText('第一遍候选骨架。')),
+      {
+        windowSize: 4,
+        verificationRaw: unresolved,
+        qualityRepairRaw: unresolved,
+      },
+    );
+    const saved = skeletonText('原有骨架保持不变。');
+    installed.state.storySkeleton = {
+      text: saved,
+      coveredThroughMessageId: entries[0]!.sourceEndMessageId,
+      sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
+    };
+
+    await expect(new StorySkeletonService().rebuildAll())
+      .rejects.toThrow('已保留旧骨架');
+    expect(installed.state.storySkeleton.text).toBe(saved);
   });
 
   it('fully rebuilds cleanly from all summaries and discards the saved old skeleton', async () => {

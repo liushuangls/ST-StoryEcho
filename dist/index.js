@@ -2761,7 +2761,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.14";
+var EXTENSION_VERSION = "0.20.15";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -8112,6 +8112,20 @@ var STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u540D\u957F\
 12. \u5BF9\u5168\u7BC7\u505A\u8BED\u4E49\u53BB\u91CD\u548C\u5386\u53F2\u8303\u56F4\u6821\u5BF9\uFF1A\u4E3A\u6BCF\u4EF6\u4E8B\u4FDD\u7559\u4E00\u4E2A\u4E3B\u8981\u53D9\u8FF0\u4F4D\u7F6E\uFF0C\u540E\u6587\u53EA\u5199\u65B0\u7684\u7ED3\u679C\u3002\u6240\u6709\u6BB5\u843D\u90FD\u56F4\u7ED5\u5DF2\u53D1\u751F\u4E8B\u4EF6\u3001\u56E0\u679C\u53D8\u5316\u6216\u4E0B\u4E00\u89E6\u53D1\u70B9\u5C55\u5F00\uFF1B\u72B6\u6001\u5FEB\u7167\u4E2D\u7684\u6709\u6548\u4FE1\u606F\u5206\u522B\u63A5\u56DE\u9020\u6210\u5B83\u7684\u5386\u53F2\u8282\u70B9\u3002\u6700\u540E\u4E00\u8282\u76F4\u63A5\u4EE5\u65E2\u6709\u8D77\u56E0\u4E8B\u4EF6\u6216\u5DF2\u5B89\u6392\u7684\u4E0B\u4E00\u89E6\u53D1\u70B9\u5F00\u7BC7\uFF0C\u4F7F\u6B63\u6587\u4FDD\u6301\u4E3A\u4E8B\u4EF6\u53F2\u3002
 
 \u53EA\u8F93\u51FA\u6821\u5BF9\u540E\u7684\u5B8C\u6574\u4E2D\u6587\u9AA8\u67B6\u6B63\u6587\u3002`;
+var STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u540D\u957F\u7BC7\u89D2\u8272\u626E\u6F14\u5386\u53F2\u9AA8\u67B6\u7684\u8D28\u91CF\u4FEE\u8BA2\u7F16\u8F91\u5668\u3002
+
+\u5DE5\u4F5C\u76EE\u6807
+\u4F9D\u636E\u6765\u6E90\u8D44\u6599\u548Cquality_findings\uFF0C\u5BF9\u5DF2\u7ECF\u5B8C\u6210\u4E8B\u5B9E\u6821\u5BF9\u7684\u9AA8\u67B6\u505A\u4E00\u6B21\u5B9A\u5411\u4FEE\u8BA2\uFF0C\u4EA4\u4ED8\u5B8C\u6574\u4E2D\u6587\u9AA8\u67B6\u6B63\u6587\u3002
+
+\u4FEE\u8BA2\u539F\u5219
+1. quality_findings\u53EA\u6807\u51FA\u9700\u8981\u590D\u6838\u7684\u5019\u9009\u7247\u6BB5\uFF0C\u4E0D\u63D0\u4F9B\u65B0\u5267\u60C5\u4E8B\u5B9E\u3002accepted_previous_skeleton\u4E0Ecurrent_source_stage_summaries\u4ECD\u662F\u4E8B\u5B9E\u4F9D\u636E\u3002
+2. \u5BF9\u5173\u7CFB\u7C7B\u7247\u6BB5\uFF0C\u4FDD\u7559\u5176\u4E2D\u771F\u5B9E\u53D1\u751F\u7684\u4E92\u52A8\u3001\u89D2\u8272\u539F\u8BDD\u3001\u51B3\u5B9A\u3001\u884C\u52A8\u4E0E\u76F4\u63A5\u540E\u679C\uFF0C\u5E76\u628A\u5B83\u4EEC\u5F52\u5165\u53D1\u751F\u65F6\u7684\u5386\u53F2\u8282\u70B9\u3002\u53D9\u8FF0\u8005\u6982\u62EC\u53EA\u91C7\u7528\u89D2\u8272\u6B63\u5F0F\u547D\u540D\u7684\u8EAB\u4EFD\u6216\u660E\u786E\u4F5C\u51FA\u7684\u51B3\u5B9A\u3002
+3. \u6765\u6E90\u4E2D\u82E5\u6709\u89D2\u8272\u4EB2\u53E3\u8868\u8FBE\u7684\u627F\u8BFA\u3001\u62D2\u7EDD\u6216\u754C\u9650\uFF0C\u4FDD\u7559\u8BF4\u8BDD\u8005\u3001\u539F\u610F\u3001\u5F53\u65F6\u573A\u666F\u548C\u5B9E\u9645\u5F71\u54CD\u3002\u542B\u84C4\u3001\u8FDF\u7591\u6216\u7559\u767D\u6309\u53EF\u89C1\u56DE\u5E94\u5448\u73B0\u3002
+4. \u5BF9\u72B6\u6001\u7C7B\u7247\u6BB5\uFF0C\u628A\u5883\u754C\u3001\u80FD\u529B\u3001\u7269\u54C1\u6216\u5173\u7CFB\u7684\u6709\u6548\u53D8\u5316\u63A5\u56DE\u89E6\u53D1\u5B83\u7684\u4E8B\u4EF6\uFF1B\u6700\u540E\u4E00\u8282\u4ECE\u65E2\u6709\u8D77\u56E0\u4E8B\u4EF6\u6216\u5DF2\u5B89\u6392\u7684\u4E0B\u4E00\u89E6\u53D1\u70B9\u5F00\u59CB\u3002
+5. \u6BCF\u4EF6\u4E8B\u4FDD\u7559\u4E00\u4E2A\u4E3B\u8981\u53D9\u8FF0\u4F4D\u7F6E\uFF0C\u540E\u6587\u53EA\u5199\u65B0\u589E\u5F71\u54CD\u3002\u4FDD\u7559\u539F\u6587\u4E2D\u672A\u88ABquality_findings\u5F71\u54CD\u7684\u91CD\u8981\u5386\u53F2\u3001\u4E13\u540D\u3001\u56E0\u679C\u3001\u786E\u5B9A\u7A0B\u5EA6\u548C\u7BC7\u7AE0\u7ED3\u6784\u3002
+6. \u4FEE\u8BA2\u540E\u7684\u5168\u6587\u7EE7\u7EED\u6EE1\u8DB3\u8F93\u51FA\u9884\u7B97\uFF0C\u4E0D\u589E\u52A0\u6765\u6E90\u4E4B\u5916\u7684\u4E8B\u4EF6\u3001\u5173\u7CFB\u3001\u8EAB\u4EFD\u3001\u72B6\u6001\u6216\u7ED3\u8BBA\u3002
+
+\u53EA\u8F93\u51FA\u4FEE\u8BA2\u540E\u7684\u5B8C\u6574\u4E2D\u6587\u9AA8\u67B6\u6B63\u6587\u3002`;
 function modeInstruction(mode) {
   switch (mode) {
     case "incremental-update":
@@ -8164,7 +8178,8 @@ function buildStorySkeletonVerificationPrompt(options) {
     sourceEntries,
     maxTokens,
     worldBackground = "",
-    candidateSkeleton
+    candidateSkeleton,
+    qualityFindings = []
   } = options;
   const payload = sourceEntries.map((entry) => ({
     sourceStartMessageId: entry.sourceStartMessageId,
@@ -8183,8 +8198,108 @@ function buildStorySkeletonVerificationPrompt(options) {
     "<candidate_story_skeleton>",
     candidateSkeleton.trim(),
     "</candidate_story_skeleton>",
+    ...qualityFindings.length > 0 ? [
+      "<candidate_quality_findings>",
+      JSON.stringify(qualityFindings),
+      "</candidate_quality_findings>",
+      "candidate_quality_findings\u6807\u51FA\u5019\u9009\u7A3F\u4E2D\u9700\u8981\u91CD\u70B9\u4E8B\u4EF6\u5316\u6216\u5F52\u4F4D\u7684\u7247\u6BB5\uFF1B\u4F9D\u636E\u6765\u6E90\u4FEE\u8BA2\u8FD9\u4E9B\u7247\u6BB5\uFF0C\u5E76\u5BF9\u540C\u4E49\u8868\u8FBE\u505A\u5168\u6587\u590D\u6838\u3002"
+    ] : [],
     "\u5148\u5B8C\u6210\u4E8B\u5B9E\u4E00\u81F4\u6027\u6821\u5BF9\uFF0C\u518D\u5B8C\u6210\u5386\u53F2\u8303\u56F4\u3001\u5168\u7BC7\u8BED\u4E49\u53BB\u91CD\u4E0E\u5173\u7CFB\u4E8B\u4EF6\u8BC1\u636E\u6821\u5BF9\uFF0C\u4EA4\u4ED8\u5B8C\u6574\u4E2D\u6587\u9AA8\u67B6\u6B63\u6587\u3002\u6BCF\u4E2A\u6BB5\u843D\u90FD\u56F4\u7ED5\u91CD\u8981\u53D8\u5316\u3001\u56E0\u679C\u540E\u679C\u3001\u5173\u7CFB\u8F6C\u6298\u6216\u5F85\u7EED\u4E3B\u7EBF\u5C55\u5F00\uFF1B\u6700\u65B0\u843D\u70B9\u63A5\u56DE\u5176\u8D77\u56E0\u4E8B\u4EF6\uFF0C\u5F85\u7EED\u4E3B\u7EBF\u5199\u6E05\u7531\u6765\u3001\u5DF2\u6709\u63A8\u8FDB\u548C\u672A\u89E3\u95EE\u9898\u3002\u6BCF\u6761\u5173\u7CFB\u53E5\u4EE5\u771F\u5B9E\u53D1\u751F\u7684\u4E92\u52A8\u3001\u539F\u8BDD\u3001\u51B3\u5B9A\u6216\u884C\u52A8\u4E3A\u4E3B\u4F53\uFF0C\u53D9\u8FF0\u8005\u6982\u62EC\u53EA\u7528\u4E8E\u89D2\u8272\u6B63\u5F0F\u547D\u540D\u7684\u8EAB\u4EFD\u6216\u660E\u786E\u51B3\u5B9A\uFF1B\u6BCF\u9879\u4E92\u52A8\u4FDD\u7559\u4E00\u4E2A\u4E3B\u8981\u53D9\u8FF0\u4F4D\u7F6E\uFF0C\u540E\u6587\u53EA\u5199\u65B0\u589E\u5F71\u54CD\u3002\u6240\u6709\u72B6\u6001\u843D\u70B9\u63A5\u56DE\u5176\u5386\u53F2\u8D77\u56E0\uFF0C\u6700\u540E\u4E00\u8282\u76F4\u63A5\u4ECE\u8D77\u56E0\u4E8B\u4EF6\u6216\u4E0B\u4E00\u89E6\u53D1\u70B9\u5F00\u59CB\u3002"
   ].join("\n");
+}
+function buildStorySkeletonQualityRepairPrompt(options) {
+  const {
+    existingSkeleton,
+    sourceEntries,
+    maxTokens,
+    worldBackground = "",
+    candidateSkeleton,
+    qualityFindings
+  } = options;
+  const payload = sourceEntries.map((entry) => ({
+    sourceStartMessageId: entry.sourceStartMessageId,
+    sourceEndMessageId: entry.sourceEndMessageId,
+    stageSummary: entry.text
+  }));
+  return [
+    `\u8BF7\u5B9A\u5411\u4FEE\u8BA2\u5019\u9009\u957F\u671F\u5267\u60C5\u9AA8\u67B6\u3002\u672C\u6B21\u5B8C\u6574\u8F93\u51FA\u9884\u7B97\u4E0A\u9650\u4E3A ${maxTokens} Token\u3002`,
+    ...worldBackground.trim() ? [worldBackground.trim()] : [],
+    "<accepted_previous_skeleton>",
+    existingSkeleton.trim() || "\u65E0",
+    "</accepted_previous_skeleton>",
+    "<current_source_stage_summaries>",
+    JSON.stringify(payload),
+    "</current_source_stage_summaries>",
+    "<candidate_story_skeleton>",
+    candidateSkeleton.trim(),
+    "</candidate_story_skeleton>",
+    "<quality_findings>",
+    JSON.stringify(qualityFindings),
+    "</quality_findings>",
+    "\u9010\u9879\u4FEE\u8BA2quality_findings\u5E76\u590D\u6838\u5168\u6587\u540C\u4E49\u8868\u8FBE\uFF1A\u5173\u7CFB\u5185\u5BB9\u56DE\u5230\u771F\u5B9E\u4E92\u52A8\u3001\u539F\u8BDD\u3001\u51B3\u5B9A\u4E0E\u884C\u52A8\uFF0C\u72B6\u6001\u843D\u70B9\u56DE\u5230\u89E6\u53D1\u4E8B\u4EF6\uFF1B\u4FDD\u7559\u660E\u786E\u8BF4\u51FA\u7684\u8FB9\u754C\u4E0E\u627F\u8BFA\u53CA\u5176\u5F71\u54CD\u3002\u4EA4\u4ED8\u4FEE\u8BA2\u540E\u7684\u5B8C\u6574\u9AA8\u67B6\u6B63\u6587\u3002"
+  ].join("\n");
+}
+
+// src/summary/skeleton-quality.ts
+var ABSENCE_MARKER_PATTERN = /(?:没有|并未|未曾|尚未|未达|不主动|并非|不是|仅是|只是|仍是)/u;
+var DIRECT_RELATIONSHIP_TERM_PATTERN = /(?:恋爱|道侣|告白|亲密|伴侣|情感(?:确认|承诺|回应))/u;
+var SOCIAL_CONTEXT_PATTERN = /(?:两人|双方|二人|师徒|师姐弟|同门|熟人|伙伴|同行者|亲近|信任|依赖|边界)/u;
+var GENERAL_RELATIONSHIP_TERM_PATTERN = /(?:关系|承诺|回应|身份)/u;
+var RELATIONSHIP_STAGE_PATTERN = /(?:进入|处于|形成|发展为|转为|仍是|只是|维持|保持)[^。！？\n]{0,36}(?:信任期|关系阶段|熟人关系|伙伴关系|同行者关系|师徒关系|师姐弟关系|合作关系)/u;
+var SPEECH_VERB_PATTERN = /(?:说|表示|回答|拒绝|声明|告知|强调|要求|承认)/u;
+var QUOTED_RELATIONSHIP_PATTERN = /[“"][^”"\n]*(?:恋爱|道侣|告白|亲密|伴侣|关系|承诺|身份)[^”"\n]*[”"]/u;
+var SNAPSHOT_HEADING_PATTERN = /^#{1,6}\s*.*(?:当前|现状|状态|人物关系(?:概览|总览)|角色状态)/u;
+var SNAPSHOT_OPENING_PATTERN = /^(?:截至|当前|现状)/u;
+var SNAPSHOT_CONTENT_PATTERN = /(?:境界|修为|灵力|神识|伤势|装备|物品|位置|好感|关系|仍处于|现为|已是)/u;
+function compactExcerpt(text2) {
+  return text2.replace(/\s+/gu, " ").trim().slice(0, 360);
+}
+function sentenceUnits(paragraph) {
+  return paragraph.match(/[^。！？\n]+[。！？]?/gu) ?? [];
+}
+function isExplicitRelationshipSpeech(text2) {
+  return SPEECH_VERB_PATTERN.test(text2) && QUOTED_RELATIONSHIP_PATTERN.test(text2);
+}
+function hasInterpersonalRelationshipContext(text2) {
+  return DIRECT_RELATIONSHIP_TERM_PATTERN.test(text2) || SOCIAL_CONTEXT_PATTERN.test(text2) && GENERAL_RELATIONSHIP_TERM_PATTERN.test(text2);
+}
+function storySkeletonQualityIssues(text2, maxIssues = 12) {
+  const limit = Math.max(1, Math.floor(maxIssues));
+  const issues = [];
+  const seen = /* @__PURE__ */ new Set();
+  const paragraphs = String(text2 ?? "").split(/\n{2,}/u).map((paragraph) => paragraph.trim()).filter(Boolean);
+  const add = (kind, source) => {
+    const excerpt = compactExcerpt(source);
+    const key = `${kind}:${excerpt}`;
+    if (!excerpt || seen.has(key) || issues.length >= limit) {
+      return;
+    }
+    seen.add(key);
+    issues.push({ kind, excerpt });
+  };
+  for (const paragraph of paragraphs) {
+    if (SNAPSHOT_HEADING_PATTERN.test(paragraph)) {
+      add("state-snapshot", paragraph);
+    } else if (SNAPSHOT_OPENING_PATTERN.test(paragraph) && SNAPSHOT_CONTENT_PATTERN.test(paragraph)) {
+      add("state-snapshot", paragraph);
+    }
+    if (paragraph.startsWith("#")) {
+      continue;
+    }
+    for (const sentence2 of sentenceUnits(paragraph)) {
+      if (isExplicitRelationshipSpeech(sentence2)) {
+        continue;
+      }
+      if (RELATIONSHIP_STAGE_PATTERN.test(sentence2)) {
+        add("relationship-stage", sentence2);
+        continue;
+      }
+      if (ABSENCE_MARKER_PATTERN.test(sentence2) && hasInterpersonalRelationshipContext(sentence2)) {
+        add("relationship-absence", sentence2);
+      }
+    }
+  }
+  return issues;
 }
 
 // src/summary/skeleton-service.ts
@@ -8388,15 +8503,48 @@ var StorySkeletonService = class {
     }
   }
   async verifyDraft(settings, options) {
+    const candidateQualityFindings = storySkeletonQualityIssues(options.candidateSkeleton);
     const raw = await completeWithConfiguredProvider(settings, {
       system: STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
       prompt: buildStorySkeletonVerificationPrompt({
         ...options,
-        maxTokens: settings.summary.skeletonMaxTokens
+        maxTokens: settings.summary.skeletonMaxTokens,
+        qualityFindings: candidateQualityFindings
       }),
       maxTokens: settings.summary.skeletonMaxTokens
     });
-    return normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+    const verified = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+    const qualityFindings = storySkeletonQualityIssues(verified);
+    if (qualityFindings.length === 0) {
+      return verified;
+    }
+    logger.info("\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u4E8B\u5B9E\u6821\u5BF9\u540E\u547D\u4E2D\u8D28\u91CF\u590D\u6838\uFF0C\u5C06\u5B9A\u5411\u4FEE\u8BA2\u5F53\u524D\u9AA8\u67B6\u3002", {
+      findings: qualityFindings.map((finding) => finding.kind)
+    });
+    recordDebugTrace(options.state, settings.debug, "summary", "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u8FDB\u5165\u5B9A\u5411\u8D28\u91CF\u4FEE\u8BA2\u3002", {
+      findings: qualityFindings.map((finding) => `${finding.kind}: ${finding.excerpt}`).join(" | ")
+    });
+    const repairedRaw = await completeWithConfiguredProvider(settings, {
+      system: STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT,
+      prompt: buildStorySkeletonQualityRepairPrompt({
+        ...options,
+        maxTokens: settings.summary.skeletonMaxTokens,
+        candidateSkeleton: verified,
+        qualityFindings
+      }),
+      maxTokens: settings.summary.skeletonMaxTokens
+    });
+    const repaired = normalizeStorySkeletonText(
+      repairedRaw,
+      settings.summary.skeletonMaxTokens
+    );
+    const remainingFindings = storySkeletonQualityIssues(repaired);
+    if (remainingFindings.length > 0) {
+      throw new Error(
+        `\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u5B9A\u5411\u4FEE\u8BA2\u540E\u4ECD\u6709 ${remainingFindings.length} \u5904\u5173\u7CFB\u6216\u72B6\u6001\u5185\u5BB9\u672A\u5B8C\u6210\u4E8B\u4EF6\u5316\uFF0C\u5DF2\u4FDD\u7559\u65E7\u9AA8\u67B6\u3002`
+      );
+    }
+    return repaired;
   }
   validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot) {
     const live = this.memoryRepository.getExisting();
@@ -8473,6 +8621,7 @@ var StorySkeletonService = class {
       const candidateSkeleton = normalizeStorySkeletonDraft(raw);
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       draft = await this.verifyDraft(settings, {
+        state,
         existingSkeleton: acceptedPreviousSkeleton,
         sourceEntries: batch,
         mode,
@@ -8567,6 +8716,7 @@ var StorySkeletonService = class {
         "\u751F\u6210"
       );
       const text2 = await this.verifyDraft(settings, {
+        state,
         existingSkeleton: priorSkeleton.text,
         sourceEntries: [sourceEntry],
         mode: "incremental-update",

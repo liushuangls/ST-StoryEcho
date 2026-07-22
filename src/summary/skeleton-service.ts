@@ -14,12 +14,15 @@ import { buildStorySkeletonWorldInfoReferenceContext } from '../reference/contex
 import { SettingsRepository } from '../settings/repository';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import {
+  buildStorySkeletonQualityRepairPrompt,
   buildStorySkeletonPrompt,
   buildStorySkeletonVerificationPrompt,
+  STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT,
   STORY_SKELETON_SYSTEM_PROMPT,
   STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
   type StorySkeletonPromptMode,
 } from './skeleton-prompts';
+import { storySkeletonQualityIssues } from './skeleton-quality';
 import {
   activeStageSummaryEntries,
   archivedStageSummaryEntries,
@@ -344,6 +347,7 @@ export class StorySkeletonService {
   private async verifyDraft(
     settings: StoryEchoSettings,
     options: {
+      state: StoryEchoChatState;
       existingSkeleton: string;
       sourceEntries: readonly StageSummaryEntry[];
       mode: StorySkeletonPromptMode;
@@ -351,15 +355,49 @@ export class StorySkeletonService {
       candidateSkeleton: string;
     },
   ): Promise<string> {
+    const candidateQualityFindings = storySkeletonQualityIssues(options.candidateSkeleton);
     const raw = await completeWithConfiguredProvider(settings, {
       system: STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT,
       prompt: buildStorySkeletonVerificationPrompt({
         ...options,
         maxTokens: settings.summary.skeletonMaxTokens,
+        qualityFindings: candidateQualityFindings,
       }),
       maxTokens: settings.summary.skeletonMaxTokens,
     });
-    return normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+    const verified = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+    const qualityFindings = storySkeletonQualityIssues(verified);
+    if (qualityFindings.length === 0) {
+      return verified;
+    }
+
+    logger.info('全局剧情骨架事实校对后命中质量复核，将定向修订当前骨架。', {
+      findings: qualityFindings.map((finding) => finding.kind),
+    });
+    recordDebugTrace(options.state, settings.debug, 'summary', '全局剧情骨架进入定向质量修订。', {
+      findings: qualityFindings.map((finding) => `${finding.kind}: ${finding.excerpt}`).join(' | '),
+    });
+    const repairedRaw = await completeWithConfiguredProvider(settings, {
+      system: STORY_SKELETON_QUALITY_REPAIR_SYSTEM_PROMPT,
+      prompt: buildStorySkeletonQualityRepairPrompt({
+        ...options,
+        maxTokens: settings.summary.skeletonMaxTokens,
+        candidateSkeleton: verified,
+        qualityFindings,
+      }),
+      maxTokens: settings.summary.skeletonMaxTokens,
+    });
+    const repaired = normalizeStorySkeletonText(
+      repairedRaw,
+      settings.summary.skeletonMaxTokens,
+    );
+    const remainingFindings = storySkeletonQualityIssues(repaired);
+    if (remainingFindings.length > 0) {
+      throw new Error(
+        `全局剧情骨架定向修订后仍有 ${remainingFindings.length} 处关系或状态内容未完成事件化，已保留旧骨架。`,
+      );
+    }
+    return repaired;
   }
 
   private validateCleanBuildSources(
@@ -460,6 +498,7 @@ export class StorySkeletonService {
       const candidateSkeleton = normalizeStorySkeletonDraft(raw);
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       draft = await this.verifyDraft(settings, {
+        state,
         existingSkeleton: acceptedPreviousSkeleton,
         sourceEntries: batch,
         mode,
@@ -565,6 +604,7 @@ export class StorySkeletonService {
         '生成',
       );
       const text = await this.verifyDraft(settings, {
+        state,
         existingSkeleton: priorSkeleton.text,
         sourceEntries: [sourceEntry],
         mode: 'incremental-update',
