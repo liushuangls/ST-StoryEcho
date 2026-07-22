@@ -59,8 +59,9 @@ describe('independent stage summaries', () => {
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('概括性标题、动态小节、内容分类、自然段落');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修炼、学习、赠礼、照料、同行');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('触发互动—具体回应—造成的变化或留下的问题');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('好感数值和关系阶段继续由MVU变量呈现');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('关系结论只取材于角色明确说出的身份、承诺、拒绝或界限');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('好感数值和关系阶段由MVU变量呈现');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('每条关系句都以可观察互动、明确原话、决定或行动为主体');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('叙述者概括只用于角色正式命名的身份或明确作出的决定');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).not.toContain('恋爱确认');
   });
 

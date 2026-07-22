@@ -115,10 +115,11 @@ describe('global story skeleton lifecycle', () => {
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('分别视为独立实体');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('其持有傀儡的境界');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('内容上限而非需要填满的目标');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('让历史事实为未来发展留下空间');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('事件证据校对');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('每项互动只在其发生节点出现一次');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('对全篇做语义去重和历史范围校对');
+    expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('每条关系句的主体是可见互动、明确原话、决定或行动');
+    expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('最后一节直接以既有起因事件或已安排的下一触发点开篇');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).not.toContain('恋爱确认');
   });
 
