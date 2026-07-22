@@ -8,6 +8,7 @@ import {
   stageSummaryFullRebuildConfirmation,
   stageSummaryKey,
   stageSummaryManagerTemplate,
+  storySkeletonGenerationStatusText,
   toggleSummarySelection,
 } from '../src/ui/summary-manager';
 
@@ -58,6 +59,19 @@ describe('stage summary manager selection', () => {
     expect(stageSummaryFullRebuildConfirmation(false))
       .not.toContain('尚未保存的阶段总结或骨架修改');
   });
+
+  it('describes queued skeleton work with visible generation progress', () => {
+    expect(storySkeletonGenerationStatusText('rebuild'))
+      .toBe('正在重新生成全局剧情骨架…');
+    expect(storySkeletonGenerationStatusText('rebuild', {
+      sourceEndMessageId: 120,
+      pendingEntries: 3,
+    })).toBe('正在重新生成全局剧情骨架：已处理到消息 120，剩余 3 条阶段总结…');
+    expect(storySkeletonGenerationStatusText('update', {
+      sourceEndMessageId: 140,
+      pendingEntries: 0,
+    })).toBe('全局剧情骨架内容已生成，正在保存并刷新界面…');
+  });
 });
 
 describe('stage summary manager pagination and template', () => {
@@ -78,6 +92,8 @@ describe('stage summary manager pagination and template', () => {
     expect(template).toContain('<details id="story-echo-skeleton-details"');
     expect(template).not.toMatch(/<details[^>]*id="story-echo-skeleton-details"[^>]*\sopen(?:\s|=|>)/u);
     expect(template).toContain('<summary class="story-echo-summary-editor-heading story-echo-skeleton-summary">');
+    expect(template).toContain('id="story-echo-skeleton-status"');
+    expect(template).toContain('role="status" aria-live="polite"');
     expect(template).toContain('点击展开正文');
     expect(template).toContain('点击收起正文');
     expect(template).toContain('id="story-echo-skeleton-text"');

@@ -94,10 +94,15 @@ describe('settings panel editable-control contract', () => {
   it('places the latest prompt token card beside the runtime diagnostics', () => {
     const status = source.indexOf('<div id="story-echo-status"');
     const tokenCard = source.indexOf('${promptStatsCardTemplate()}');
-    const summaryDiagnostics = source.indexOf('<summary>当前骨架与阶段总结</summary>');
+    const statsDiagnostics = source.indexOf('<summary>测试统计</summary>');
 
     expect(tokenCard).toBeGreaterThan(status);
-    expect(tokenCard).toBeLessThan(summaryDiagnostics);
+    expect(tokenCard).toBeLessThan(statsDiagnostics);
+  });
+
+  it('does not duplicate the editable skeleton and summaries in a diagnostics block', () => {
+    expect(source).not.toContain('id="story-echo-summary-diagnostics"');
+    expect(source).not.toContain('<summary>当前骨架与阶段总结</summary>');
   });
 
   it('refreshes prompt statistics after completed, stopped, swiped and loaded generations', () => {

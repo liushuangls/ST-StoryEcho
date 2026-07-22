@@ -639,6 +639,12 @@
   word-break: break-all;
 }
 
+#story-echo-settings .story-echo-skeleton-status-active {
+  color: var(--SmartThemeQuoteColor);
+  font-weight: 600;
+  opacity: 1;
+}
+
 #story-echo-settings .story-echo-summary-manual-hint {
   max-width: 48%;
   text-align: right;

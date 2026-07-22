@@ -2811,7 +2811,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.19";
+var EXTENSION_VERSION = "0.20.20";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -10316,6 +10316,7 @@ var MemoryMetadataManager = class {
       await this.changePage(panel, this.currentPage + 1);
     });
     element(panel, "#story-echo-memory-rebuild").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
       if (!await showConfirmation(
         "\u91CD\u5EFA\u81EA\u52A8\u5267\u60C5\u5143\u6570\u636E",
         `\u91CD\u65B0\u62BD\u53D6\u5F53\u524D\u7A97\u53E3\u5916\u7684\u81EA\u52A8\u5267\u60C5\u5143\u6570\u636E\uFF1F
@@ -10324,7 +10325,6 @@ var MemoryMetadataManager = class {
       )) {
         return;
       }
-      const button = event.currentTarget;
       button.disabled = true;
       try {
         await this.rebuildAutomaticMemories();
@@ -10407,6 +10407,7 @@ var MemoryMetadataManager = class {
       }
     });
     element(panel, "#story-echo-memory-delete").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
       if (!this.selectedMemoryId) {
         return;
       }
@@ -10429,7 +10430,6 @@ ${current.event}`
       )) {
         return;
       }
-      const button = event.currentTarget;
       button.disabled = true;
       try {
         const requestedChatId = getCurrentChatId();
@@ -11365,6 +11365,16 @@ function stageSummaryFullRebuildConfirmation(hasUnsavedChanges) {
     "\u8FD9\u53EF\u80FD\u9700\u8981\u591A\u6B21 LLM \u8BF7\u6C42\uFF0C\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F"
   ].join("\n\n");
 }
+function storySkeletonGenerationStatusText(mode, progress) {
+  const action = mode === "rebuild" ? "\u91CD\u65B0\u751F\u6210" : "\u66F4\u65B0";
+  if (!progress) {
+    return `\u6B63\u5728${action}\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026`;
+  }
+  if (progress.pendingEntries > 0) {
+    return `\u6B63\u5728${action}\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\uFF1A\u5DF2\u5904\u7406\u5230\u6D88\u606F ${progress.sourceEndMessageId}\uFF0C\u5269\u4F59 ${progress.pendingEntries} \u6761\u9636\u6BB5\u603B\u7ED3\u2026`;
+  }
+  return "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u5185\u5BB9\u5DF2\u751F\u6210\uFF0C\u6B63\u5728\u4FDD\u5B58\u5E76\u5237\u65B0\u754C\u9762\u2026";
+}
 function summaryPreview(text2) {
   const heading = /^【[^】]+】$/u;
   return text2.split("\n").map((line) => line.trim()).find((line) => line && !heading.test(line) && line !== "\u65E0") ?? "\uFF08\u7A7A\u6BB5\u843D\uFF09";
@@ -11401,7 +11411,7 @@ function stageSummaryManagerTemplate() {
         <summary class="story-echo-summary-editor-heading story-echo-skeleton-summary">
           <div>
             <strong>\u5168\u5C40\u5267\u60C5\u9AA8\u67B6</strong>
-            <div id="story-echo-skeleton-status" class="story-echo-summary-editor-range">\u8FBE\u5230\u5F52\u6863\u6761\u4EF6\u540E\u81EA\u52A8\u751F\u6210</div>
+            <div id="story-echo-skeleton-status" class="story-echo-summary-editor-range story-echo-skeleton-status" role="status" aria-live="polite">\u8FBE\u5230\u5F52\u6863\u6761\u4EF6\u540E\u81EA\u52A8\u751F\u6210</div>
           </div>
           <span class="story-echo-summary-manual-hint story-echo-skeleton-summary-hint">
             <span>\u53EF\u7F16\u8F91\u3001\u4E0D\u53EF\u5220\u9664\uFF1B\u4EBA\u5DE5\u4FEE\u6539\u4F1A\u6210\u4E3A\u540E\u7EED\u66F4\u65B0\u57FA\u7EBF</span>
@@ -11519,6 +11529,7 @@ var StageSummaryMetadataManager = class {
   skeletonDirty = false;
   skeletonRevision = 0;
   populatedSkeletonUpdatedAt = null;
+  skeletonActivityStatus = "";
   settingsRepository = new SettingsRepository();
   bind(panel, onChanged) {
     const editor = element3(panel, "#story-echo-summary-editor");
@@ -11565,21 +11576,36 @@ var StageSummaryMetadataManager = class {
       }
     });
     element3(panel, "#story-echo-skeleton-update").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const label = button.querySelector("span");
+      const idleLabel = label?.textContent ?? "\u7ACB\u5373\u66F4\u65B0\u9AA8\u67B6";
       if (this.skeletonDirty && !await showConfirmation(
         "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u9AA8\u67B6\u4FEE\u6539",
         "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u7ACB\u5373\u66F4\u65B0\u4F1A\u653E\u5F03\u8FD9\u4E9B\u4FEE\u6539\u3002\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F"
       )) {
         return;
       }
-      const button = event.currentTarget;
       button.disabled = true;
+      if (label) {
+        label.textContent = "\u6B63\u5728\u66F4\u65B0\u9AA8\u67B6\u2026";
+      }
+      this.setSkeletonActivityStatus(panel, "\u6B63\u5728\u6392\u961F\u66F4\u65B0\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026");
       try {
         const requestedChatId = getCurrentChatId();
         const result = await storyEchoTaskCoordinator.enqueueManual("\u7ACB\u5373\u66F4\u65B0\u5168\u5C40\u5267\u60C5\u9AA8\u67B6", async () => {
           if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
             throw new Error("\u7B49\u5F85\u66F4\u65B0\u9AA8\u67B6\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
           }
-          return storySkeletonService.processAllPending();
+          this.setSkeletonActivityStatus(
+            panel,
+            storySkeletonGenerationStatusText("update")
+          );
+          return storySkeletonService.processAllPending((progress) => {
+            this.setSkeletonActivityStatus(
+              panel,
+              storySkeletonGenerationStatusText("update", progress)
+            );
+          });
         });
         this.skeletonDirty = false;
         await onChanged();
@@ -11591,23 +11617,42 @@ var StageSummaryMetadataManager = class {
       } catch (error) {
         notify.error(error instanceof Error ? error.message : "\u66F4\u65B0\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u5931\u8D25\u3002");
       } finally {
-        button.disabled = false;
+        this.setSkeletonActivityStatus(panel, "");
+        if (label) {
+          label.textContent = idleLabel;
+        }
+        this.render(panel, this.repository.getExisting());
       }
     });
     element3(panel, "#story-echo-skeleton-rebuild").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const label = button.querySelector("span");
+      const idleLabel = label?.textContent ?? "\u91CD\u65B0\u751F\u6210\u9AA8\u67B6";
       const confirmation = this.skeletonDirty ? "\u9AA8\u67B6\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u3002\u91CD\u65B0\u751F\u6210\u4F1A\u653E\u5F03\u8FD9\u4E9B\u4FEE\u6539\uFF0C\u5E76\u4ECE\u5F53\u524D\u804A\u5929\u5168\u90E8\u6709\u6548\u9636\u6BB5\u603B\u7ED3\u7531\u65E7\u5230\u65B0\u5E72\u51C0\u91CD\u5EFA\u3002\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F" : "\u5C06\u4E22\u5F03\u73B0\u6709\u9AA8\u67B6\u57FA\u7EBF\uFF0C\u4ECE\u5F53\u524D\u804A\u5929\u5168\u90E8\u6709\u6548\u9636\u6BB5\u603B\u7ED3\u7531\u65E7\u5230\u65B0\u5206\u6279\u91CD\u5EFA\uFF1B\u6240\u6709\u6279\u6B21\u6210\u529F\u540E\u624D\u66FF\u6362\u73B0\u6709\u9AA8\u67B6\u3002\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F";
       if (!await showConfirmation("\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6", confirmation)) {
         return;
       }
-      const button = event.currentTarget;
       button.disabled = true;
+      if (label) {
+        label.textContent = "\u6B63\u5728\u751F\u6210\u9AA8\u67B6\u2026";
+      }
+      this.setSkeletonActivityStatus(panel, "\u6B63\u5728\u6392\u961F\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026");
       try {
         const requestedChatId = getCurrentChatId();
         const result = await storyEchoTaskCoordinator.enqueueManual("\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6", async () => {
           if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
             throw new Error("\u7B49\u5F85\u91CD\u65B0\u751F\u6210\u9AA8\u67B6\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
           }
-          return storySkeletonService.rebuildAll();
+          this.setSkeletonActivityStatus(
+            panel,
+            storySkeletonGenerationStatusText("rebuild")
+          );
+          return storySkeletonService.rebuildAll((progress) => {
+            this.setSkeletonActivityStatus(
+              panel,
+              storySkeletonGenerationStatusText("rebuild", progress)
+            );
+          });
         });
         this.skeletonDirty = false;
         await onChanged();
@@ -11619,7 +11664,11 @@ var StageSummaryMetadataManager = class {
       } catch (error) {
         notify.error(error instanceof Error ? error.message : "\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u5931\u8D25\u3002");
       } finally {
-        button.disabled = false;
+        this.setSkeletonActivityStatus(panel, "");
+        if (label) {
+          label.textContent = idleLabel;
+        }
+        this.render(panel, this.repository.getExisting());
       }
     });
     element3(panel, "#story-echo-summary-search").addEventListener("input", () => {
@@ -11631,20 +11680,24 @@ var StageSummaryMetadataManager = class {
       this.render(panel, this.repository.getExisting());
     });
     element3(panel, "#story-echo-summary-rebuild-all").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const label = button.querySelector("span");
+      const idleLabel = label?.textContent ?? "\u91CD\u5EFA\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u4E0E\u9AA8\u67B6";
       const confirmation = stageSummaryFullRebuildConfirmation(
         this.editorDirty || this.skeletonDirty
       );
       if (!await showConfirmation("\u91CD\u5EFA\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u4E0E\u9AA8\u67B6", confirmation)) {
         return;
       }
-      const button = event.currentTarget;
-      const label = button.querySelector("span");
-      const idleLabel = label?.textContent ?? "\u91CD\u5EFA\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u4E0E\u9AA8\u67B6";
       let summariesRebuilt = false;
       button.disabled = true;
       if (label) {
         label.textContent = "\u6B63\u5728\u91CD\u5EFA\u2026";
       }
+      this.setSkeletonActivityStatus(
+        panel,
+        "\u6B63\u5728\u6392\u961F\u91CD\u5EFA\u9636\u6BB5\u603B\u7ED3\uFF0C\u968F\u540E\u5C06\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026"
+      );
       try {
         const requestedChatId = getCurrentChatId();
         const result = await storyEchoTaskCoordinator.enqueueManual(
@@ -11675,12 +11728,20 @@ var StageSummaryMetadataManager = class {
             if (settings.memory.enabled) {
               await extractionService.processThrough(targetEndMessageId);
             }
+            this.setSkeletonActivityStatus(
+              panel,
+              "\u6B63\u5728\u91CD\u5EFA\u9636\u6BB5\u603B\u7ED3\uFF0C\u5B8C\u6210\u540E\u5C06\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026"
+            );
             const summaryResult = await stageSummaryService.rebuildAllThrough(
               targetEndMessageId,
               (progress) => {
                 if (label) {
                   label.textContent = `\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
                 }
+                this.setSkeletonActivityStatus(
+                  panel,
+                  `\u6B63\u5728\u91CD\u5EFA\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}\uFF1B\u5B8C\u6210\u540E\u5C06\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026`
+                );
               }
             );
             if (summaryResult.updatedChunks === 0) {
@@ -11690,10 +11751,18 @@ var StageSummaryMetadataManager = class {
             if (label) {
               label.textContent = "\u6B63\u5728\u91CD\u5EFA\u5168\u5C40\u9AA8\u67B6\u2026";
             }
+            this.setSkeletonActivityStatus(
+              panel,
+              storySkeletonGenerationStatusText("rebuild")
+            );
             const skeletonResult = await storySkeletonService.rebuildAll((progress) => {
               if (label) {
                 label.textContent = progress.pendingEntries > 0 ? `\u5168\u5C40\u9AA8\u67B6\uFF1A\u5269\u4F59 ${progress.pendingEntries} \u6761\u603B\u7ED3` : "\u6B63\u5728\u4FDD\u5B58\u5168\u5C40\u9AA8\u67B6\u2026";
               }
+              this.setSkeletonActivityStatus(
+                panel,
+                storySkeletonGenerationStatusText("rebuild", progress)
+              );
             });
             return { summaryResult, skeletonResult };
           }
@@ -11715,10 +11784,11 @@ var StageSummaryMetadataManager = class {
           await onChanged();
         } catch {
         }
+        this.setSkeletonActivityStatus(panel, "");
         if (label) {
           label.textContent = idleLabel;
         }
-        button.disabled = !this.repository.getExisting();
+        this.render(panel, this.repository.getExisting());
       }
     });
     element3(panel, "#story-echo-summary-previous").addEventListener("click", async () => {
@@ -11778,6 +11848,7 @@ var StageSummaryMetadataManager = class {
       }
     });
     element3(panel, "#story-echo-summary-delete").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
       const state = this.repository.getExisting();
       const current = this.currentSummary(state);
       if (!state || !current) {
@@ -11797,7 +11868,6 @@ ${consequence}
       )) {
         return;
       }
-      const button = event.currentTarget;
       button.disabled = true;
       try {
         const requestedChatId = getCurrentChatId();
@@ -11834,6 +11904,7 @@ ${consequence}
       this.resetSelection();
       this.skeletonDirty = false;
       this.populatedSkeletonUpdatedAt = null;
+      this.skeletonActivityStatus = "";
     }
     const skeleton = state?.storySkeleton;
     const skeletonText = element3(panel, "#story-echo-skeleton-text");
@@ -11842,16 +11913,18 @@ ${consequence}
     const skeletonRebuild = element3(panel, "#story-echo-skeleton-rebuild");
     const summaryRebuildAll = element3(panel, "#story-echo-summary-rebuild-all");
     const skeletonStatus = element3(panel, "#story-echo-skeleton-status");
-    skeletonText.disabled = !skeleton?.text;
-    skeletonSave.disabled = !skeleton?.text;
-    skeletonUpdate.disabled = !state;
-    skeletonRebuild.disabled = !state;
-    summaryRebuildAll.disabled = !state;
-    skeletonStatus.textContent = skeleton?.text ? [
+    const skeletonBusy = Boolean(this.skeletonActivityStatus);
+    skeletonText.disabled = !skeleton?.text || skeletonBusy;
+    skeletonSave.disabled = !skeleton?.text || skeletonBusy;
+    skeletonUpdate.disabled = !state || skeletonBusy;
+    skeletonRebuild.disabled = !state || skeletonBusy;
+    summaryRebuildAll.disabled = !state || skeletonBusy;
+    skeletonStatus.classList.toggle("story-echo-skeleton-status-active", skeletonBusy);
+    skeletonStatus.textContent = this.skeletonActivityStatus || (skeleton?.text ? [
       skeleton.stale ? "\u5F85\u91CD\u5EFA\uFF0C\u5F53\u524D\u4E0D\u4F1A\u6CE8\u5165" : `\u8986\u76D6\u5230\u6D88\u606F ${skeleton.coveredThroughMessageId}`,
       formattedTime(skeleton.updatedAt ?? ""),
       skeleton.manuallyEdited ? "\u542B\u4EBA\u5DE5\u7F16\u8F91" : ""
-    ].filter(Boolean).join(" \xB7 ") : "\u5C1A\u672A\u751F\u6210\uFF1A\u6700\u8FD1\u9636\u6BB5\u603B\u7ED3\u8D85\u8FC7 S \u6761\u540E\u81EA\u52A8\u521B\u5EFA";
+    ].filter(Boolean).join(" \xB7 ") : "\u5C1A\u672A\u751F\u6210\uFF1A\u6700\u8FD1\u9636\u6BB5\u603B\u7ED3\u8D85\u8FC7 S \u6761\u540E\u81EA\u52A8\u521B\u5EFA");
     if (!this.skeletonDirty && (skeleton?.updatedAt ?? "") !== this.populatedSkeletonUpdatedAt) {
       skeletonText.value = skeleton?.text ?? "";
       this.populatedSkeletonUpdatedAt = skeleton?.updatedAt ?? "";
@@ -11938,6 +12011,21 @@ ${consequence}
     return state?.stageSummary.entries.find(
       (entry) => !entry.deleted && stageSummaryKey(entry) === this.selectedSummaryKey
     );
+  }
+  setSkeletonActivityStatus(panel, status) {
+    this.skeletonActivityStatus = status;
+    const busy = Boolean(status);
+    const state = this.repository.getExisting();
+    const skeletonStatus = element3(panel, "#story-echo-skeleton-status");
+    skeletonStatus.classList.toggle("story-echo-skeleton-status-active", busy);
+    if (busy) {
+      skeletonStatus.textContent = status;
+    }
+    element3(panel, "#story-echo-skeleton-text").disabled = busy || !state?.storySkeleton.text;
+    element3(panel, "#story-echo-skeleton-save").disabled = busy || !state?.storySkeleton.text;
+    element3(panel, "#story-echo-skeleton-update").disabled = busy || !state;
+    element3(panel, "#story-echo-skeleton-rebuild").disabled = busy || !state;
+    element3(panel, "#story-echo-summary-rebuild-all").disabled = busy || !state;
   }
   async changePage(panel, requestedPage) {
     if (requestedPage === this.currentPage) {
@@ -12504,10 +12592,6 @@ function panelTemplate() {
 
         <div id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u2026\u2026</div>
         ${promptStatsCardTemplate()}
-        <details id="story-echo-summary-diagnostics" class="story-echo-diagnostics">
-          <summary>\u5F53\u524D\u9AA8\u67B6\u4E0E\u9636\u6BB5\u603B\u7ED3</summary>
-          <pre id="story-echo-summary">\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002</pre>
-        </details>
         <details id="story-echo-stats-diagnostics" class="story-echo-diagnostics" open>
           <summary>\u6D4B\u8BD5\u7EDF\u8BA1</summary>
           <pre id="story-echo-stats">\u5C1A\u65E0\u7EDF\u8BA1\u6570\u636E\u3002</pre>
@@ -13009,6 +13093,7 @@ function bindSettings(panel) {
     }
   });
   element4(panel, "#story-echo-reset-stats").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
     const state = memoryRepository2.getExisting();
     if (!state) {
       notify.info("\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709\u7EDF\u8BA1\u6570\u636E\u3002");
@@ -13020,7 +13105,6 @@ function bindSettings(panel) {
     )) {
       return;
     }
-    const button = event.currentTarget;
     const requestedChatId = getCurrentChatId();
     button.disabled = true;
     try {
@@ -13157,13 +13241,11 @@ function runtimeStatusText() {
 }
 async function refreshStatus(panel, refreshVectorCount = false) {
   const target = element4(panel, "#story-echo-status");
-  const stageSummaryTarget = element4(panel, "#story-echo-summary");
   const stats = element4(panel, "#story-echo-stats");
   const inspection = element4(panel, "#story-echo-inspection");
   const traces = element4(panel, "#story-echo-traces");
   const summarySettingsOpen = element4(panel, "#story-echo-summary-settings").open;
   const memoryManagerOpen = element4(panel, "#story-echo-memory-manager").open;
-  const summaryDiagnosticsOpen = element4(panel, "#story-echo-summary-diagnostics").open;
   const statsOpen = element4(panel, "#story-echo-stats-diagnostics").open;
   const inspectionOpen = element4(panel, "#story-echo-inspection-diagnostics").open;
   const tracesOpen = element4(panel, "#story-echo-traces-diagnostics").open;
@@ -13180,7 +13262,6 @@ async function refreshStatus(panel, refreshVectorCount = false) {
         ...runtimeStatusText()
       ].join("\uFF5C");
       if (statsOpen) stats.textContent = "\u5C1A\u65E0\u7EDF\u8BA1\u6570\u636E\u3002";
-      if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = "\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002";
       if (inspectionOpen) inspection.textContent = "\u5C1A\u65E0\u751F\u6210\u8BB0\u5F55\u3002";
       if (tracesOpen) traces.textContent = "\u8C03\u8BD5\u6A21\u5F0F\u5173\u95ED\u6216\u5C1A\u65E0\u8F68\u8FF9\u3002";
       if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, null);
@@ -13234,31 +13315,6 @@ async function refreshStatus(panel, refreshVectorCount = false) {
       `\u5168\u5C40\u9AA8\u67B6\uFF1A${state.storySkeleton.text ? state.storySkeleton.stale ? "\u5F85\u91CD\u5EFA\uFF08\u5F53\u524D\u4E0D\u6CE8\u5165\uFF09" : `\u8986\u76D6\u5230\u6D88\u606F ${state.storySkeleton.coveredThroughMessageId}` : "\u5C1A\u672A\u751F\u6210"}`,
       ...runtimeStatusText()
     ].join("\uFF5C");
-    if (summaryDiagnosticsOpen) {
-      const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
-      const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
-      const pendingArchived = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
-      const skeletonUsable = storySkeletonIsUsable(state);
-      const currentStateCorrection = currentSettings.memory.enabled ? renderCurrentStateCoordinationBlock(state.memories) : "";
-      stageSummaryTarget.textContent = skeletonUsable || activeSummaries.length > 0 ? [
-        skeletonUsable ? `\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\uFF08\u8986\u76D6\u5230\u6D88\u606F ${state.storySkeleton.coveredThroughMessageId}\uFF09\uFF1A
-${state.storySkeleton.text}` : state.storySkeleton.text ? "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u6765\u6E90\u5DF2\u5931\u6548\uFF0C\u91CD\u5EFA\u6210\u529F\u524D\u4E0D\u4F1A\u6CE8\u5165\u3002" : "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u5C1A\u672A\u751F\u6210\u3002",
-        ...pendingArchived.length > 0 ? [
-          `\u5F85\u6C47\u5165\u9AA8\u67B6\u4F46\u5F53\u524D\u4ECD\u4F1A\u76F4\u63A5\u643A\u5E26\u7684\u9636\u6BB5\u603B\u7ED3 ${pendingArchived.length} \u6761\uFF1A`,
-          ...pendingArchived.map((entry) => [
-            `\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
-            entry.text
-          ].join("\n"))
-        ] : [],
-        `\u5DF2\u4FDD\u5B58 ${activeSummaries.length} \u6761\uFF1B\u4E00\u822C\u8BF7\u6C42\u53E6\u643A\u5E26\u6700\u8FD1 ${visibleSummaries.length} \u6761\u3002`,
-        ...visibleSummaries.map((entry, index) => [
-          `#${activeSummaries.length - visibleSummaries.length + index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`,
-          entry.text
-        ].join("\n")),
-        ...currentStateCorrection ? [`\u8BF7\u6C42\u8FD8\u4F1A\u5728\u603B\u7ED3\u540E\u9644\u52A0\u4EE5\u4E0B\u5F53\u524D\u72B6\u6001\u6821\u6B63\uFF1A
-${currentStateCorrection}`] : []
-      ].join("\n\n") : "\u5C1A\u65E0\u5168\u5C40\u9AA8\u67B6\u6216\u9636\u6BB5\u603B\u7ED3\u3002";
-    }
     if (statsOpen) stats.textContent = statsText(state);
     if (inspectionOpen) inspection.textContent = inspectionText(state);
     if (tracesOpen) traces.textContent = tracesText(state);
@@ -13267,7 +13323,6 @@ ${currentStateCorrection}`] : []
   } catch (error) {
     const message = error instanceof Error ? error.message : "\u8BFB\u53D6\u5F53\u524D\u804A\u5929\u72B6\u6001\u5931\u8D25\u3002";
     target.textContent = message;
-    if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
     if (statsOpen) stats.textContent = `\u8BFB\u53D6\u5931\u8D25\uFF1A${message}`;
     if (inspectionOpen) inspection.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
     if (tracesOpen) traces.textContent = "\u8BFB\u53D6\u5931\u8D25\u3002";
@@ -13310,7 +13365,6 @@ async function registerSettingsPanel() {
   for (const selector of [
     "#story-echo-summary-settings",
     "#story-echo-memory-manager",
-    "#story-echo-summary-diagnostics",
     "#story-echo-stats-diagnostics",
     "#story-echo-inspection-diagnostics",
     "#story-echo-traces-diagnostics"

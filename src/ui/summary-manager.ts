@@ -69,6 +69,22 @@ export function stageSummaryFullRebuildConfirmation(hasUnsavedChanges: boolean):
   ].join('\n\n');
 }
 
+export type StorySkeletonGenerationMode = 'update' | 'rebuild';
+
+export function storySkeletonGenerationStatusText(
+  mode: StorySkeletonGenerationMode,
+  progress?: { sourceEndMessageId: number; pendingEntries: number },
+): string {
+  const action = mode === 'rebuild' ? '重新生成' : '更新';
+  if (!progress) {
+    return `正在${action}全局剧情骨架…`;
+  }
+  if (progress.pendingEntries > 0) {
+    return `正在${action}全局剧情骨架：已处理到消息 ${progress.sourceEndMessageId}，剩余 ${progress.pendingEntries} 条阶段总结…`;
+  }
+  return '全局剧情骨架内容已生成，正在保存并刷新界面…';
+}
+
 function summaryPreview(text: string): string {
   const heading = /^【[^】]+】$/u;
   return text
@@ -112,7 +128,7 @@ export function stageSummaryManagerTemplate(): string {
         <summary class="story-echo-summary-editor-heading story-echo-skeleton-summary">
           <div>
             <strong>全局剧情骨架</strong>
-            <div id="story-echo-skeleton-status" class="story-echo-summary-editor-range">达到归档条件后自动生成</div>
+            <div id="story-echo-skeleton-status" class="story-echo-summary-editor-range story-echo-skeleton-status" role="status" aria-live="polite">达到归档条件后自动生成</div>
           </div>
           <span class="story-echo-summary-manual-hint story-echo-skeleton-summary-hint">
             <span>可编辑、不可删除；人工修改会成为后续更新基线</span>
@@ -235,6 +251,7 @@ export class StageSummaryMetadataManager {
   private skeletonDirty = false;
   private skeletonRevision = 0;
   private populatedSkeletonUpdatedAt: string | null = null;
+  private skeletonActivityStatus = '';
   private readonly settingsRepository = new SettingsRepository();
 
   constructor(private readonly repository: MemoryRepository) {}
@@ -286,6 +303,11 @@ export class StageSummaryMetadataManager {
     });
 
     element<HTMLButtonElement>(panel, '#story-echo-skeleton-update').addEventListener('click', async (event) => {
+      // Event.currentTarget is cleared as soon as an async event handler yields.
+      // Capture it before awaiting SillyTavern's confirmation popup.
+      const button = event.currentTarget as HTMLButtonElement;
+      const label = button.querySelector<HTMLElement>('span');
+      const idleLabel = label?.textContent ?? '立即更新骨架';
       if (
         this.skeletonDirty &&
         !await showConfirmation(
@@ -295,15 +317,27 @@ export class StageSummaryMetadataManager {
       ) {
         return;
       }
-      const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
+      if (label) {
+        label.textContent = '正在更新骨架…';
+      }
+      this.setSkeletonActivityStatus(panel, '正在排队更新全局剧情骨架…');
       try {
         const requestedChatId = getCurrentChatId();
         const result = await storyEchoTaskCoordinator.enqueueManual('立即更新全局剧情骨架', async () => {
           if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
             throw new Error('等待更新骨架期间聊天已切换，已取消任务。');
           }
-          return storySkeletonService.processAllPending();
+          this.setSkeletonActivityStatus(
+            panel,
+            storySkeletonGenerationStatusText('update'),
+          );
+          return storySkeletonService.processAllPending((progress) => {
+            this.setSkeletonActivityStatus(
+              panel,
+              storySkeletonGenerationStatusText('update', progress),
+            );
+          });
         });
         this.skeletonDirty = false;
         await onChanged();
@@ -315,26 +349,46 @@ export class StageSummaryMetadataManager {
       } catch (error) {
         notify.error(error instanceof Error ? error.message : '更新全局剧情骨架失败。');
       } finally {
-        button.disabled = false;
+        this.setSkeletonActivityStatus(panel, '');
+        if (label) {
+          label.textContent = idleLabel;
+        }
+        this.render(panel, this.repository.getExisting());
       }
     });
 
     element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild').addEventListener('click', async (event) => {
+      // Preserve the button across the asynchronous popup boundary.
+      const button = event.currentTarget as HTMLButtonElement;
+      const label = button.querySelector<HTMLElement>('span');
+      const idleLabel = label?.textContent ?? '重新生成骨架';
       const confirmation = this.skeletonDirty
         ? '骨架有尚未保存的修改。重新生成会放弃这些修改，并从当前聊天全部有效阶段总结由旧到新干净重建。确定继续吗？'
         : '将丢弃现有骨架基线，从当前聊天全部有效阶段总结由旧到新分批重建；所有批次成功后才替换现有骨架。确定继续吗？';
       if (!await showConfirmation('重新生成全局剧情骨架', confirmation)) {
         return;
       }
-      const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
+      if (label) {
+        label.textContent = '正在生成骨架…';
+      }
+      this.setSkeletonActivityStatus(panel, '正在排队重新生成全局剧情骨架…');
       try {
         const requestedChatId = getCurrentChatId();
         const result = await storyEchoTaskCoordinator.enqueueManual('重新生成全局剧情骨架', async () => {
           if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
             throw new Error('等待重新生成骨架期间聊天已切换，已取消任务。');
           }
-          return storySkeletonService.rebuildAll();
+          this.setSkeletonActivityStatus(
+            panel,
+            storySkeletonGenerationStatusText('rebuild'),
+          );
+          return storySkeletonService.rebuildAll((progress) => {
+            this.setSkeletonActivityStatus(
+              panel,
+              storySkeletonGenerationStatusText('rebuild', progress),
+            );
+          });
         });
         this.skeletonDirty = false;
         await onChanged();
@@ -346,7 +400,11 @@ export class StageSummaryMetadataManager {
       } catch (error) {
         notify.error(error instanceof Error ? error.message : '重新生成全局剧情骨架失败。');
       } finally {
-        button.disabled = false;
+        this.setSkeletonActivityStatus(panel, '');
+        if (label) {
+          label.textContent = idleLabel;
+        }
+        this.render(panel, this.repository.getExisting());
       }
     });
 
@@ -359,20 +417,25 @@ export class StageSummaryMetadataManager {
       this.render(panel, this.repository.getExisting());
     });
     element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all').addEventListener('click', async (event) => {
+      // Preserve the button across the asynchronous popup boundary.
+      const button = event.currentTarget as HTMLButtonElement;
+      const label = button.querySelector<HTMLElement>('span');
+      const idleLabel = label?.textContent ?? '重建全部阶段总结与骨架';
       const confirmation = stageSummaryFullRebuildConfirmation(
         this.editorDirty || this.skeletonDirty,
       );
       if (!await showConfirmation('重建全部阶段总结与骨架', confirmation)) {
         return;
       }
-      const button = event.currentTarget as HTMLButtonElement;
-      const label = button.querySelector<HTMLElement>('span');
-      const idleLabel = label?.textContent ?? '重建全部阶段总结与骨架';
       let summariesRebuilt = false;
       button.disabled = true;
       if (label) {
         label.textContent = '正在重建…';
       }
+      this.setSkeletonActivityStatus(
+        panel,
+        '正在排队重建阶段总结，随后将重新生成全局剧情骨架…',
+      );
       try {
         const requestedChatId = getCurrentChatId();
         const result = await storyEchoTaskCoordinator.enqueueManual(
@@ -405,12 +468,20 @@ export class StageSummaryMetadataManager {
             if (settings.memory.enabled) {
               await extractionService.processThrough(targetEndMessageId);
             }
+            this.setSkeletonActivityStatus(
+              panel,
+              '正在重建阶段总结，完成后将重新生成全局剧情骨架…',
+            );
             const summaryResult = await stageSummaryService.rebuildAllThrough(
               targetEndMessageId,
               (progress) => {
                 if (label) {
                   label.textContent = `阶段总结：消息 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
                 }
+                this.setSkeletonActivityStatus(
+                  panel,
+                  `正在重建阶段总结：消息 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}；完成后将重新生成全局剧情骨架…`,
+                );
               },
             );
             if (summaryResult.updatedChunks === 0) {
@@ -420,12 +491,20 @@ export class StageSummaryMetadataManager {
             if (label) {
               label.textContent = '正在重建全局骨架…';
             }
+            this.setSkeletonActivityStatus(
+              panel,
+              storySkeletonGenerationStatusText('rebuild'),
+            );
             const skeletonResult = await storySkeletonService.rebuildAll((progress) => {
               if (label) {
                 label.textContent = progress.pendingEntries > 0
                   ? `全局骨架：剩余 ${progress.pendingEntries} 条总结`
                   : '正在保存全局骨架…';
               }
+              this.setSkeletonActivityStatus(
+                panel,
+                storySkeletonGenerationStatusText('rebuild', progress),
+              );
             });
             return { summaryResult, skeletonResult };
           },
@@ -451,10 +530,11 @@ export class StageSummaryMetadataManager {
           // The operation result is already persisted; a later panel refresh
           // will render it if the current refresh is interrupted.
         }
+        this.setSkeletonActivityStatus(panel, '');
         if (label) {
           label.textContent = idleLabel;
         }
-        button.disabled = !this.repository.getExisting();
+        this.render(panel, this.repository.getExisting());
       }
     });
     element<HTMLButtonElement>(panel, '#story-echo-summary-previous').addEventListener('click', async () => {
@@ -519,6 +599,8 @@ export class StageSummaryMetadataManager {
     });
 
     element<HTMLButtonElement>(panel, '#story-echo-summary-delete').addEventListener('click', async (event) => {
+      // Preserve the button across the asynchronous popup boundary.
+      const button = event.currentTarget as HTMLButtonElement;
       const state = this.repository.getExisting();
       const current = this.currentSummary(state);
       if (!state || !current) {
@@ -536,7 +618,6 @@ export class StageSummaryMetadataManager {
       )) {
         return;
       }
-      const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
       try {
         const requestedChatId = getCurrentChatId();
@@ -581,6 +662,7 @@ export class StageSummaryMetadataManager {
       this.resetSelection();
       this.skeletonDirty = false;
       this.populatedSkeletonUpdatedAt = null;
+      this.skeletonActivityStatus = '';
     }
 
     const skeleton = state?.storySkeleton;
@@ -590,18 +672,20 @@ export class StageSummaryMetadataManager {
     const skeletonRebuild = element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild');
     const summaryRebuildAll = element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all');
     const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
-    skeletonText.disabled = !skeleton?.text;
-    skeletonSave.disabled = !skeleton?.text;
-    skeletonUpdate.disabled = !state;
-    skeletonRebuild.disabled = !state;
-    summaryRebuildAll.disabled = !state;
-    skeletonStatus.textContent = skeleton?.text
+    const skeletonBusy = Boolean(this.skeletonActivityStatus);
+    skeletonText.disabled = !skeleton?.text || skeletonBusy;
+    skeletonSave.disabled = !skeleton?.text || skeletonBusy;
+    skeletonUpdate.disabled = !state || skeletonBusy;
+    skeletonRebuild.disabled = !state || skeletonBusy;
+    summaryRebuildAll.disabled = !state || skeletonBusy;
+    skeletonStatus.classList.toggle('story-echo-skeleton-status-active', skeletonBusy);
+    skeletonStatus.textContent = this.skeletonActivityStatus || (skeleton?.text
       ? [
           skeleton.stale ? '待重建，当前不会注入' : `覆盖到消息 ${skeleton.coveredThroughMessageId}`,
           formattedTime(skeleton.updatedAt ?? ''),
           skeleton.manuallyEdited ? '含人工编辑' : '',
         ].filter(Boolean).join(' · ')
-      : '尚未生成：最近阶段总结超过 S 条后自动创建';
+      : '尚未生成：最近阶段总结超过 S 条后自动创建');
     if (!this.skeletonDirty && (skeleton?.updatedAt ?? '') !== this.populatedSkeletonUpdatedAt) {
       skeletonText.value = skeleton?.text ?? '';
       this.populatedSkeletonUpdatedAt = skeleton?.updatedAt ?? '';
@@ -707,6 +791,27 @@ export class StageSummaryMetadataManager {
     return state?.stageSummary.entries.find(
       (entry) => !entry.deleted && stageSummaryKey(entry) === this.selectedSummaryKey,
     );
+  }
+
+  private setSkeletonActivityStatus(panel: HTMLElement, status: string): void {
+    this.skeletonActivityStatus = status;
+    const busy = Boolean(status);
+    const state = this.repository.getExisting();
+    const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
+    skeletonStatus.classList.toggle('story-echo-skeleton-status-active', busy);
+    if (busy) {
+      skeletonStatus.textContent = status;
+    }
+    element<HTMLTextAreaElement>(panel, '#story-echo-skeleton-text').disabled =
+      busy || !state?.storySkeleton.text;
+    element<HTMLButtonElement>(panel, '#story-echo-skeleton-save').disabled =
+      busy || !state?.storySkeleton.text;
+    element<HTMLButtonElement>(panel, '#story-echo-skeleton-update').disabled =
+      busy || !state;
+    element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild').disabled =
+      busy || !state;
+    element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all').disabled =
+      busy || !state;
   }
 
   private async changePage(panel: HTMLElement, requestedPage: number): Promise<void> {

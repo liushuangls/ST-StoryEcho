@@ -369,13 +369,15 @@ export class MemoryMetadataManager {
       await this.changePage(panel, this.currentPage + 1);
     });
     element<HTMLButtonElement>(panel, '#story-echo-memory-rebuild').addEventListener('click', async (event) => {
+      // Capture before awaiting the popup; Event.currentTarget is null after
+      // an asynchronous event handler yields.
+      const button = event.currentTarget as HTMLButtonElement;
       if (!await showConfirmation(
         '重建自动剧情元数据',
         `重新抽取当前窗口外的自动剧情元数据？\n\n人工修改过的记忆会保留；自动抽取结果会删除后重建。长聊天会重新调用多次LLM和Embedding并产生相应用量。${this.editorDirty ? '\n当前编辑器中未保存的修改会丢失。' : ''}`,
       )) {
         return;
       }
-      const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
       try {
         await this.rebuildAutomaticMemories();
@@ -464,6 +466,8 @@ export class MemoryMetadataManager {
       }
     });
     element<HTMLButtonElement>(panel, '#story-echo-memory-delete').addEventListener('click', async (event) => {
+      // Preserve the button across the asynchronous popup boundary.
+      const button = event.currentTarget as HTMLButtonElement;
       if (!this.selectedMemoryId) {
         return;
       }
@@ -484,7 +488,6 @@ export class MemoryMetadataManager {
       )) {
         return;
       }
-      const button = event.currentTarget as HTMLButtonElement;
       button.disabled = true;
       try {
         const requestedChatId = getCurrentChatId();

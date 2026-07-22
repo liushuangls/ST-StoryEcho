@@ -30,15 +30,11 @@ import {
   getMainConnectionIdentity,
   showConfirmation,
 } from '../platform/sillytavern';
-import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../prompt/render';
+import { renderMemoryEntry } from '../prompt/render';
 import { selectRecentWindow } from '../prompt/window';
 import { SettingsRepository } from '../settings/repository';
 import { stageSummaryService } from '../summary/service';
 import { storySkeletonService } from '../summary/skeleton-service';
-import {
-  pendingArchivedStageSummaryEntries,
-  storySkeletonIsUsable,
-} from '../summary/skeleton-state';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { resolveVectorConfig } from '../vector/config';
 import { resolveEmbeddingClient } from '../vector/embedding-providers';
@@ -602,10 +598,6 @@ function panelTemplate(): HTMLElement {
 
         <div id="story-echo-status" class="story-echo-status">正在读取当前聊天状态……</div>
         ${promptStatsCardTemplate()}
-        <details id="story-echo-summary-diagnostics" class="story-echo-diagnostics">
-          <summary>当前骨架与阶段总结</summary>
-          <pre id="story-echo-summary">尚无全局骨架或阶段总结。</pre>
-        </details>
         <details id="story-echo-stats-diagnostics" class="story-echo-diagnostics" open>
           <summary>测试统计</summary>
           <pre id="story-echo-stats">尚无统计数据。</pre>
@@ -1177,6 +1169,8 @@ function bindSettings(panel: HTMLElement): void {
   });
 
   element<HTMLButtonElement>(panel, '#story-echo-reset-stats').addEventListener('click', async (event) => {
+    // Preserve the button across the asynchronous SillyTavern popup.
+    const button = event.currentTarget as HTMLButtonElement;
     const state = memoryRepository.getExisting();
     if (!state) {
       notify.info('当前聊天还没有统计数据。');
@@ -1188,7 +1182,6 @@ function bindSettings(panel: HTMLElement): void {
     )) {
       return;
     }
-    const button = event.currentTarget as HTMLButtonElement;
     const requestedChatId = getCurrentChatId();
     button.disabled = true;
     try {
@@ -1349,13 +1342,11 @@ function runtimeStatusText(): string[] {
 
 async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Promise<void> {
   const target = element<HTMLElement>(panel, '#story-echo-status');
-  const stageSummaryTarget = element<HTMLElement>(panel, '#story-echo-summary');
   const stats = element<HTMLElement>(panel, '#story-echo-stats');
   const inspection = element<HTMLElement>(panel, '#story-echo-inspection');
   const traces = element<HTMLElement>(panel, '#story-echo-traces');
   const summarySettingsOpen = element<HTMLDetailsElement>(panel, '#story-echo-summary-settings').open;
   const memoryManagerOpen = element<HTMLDetailsElement>(panel, '#story-echo-memory-manager').open;
-  const summaryDiagnosticsOpen = element<HTMLDetailsElement>(panel, '#story-echo-summary-diagnostics').open;
   const statsOpen = element<HTMLDetailsElement>(panel, '#story-echo-stats-diagnostics').open;
   const inspectionOpen = element<HTMLDetailsElement>(panel, '#story-echo-inspection-diagnostics').open;
   const tracesOpen = element<HTMLDetailsElement>(panel, '#story-echo-traces-diagnostics').open;
@@ -1374,7 +1365,6 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
         ...runtimeStatusText(),
       ].join('｜');
       if (statsOpen) stats.textContent = '尚无统计数据。';
-      if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = '尚无全局骨架或阶段总结。';
       if (inspectionOpen) inspection.textContent = '尚无生成记录。';
       if (tracesOpen) traces.textContent = '调试模式关闭或尚无轨迹。';
       if (summarySettingsOpen) stageSummaryMetadataManager.render(panel, null);
@@ -1440,39 +1430,6 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
         : '尚未生成'}`,
       ...runtimeStatusText(),
     ].join('｜');
-    if (summaryDiagnosticsOpen) {
-      const summaryWindowSize = Math.max(1, Math.floor(currentSettings.summary.windowSize));
-      const visibleSummaries = activeSummaries.slice(-summaryWindowSize);
-      const pendingArchived = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
-      const skeletonUsable = storySkeletonIsUsable(state);
-      const currentStateCorrection = currentSettings.memory.enabled
-        ? renderCurrentStateCoordinationBlock(state.memories)
-        : '';
-      stageSummaryTarget.textContent = skeletonUsable || activeSummaries.length > 0
-        ? [
-            skeletonUsable
-              ? `全局剧情骨架（覆盖到消息 ${state.storySkeleton.coveredThroughMessageId}）：\n${state.storySkeleton.text}`
-              : state.storySkeleton.text
-                ? '全局剧情骨架来源已失效，重建成功前不会注入。'
-                : '全局剧情骨架尚未生成。',
-            ...(pendingArchived.length > 0 ? [
-              `待汇入骨架但当前仍会直接携带的阶段总结 ${pendingArchived.length} 条：`,
-              ...pendingArchived.map((entry) => [
-                `消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
-                entry.text,
-              ].join('\n')),
-            ] : []),
-            `已保存 ${activeSummaries.length} 条；一般请求另携带最近 ${visibleSummaries.length} 条。`,
-            ...visibleSummaries.map((entry, index) => [
-              `#${activeSummaries.length - visibleSummaries.length + index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`,
-              entry.text,
-            ].join('\n')),
-            ...(currentStateCorrection
-              ? [`请求还会在总结后附加以下当前状态校正：\n${currentStateCorrection}`]
-              : []),
-          ].join('\n\n')
-        : '尚无全局骨架或阶段总结。';
-    }
     if (statsOpen) stats.textContent = statsText(state);
     if (inspectionOpen) inspection.textContent = inspectionText(state);
     if (tracesOpen) traces.textContent = tracesText(state);
@@ -1481,7 +1438,6 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
   } catch (error) {
     const message = error instanceof Error ? error.message : '读取当前聊天状态失败。';
     target.textContent = message;
-    if (summaryDiagnosticsOpen) stageSummaryTarget.textContent = '读取失败。';
     if (statsOpen) stats.textContent = `读取失败：${message}`;
     if (inspectionOpen) inspection.textContent = '读取失败。';
     if (tracesOpen) traces.textContent = '读取失败。';
@@ -1529,7 +1485,6 @@ export async function registerSettingsPanel(): Promise<void> {
   for (const selector of [
     '#story-echo-summary-settings',
     '#story-echo-memory-manager',
-    '#story-echo-summary-diagnostics',
     '#story-echo-stats-diagnostics',
     '#story-echo-inspection-diagnostics',
     '#story-echo-traces-diagnostics',
