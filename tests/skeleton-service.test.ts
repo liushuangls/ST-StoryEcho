@@ -112,6 +112,9 @@ describe('global story skeleton lifecycle', () => {
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('事情如何走到这里');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('先做历史范围校对');
     expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('而非人物、装备或状态面板');
+    expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('分别视为独立实体');
+    expect(STORY_SKELETON_VERIFICATION_SYSTEM_PROMPT).toContain('其持有傀儡的境界');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('内容上限而非需要填满的目标');
   });
 
   it('first builds at S+1 but includes every current summary regardless of S', async () => {
