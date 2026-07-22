@@ -5,7 +5,10 @@ import { MemoryRepository } from '../src/memory/repository';
 import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { StorySkeletonService } from '../src/summary/skeleton-service';
-import { STORY_SKELETON_SYSTEM_PROMPT } from '../src/summary/skeleton-prompts';
+import {
+  buildStorySkeletonPrompt,
+  STORY_SKELETON_SYSTEM_PROMPT,
+} from '../src/summary/skeleton-prompts';
 import {
   MAX_SKELETON_SOURCE_BATCH_CHARACTERS,
   skeletonSourceBatchCharacters,
@@ -84,16 +87,38 @@ describe('global story skeleton lifecycle', () => {
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('长期的重要历史事件记录与剧情大纲');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('完整人物资料');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('最新境界、属性数值、生命状态');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前工作状态继续由近期剧情与MVU变量承载');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('短期安排本身保持为当前工作状态');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('候选路径');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('既定方案');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('已执行事件');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('方案具有排他性');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可突出重要历练');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择合适的标题');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('事情如何走到这里');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('分别视为独立实体');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('其持有傀儡的阶位');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('内容上限而非需要填满的目标');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('内容上限而非填充目标');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每条关系句都以可观察互动、明确原话、决定或行动为主体');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每件历史事件选择一个主要叙述位置');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('在这一次生成中同时完成');
     expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('恋爱确认');
+  });
+
+  it('places task instructions before bounded generation context', () => {
+    const prompt = buildStorySkeletonPrompt({
+      existingSkeleton: '旧骨架。',
+      sourceEntries: [stageEntry(0)],
+      maxTokens: 5_000,
+      mode: 'incremental-update',
+      worldBackground: '<story_echo_world_background>背景。</story_echo_world_background>',
+    });
+
+    expect(prompt.indexOf('把本批首次进入归档的阶段总结融入旧历史骨架')).toBeLessThan(
+      prompt.indexOf('<generation_context>'),
+    );
+    expect(prompt).toContain('<generation_context>');
+    expect(prompt.endsWith('</generation_context>')).toBe(true);
   });
 
   it('first builds at S+1 but includes every current summary regardless of S', async () => {
