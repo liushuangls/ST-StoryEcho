@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   getMainConnectionIdentity,
+  showConfirmation,
   type SillyTavernContext,
 } from '../src/platform/sillytavern';
 
@@ -59,5 +60,51 @@ describe('SillyTavern main connection identity', () => {
       source: '',
       model: '',
     });
+  });
+});
+
+describe('SillyTavern confirmation popup', () => {
+  it('uses the in-app Popup API and accepts only the affirmative result', async () => {
+    const confirm = vi.fn(async () => 1);
+    const popupContext = context({
+      Popup: { show: { confirm } },
+      POPUP_RESULT: {
+        AFFIRMATIVE: 1,
+        NEGATIVE: 0,
+        CANCELLED: null,
+      },
+    });
+
+    await expect(showConfirmation('重新生成骨架', '确定继续吗？', popupContext))
+      .resolves.toBe(true);
+    expect(confirm).toHaveBeenCalledWith(
+      '重新生成骨架',
+      '确定继续吗？',
+      { leftAlign: true },
+    );
+
+    confirm.mockResolvedValueOnce(0);
+    await expect(showConfirmation('重新生成骨架', '确定继续吗？', popupContext))
+      .resolves.toBe(false);
+
+    confirm.mockResolvedValueOnce(1);
+    await showConfirmation('<删除记忆>', '第一行\n\n<script>', popupContext);
+    expect(confirm).toHaveBeenLastCalledWith(
+      '&lt;删除记忆&gt;',
+      '第一行<br><br>&lt;script&gt;',
+      { leftAlign: true },
+    );
+  });
+
+  it('falls back to the browser confirmation on older compatible builds', async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal('confirm', confirm);
+    try {
+      await expect(showConfirmation('删除阶段总结', '确定删除吗？', context({})))
+        .resolves.toBe(true);
+      expect(confirm).toHaveBeenCalledWith('删除阶段总结\n\n确定删除吗？');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -28,6 +28,7 @@ import {
   getContext,
   getCurrentChatId,
   getMainConnectionIdentity,
+  showConfirmation,
 } from '../platform/sillytavern';
 import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../prompt/render';
 import { selectRecentWindow } from '../prompt/window';
@@ -1181,7 +1182,10 @@ function bindSettings(panel: HTMLElement): void {
       notify.info('当前聊天还没有统计数据。');
       return;
     }
-    if (!globalThis.confirm('重置当前聊天的StoryEcho统计、调试轨迹和最近检查记录？')) {
+    if (!await showConfirmation(
+      '重置 StoryEcho 统计',
+      '重置当前聊天的StoryEcho统计、调试轨迹和最近检查记录？',
+    )) {
       return;
     }
     const button = event.currentTarget as HTMLButtonElement;

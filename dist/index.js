@@ -1043,6 +1043,22 @@ function getCurrentChatId(context = getContext()) {
   }
   return null;
 }
+function popupPlainText(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;").replace(/\r?\n/gu, "<br>");
+}
+async function showConfirmation(title, message, context = getContext()) {
+  if (context.Popup?.show.confirm && context.POPUP_RESULT) {
+    const result = await context.Popup.show.confirm(
+      popupPlainText(title),
+      popupPlainText(message),
+      { leftAlign: true }
+    );
+    return result === context.POPUP_RESULT.AFFIRMATIVE;
+  }
+  return globalThis.confirm(`${title}
+
+${message}`);
+}
 var CHAT_MODEL_KEYS = {
   ai21: "ai21_model",
   aimlapi: "aimlapi_model",
@@ -2795,7 +2811,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.17";
+var EXTENSION_VERSION = "0.20.18";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -10293,14 +10309,15 @@ var MemoryMetadataManager = class {
       this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
-    element(panel, "#story-echo-memory-previous").addEventListener("click", () => {
-      this.changePage(panel, this.currentPage - 1);
+    element(panel, "#story-echo-memory-previous").addEventListener("click", async () => {
+      await this.changePage(panel, this.currentPage - 1);
     });
-    element(panel, "#story-echo-memory-next").addEventListener("click", () => {
-      this.changePage(panel, this.currentPage + 1);
+    element(panel, "#story-echo-memory-next").addEventListener("click", async () => {
+      await this.changePage(panel, this.currentPage + 1);
     });
     element(panel, "#story-echo-memory-rebuild").addEventListener("click", async (event) => {
-      if (!globalThis.confirm(
+      if (!await showConfirmation(
+        "\u91CD\u5EFA\u81EA\u52A8\u5267\u60C5\u5143\u6570\u636E",
         `\u91CD\u65B0\u62BD\u53D6\u5F53\u524D\u7A97\u53E3\u5916\u7684\u81EA\u52A8\u5267\u60C5\u5143\u6570\u636E\uFF1F
 
 \u4EBA\u5DE5\u4FEE\u6539\u8FC7\u7684\u8BB0\u5FC6\u4F1A\u4FDD\u7559\uFF1B\u81EA\u52A8\u62BD\u53D6\u7ED3\u679C\u4F1A\u5220\u9664\u540E\u91CD\u5EFA\u3002\u957F\u804A\u5929\u4F1A\u91CD\u65B0\u8C03\u7528\u591A\u6B21LLM\u548CEmbedding\u5E76\u4EA7\u751F\u76F8\u5E94\u7528\u91CF\u3002${this.editorDirty ? "\n\u5F53\u524D\u7F16\u8F91\u5668\u4E2D\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u4F1A\u4E22\u5931\u3002" : ""}`
@@ -10324,7 +10341,7 @@ var MemoryMetadataManager = class {
         button.disabled = false;
       }
     });
-    element(panel, "#story-echo-memory-list").addEventListener("click", (event) => {
+    element(panel, "#story-echo-memory-list").addEventListener("click", async (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
         return;
@@ -10337,7 +10354,10 @@ var MemoryMetadataManager = class {
         this.selectedMemoryId,
         button.dataset.memoryId
       );
-      if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u5143\u6570\u636E\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u5173\u95ED\u6216\u5207\u6362\u5417\uFF1F")) {
+      if (this.editorDirty && !await showConfirmation(
+        "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u5267\u60C5\u8BB0\u5FC6\u4FEE\u6539",
+        "\u5F53\u524D\u5143\u6570\u636E\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u5173\u95ED\u6216\u5207\u6362\u5417\uFF1F"
+      )) {
         return;
       }
       this.selectedMemoryId = nextMemoryId;
@@ -10401,9 +10421,12 @@ var MemoryMetadataManager = class {
         this.render(panel, this.repository.getExisting());
         return;
       }
-      if (!globalThis.confirm(`\u5220\u9664\u8FD9\u6761\u5267\u60C5\u8BB0\u5FC6\uFF1F
+      if (!await showConfirmation(
+        "\u5220\u9664\u5267\u60C5\u8BB0\u5FC6",
+        `\u5220\u9664\u8FD9\u6761\u5267\u60C5\u8BB0\u5FC6\uFF1F
 
-${current.event}`)) {
+${current.event}`
+      )) {
         return;
       }
       const button = event.currentTarget;
@@ -10538,11 +10561,14 @@ ${current.event}`)) {
       this.editorDirty = false;
     }
   }
-  changePage(panel, requestedPage) {
+  async changePage(panel, requestedPage) {
     if (requestedPage === this.currentPage) {
       return;
     }
-    if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u5143\u6570\u636E\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u7FFB\u9875\u5417\uFF1F")) {
+    if (this.editorDirty && !await showConfirmation(
+      "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u5267\u60C5\u8BB0\u5FC6\u4FEE\u6539",
+      "\u5F53\u524D\u5143\u6570\u636E\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u7FFB\u9875\u5417\uFF1F"
+    )) {
       return;
     }
     this.currentPage = requestedPage;
@@ -11539,7 +11565,10 @@ var StageSummaryMetadataManager = class {
       }
     });
     element3(panel, "#story-echo-skeleton-update").addEventListener("click", async (event) => {
-      if (this.skeletonDirty && !globalThis.confirm("\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u7ACB\u5373\u66F4\u65B0\u4F1A\u653E\u5F03\u8FD9\u4E9B\u4FEE\u6539\u3002\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F")) {
+      if (this.skeletonDirty && !await showConfirmation(
+        "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u9AA8\u67B6\u4FEE\u6539",
+        "\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u7ACB\u5373\u66F4\u65B0\u4F1A\u653E\u5F03\u8FD9\u4E9B\u4FEE\u6539\u3002\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F"
+      )) {
         return;
       }
       const button = event.currentTarget;
@@ -11567,7 +11596,7 @@ var StageSummaryMetadataManager = class {
     });
     element3(panel, "#story-echo-skeleton-rebuild").addEventListener("click", async (event) => {
       const confirmation = this.skeletonDirty ? "\u9AA8\u67B6\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u3002\u91CD\u65B0\u751F\u6210\u4F1A\u653E\u5F03\u8FD9\u4E9B\u4FEE\u6539\uFF0C\u5E76\u4ECE\u5F53\u524D\u804A\u5929\u5168\u90E8\u6709\u6548\u9636\u6BB5\u603B\u7ED3\u7531\u65E7\u5230\u65B0\u5E72\u51C0\u91CD\u5EFA\u3002\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F" : "\u5C06\u4E22\u5F03\u73B0\u6709\u9AA8\u67B6\u57FA\u7EBF\uFF0C\u4ECE\u5F53\u524D\u804A\u5929\u5168\u90E8\u6709\u6548\u9636\u6BB5\u603B\u7ED3\u7531\u65E7\u5230\u65B0\u5206\u6279\u91CD\u5EFA\uFF1B\u6240\u6709\u6279\u6B21\u6210\u529F\u540E\u624D\u66FF\u6362\u73B0\u6709\u9AA8\u67B6\u3002\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F";
-      if (!globalThis.confirm(confirmation)) {
+      if (!await showConfirmation("\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6", confirmation)) {
         return;
       }
       const button = event.currentTarget;
@@ -11605,7 +11634,7 @@ var StageSummaryMetadataManager = class {
       const confirmation = stageSummaryFullRebuildConfirmation(
         this.editorDirty || this.skeletonDirty
       );
-      if (!globalThis.confirm(confirmation)) {
+      if (!await showConfirmation("\u91CD\u5EFA\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u4E0E\u9AA8\u67B6", confirmation)) {
         return;
       }
       const button = event.currentTarget;
@@ -11692,13 +11721,13 @@ var StageSummaryMetadataManager = class {
         button.disabled = !this.repository.getExisting();
       }
     });
-    element3(panel, "#story-echo-summary-previous").addEventListener("click", () => {
-      this.changePage(panel, this.currentPage - 1);
+    element3(panel, "#story-echo-summary-previous").addEventListener("click", async () => {
+      await this.changePage(panel, this.currentPage - 1);
     });
-    element3(panel, "#story-echo-summary-next").addEventListener("click", () => {
-      this.changePage(panel, this.currentPage + 1);
+    element3(panel, "#story-echo-summary-next").addEventListener("click", async () => {
+      await this.changePage(panel, this.currentPage + 1);
     });
-    element3(panel, "#story-echo-summary-list").addEventListener("click", (event) => {
+    element3(panel, "#story-echo-summary-list").addEventListener("click", async (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
         return;
@@ -11708,7 +11737,10 @@ var StageSummaryMetadataManager = class {
         return;
       }
       const nextKey = toggleSummarySelection(this.selectedSummaryKey, button.dataset.summaryKey);
-      if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u9636\u6BB5\u603B\u7ED3\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u5173\u95ED\u6216\u5207\u6362\u5417\uFF1F")) {
+      if (this.editorDirty && !await showConfirmation(
+        "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u9636\u6BB5\u603B\u7ED3\u4FEE\u6539",
+        "\u5F53\u524D\u9636\u6BB5\u603B\u7ED3\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u5173\u95ED\u6216\u5207\u6362\u5417\uFF1F"
+      )) {
         return;
       }
       this.selectedSummaryKey = nextKey;
@@ -11755,7 +11787,8 @@ var StageSummaryMetadataManager = class {
       }
       const deletionMode = stageSummaryDeletionMode(state.stageSummary.entries, current);
       const consequence = deletionMode === "restore-raw-tail" ? "\u8FD9\u662F\u6700\u65B0\u4E00\u6761\u603B\u7ED3\u3002\u5220\u9664\u540E\u8986\u76D6\u4F4D\u7F6E\u4F1A\u56DE\u9000\uFF0C\u8FD9\u4E00\u6BB5\u539F\u6587\u5C06\u91CD\u65B0\u53C2\u4E0E\u540E\u7EED\u8BF7\u6C42\u3002" : "\u8FD9\u662F\u8F83\u8001\u7684\u603B\u7ED3\u3002\u5220\u9664\u540E\u53EA\u4F1A\u505C\u7528\u8BE5\u603B\u7ED3\uFF1B\u5B83\u8986\u76D6\u7684\u65E7\u539F\u6587\u4E0D\u4F1A\u91CD\u65B0\u53D1\u9001\uFF0C\u540E\u7EED\u603B\u7ED3\u4E0E\u8986\u76D6\u4F4D\u7F6E\u4FDD\u6301\u4E0D\u53D8\u3002";
-      if (!globalThis.confirm(
+      if (!await showConfirmation(
+        "\u5220\u9664\u9636\u6BB5\u603B\u7ED3",
         `\u5220\u9664\u6D88\u606F ${current.sourceStartMessageId}\uFF5E${current.sourceEndMessageId} \u7684\u9636\u6BB5\u603B\u7ED3\uFF1F
 
 ${consequence}
@@ -11906,11 +11939,14 @@ ${consequence}
       (entry) => !entry.deleted && stageSummaryKey(entry) === this.selectedSummaryKey
     );
   }
-  changePage(panel, requestedPage) {
+  async changePage(panel, requestedPage) {
     if (requestedPage === this.currentPage) {
       return;
     }
-    if (this.editorDirty && !globalThis.confirm("\u5F53\u524D\u9636\u6BB5\u603B\u7ED3\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u7FFB\u9875\u5417\uFF1F")) {
+    if (this.editorDirty && !await showConfirmation(
+      "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u9636\u6BB5\u603B\u7ED3\u4FEE\u6539",
+      "\u5F53\u524D\u9636\u6BB5\u603B\u7ED3\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u786E\u5B9A\u653E\u5F03\u5E76\u7FFB\u9875\u5417\uFF1F"
+    )) {
       return;
     }
     this.currentPage = requestedPage;
@@ -12978,7 +13014,10 @@ function bindSettings(panel) {
       notify.info("\u5F53\u524D\u804A\u5929\u8FD8\u6CA1\u6709\u7EDF\u8BA1\u6570\u636E\u3002");
       return;
     }
-    if (!globalThis.confirm("\u91CD\u7F6E\u5F53\u524D\u804A\u5929\u7684StoryEcho\u7EDF\u8BA1\u3001\u8C03\u8BD5\u8F68\u8FF9\u548C\u6700\u8FD1\u68C0\u67E5\u8BB0\u5F55\uFF1F")) {
+    if (!await showConfirmation(
+      "\u91CD\u7F6E StoryEcho \u7EDF\u8BA1",
+      "\u91CD\u7F6E\u5F53\u524D\u804A\u5929\u7684StoryEcho\u7EDF\u8BA1\u3001\u8C03\u8BD5\u8F68\u8FF9\u548C\u6700\u8FD1\u68C0\u67E5\u8BB0\u5F55\uFF1F"
+    )) {
       return;
     }
     const button = event.currentTarget;

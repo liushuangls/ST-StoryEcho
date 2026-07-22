@@ -46,6 +46,26 @@ export interface SillyTavernWorldInfoEntry {
   };
 }
 
+export interface SillyTavernPopupOptions {
+  leftAlign?: boolean;
+}
+
+export interface SillyTavernPopupApi {
+  show: {
+    confirm(
+      header: string | null,
+      text?: string | null,
+      options?: SillyTavernPopupOptions,
+    ): Promise<number | null>;
+  };
+}
+
+export interface SillyTavernPopupResults {
+  AFFIRMATIVE: number;
+  NEGATIVE: number;
+  CANCELLED: null;
+}
+
 export interface SillyTavernContext {
   chat: TavernChatMessage[];
   chatId?: string;
@@ -86,6 +106,8 @@ export interface SillyTavernContext {
   substituteParams?(text: string): string;
   /** Test/future API seam; current SillyTavern builds expose this from world-info.js. */
   getSortedWorldInfoEntries?(): Promise<SillyTavernWorldInfoEntry[]>;
+  Popup?: SillyTavernPopupApi;
+  POPUP_RESULT?: SillyTavernPopupResults;
 }
 
 export interface MainConnectionIdentity {
@@ -130,6 +152,33 @@ export function getCurrentChatId(context = getContext()): string | null {
   }
 
   return null;
+}
+
+function popupPlainText(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+    .replace(/\r?\n/gu, '<br>');
+}
+
+export async function showConfirmation(
+  title: string,
+  message: string,
+  context = getContext(),
+): Promise<boolean> {
+  if (context.Popup?.show.confirm && context.POPUP_RESULT) {
+    const result = await context.Popup.show.confirm(
+      popupPlainText(title),
+      popupPlainText(message),
+      { leftAlign: true },
+    );
+    return result === context.POPUP_RESULT.AFFIRMATIVE;
+  }
+
+  return globalThis.confirm(`${title}\n\n${message}`);
 }
 
 const CHAT_MODEL_KEYS: Record<string, string> = {

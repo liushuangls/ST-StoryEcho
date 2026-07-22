@@ -6,7 +6,7 @@ import type {
   TruthStatus,
 } from '../core/types';
 import { MemoryRepository, type StoryMemoryEdit } from '../memory/repository';
-import { getCurrentChatId } from '../platform/sillytavern';
+import { getCurrentChatId, showConfirmation } from '../platform/sillytavern';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { notify } from './notifications';
 
@@ -362,14 +362,15 @@ export class MemoryMetadataManager {
       this.currentPage = 1;
       this.render(panel, this.repository.getExisting());
     });
-    element<HTMLButtonElement>(panel, '#story-echo-memory-previous').addEventListener('click', () => {
-      this.changePage(panel, this.currentPage - 1);
+    element<HTMLButtonElement>(panel, '#story-echo-memory-previous').addEventListener('click', async () => {
+      await this.changePage(panel, this.currentPage - 1);
     });
-    element<HTMLButtonElement>(panel, '#story-echo-memory-next').addEventListener('click', () => {
-      this.changePage(panel, this.currentPage + 1);
+    element<HTMLButtonElement>(panel, '#story-echo-memory-next').addEventListener('click', async () => {
+      await this.changePage(panel, this.currentPage + 1);
     });
     element<HTMLButtonElement>(panel, '#story-echo-memory-rebuild').addEventListener('click', async (event) => {
-      if (!globalThis.confirm(
+      if (!await showConfirmation(
+        '重建自动剧情元数据',
         `重新抽取当前窗口外的自动剧情元数据？\n\n人工修改过的记忆会保留；自动抽取结果会删除后重建。长聊天会重新调用多次LLM和Embedding并产生相应用量。${this.editorDirty ? '\n当前编辑器中未保存的修改会丢失。' : ''}`,
       )) {
         return;
@@ -391,7 +392,7 @@ export class MemoryMetadataManager {
         button.disabled = false;
       }
     });
-    element<HTMLElement>(panel, '#story-echo-memory-list').addEventListener('click', (event) => {
+    element<HTMLElement>(panel, '#story-echo-memory-list').addEventListener('click', async (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
         return;
@@ -406,7 +407,10 @@ export class MemoryMetadataManager {
       );
       if (
         this.editorDirty &&
-        !globalThis.confirm('当前元数据有尚未保存的修改，确定放弃并关闭或切换吗？')
+        !await showConfirmation(
+          '放弃未保存的剧情记忆修改',
+          '当前元数据有尚未保存的修改，确定放弃并关闭或切换吗？',
+        )
       ) {
         return;
       }
@@ -474,7 +478,10 @@ export class MemoryMetadataManager {
         this.render(panel, this.repository.getExisting());
         return;
       }
-      if (!globalThis.confirm(`删除这条剧情记忆？\n\n${current.event}`)) {
+      if (!await showConfirmation(
+        '删除剧情记忆',
+        `删除这条剧情记忆？\n\n${current.event}`,
+      )) {
         return;
       }
       const button = event.currentTarget as HTMLButtonElement;
@@ -626,13 +633,16 @@ export class MemoryMetadataManager {
     }
   }
 
-  private changePage(panel: HTMLElement, requestedPage: number): void {
+  private async changePage(panel: HTMLElement, requestedPage: number): Promise<void> {
     if (requestedPage === this.currentPage) {
       return;
     }
     if (
       this.editorDirty &&
-      !globalThis.confirm('当前元数据有尚未保存的修改，确定放弃并翻页吗？')
+      !await showConfirmation(
+        '放弃未保存的剧情记忆修改',
+        '当前元数据有尚未保存的修改，确定放弃并翻页吗？',
+      )
     ) {
       return;
     }

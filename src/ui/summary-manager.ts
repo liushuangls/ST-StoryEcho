@@ -1,7 +1,11 @@
 import type { StageSummaryEntry, StoryEchoChatState } from '../core/types';
 import { extractionService } from '../extraction/service';
 import { MemoryRepository } from '../memory/repository';
-import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import {
+  getContext,
+  getCurrentChatId,
+  showConfirmation,
+} from '../platform/sillytavern';
 import { selectRecentWindow } from '../prompt/window';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
@@ -284,7 +288,10 @@ export class StageSummaryMetadataManager {
     element<HTMLButtonElement>(panel, '#story-echo-skeleton-update').addEventListener('click', async (event) => {
       if (
         this.skeletonDirty &&
-        !globalThis.confirm('全局剧情骨架有尚未保存的修改，立即更新会放弃这些修改。确定继续吗？')
+        !await showConfirmation(
+          '放弃未保存的骨架修改',
+          '全局剧情骨架有尚未保存的修改，立即更新会放弃这些修改。确定继续吗？',
+        )
       ) {
         return;
       }
@@ -316,7 +323,7 @@ export class StageSummaryMetadataManager {
       const confirmation = this.skeletonDirty
         ? '骨架有尚未保存的修改。重新生成会放弃这些修改，并从当前聊天全部有效阶段总结由旧到新干净重建。确定继续吗？'
         : '将丢弃现有骨架基线，从当前聊天全部有效阶段总结由旧到新分批重建；所有批次成功后才替换现有骨架。确定继续吗？';
-      if (!globalThis.confirm(confirmation)) {
+      if (!await showConfirmation('重新生成全局剧情骨架', confirmation)) {
         return;
       }
       const button = event.currentTarget as HTMLButtonElement;
@@ -355,7 +362,7 @@ export class StageSummaryMetadataManager {
       const confirmation = stageSummaryFullRebuildConfirmation(
         this.editorDirty || this.skeletonDirty,
       );
-      if (!globalThis.confirm(confirmation)) {
+      if (!await showConfirmation('重建全部阶段总结与骨架', confirmation)) {
         return;
       }
       const button = event.currentTarget as HTMLButtonElement;
@@ -450,13 +457,13 @@ export class StageSummaryMetadataManager {
         button.disabled = !this.repository.getExisting();
       }
     });
-    element<HTMLButtonElement>(panel, '#story-echo-summary-previous').addEventListener('click', () => {
-      this.changePage(panel, this.currentPage - 1);
+    element<HTMLButtonElement>(panel, '#story-echo-summary-previous').addEventListener('click', async () => {
+      await this.changePage(panel, this.currentPage - 1);
     });
-    element<HTMLButtonElement>(panel, '#story-echo-summary-next').addEventListener('click', () => {
-      this.changePage(panel, this.currentPage + 1);
+    element<HTMLButtonElement>(panel, '#story-echo-summary-next').addEventListener('click', async () => {
+      await this.changePage(panel, this.currentPage + 1);
     });
-    element<HTMLElement>(panel, '#story-echo-summary-list').addEventListener('click', (event) => {
+    element<HTMLElement>(panel, '#story-echo-summary-list').addEventListener('click', async (event) => {
       const target = event.target;
       if (!(target instanceof Element)) {
         return;
@@ -468,7 +475,10 @@ export class StageSummaryMetadataManager {
       const nextKey = toggleSummarySelection(this.selectedSummaryKey, button.dataset.summaryKey);
       if (
         this.editorDirty &&
-        !globalThis.confirm('当前阶段总结有尚未保存的修改，确定放弃并关闭或切换吗？')
+        !await showConfirmation(
+          '放弃未保存的阶段总结修改',
+          '当前阶段总结有尚未保存的修改，确定放弃并关闭或切换吗？',
+        )
       ) {
         return;
       }
@@ -520,7 +530,8 @@ export class StageSummaryMetadataManager {
       const consequence = deletionMode === 'restore-raw-tail'
         ? '这是最新一条总结。删除后覆盖位置会回退，这一段原文将重新参与后续请求。'
         : '这是较老的总结。删除后只会停用该总结；它覆盖的旧原文不会重新发送，后续总结与覆盖位置保持不变。';
-      if (!globalThis.confirm(
+      if (!await showConfirmation(
+        '删除阶段总结',
         `删除消息 ${current.sourceStartMessageId}～${current.sourceEndMessageId} 的阶段总结？\n\n${consequence}\n\n任何聊天原文都不会被修改或删除。若等待期间后台新增了总结，将以实际执行时的位置采用上述规则。`,
       )) {
         return;
@@ -698,13 +709,16 @@ export class StageSummaryMetadataManager {
     );
   }
 
-  private changePage(panel: HTMLElement, requestedPage: number): void {
+  private async changePage(panel: HTMLElement, requestedPage: number): Promise<void> {
     if (requestedPage === this.currentPage) {
       return;
     }
     if (
       this.editorDirty &&
-      !globalThis.confirm('当前阶段总结有尚未保存的修改，确定放弃并翻页吗？')
+      !await showConfirmation(
+        '放弃未保存的阶段总结修改',
+        '当前阶段总结有尚未保存的修改，确定放弃并翻页吗？',
+      )
     ) {
       return;
     }
