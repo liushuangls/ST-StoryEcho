@@ -191,6 +191,28 @@ describe('global story skeleton lifecycle', () => {
     expect(String(verificationRequest?.prompt ?? '')).toContain(entries[0]!.text);
   });
 
+  it('lets verification compress an over-budget first-pass draft', async () => {
+    const entries = Array.from({ length: 5 }, (_, index) => stageEntry(index));
+    const overBudgetCandidate = `候选历史骨架：${'甲'.repeat(700)}`;
+    const verified = skeletonText('核验步骤已将候选稿压缩回配置预算。');
+    const installed = installContext(
+      entries,
+      vi.fn(async () => overBudgetCandidate),
+      {
+        windowSize: 4,
+        skeletonMaxTokens: 512,
+        verificationRaw: verified,
+      },
+    );
+
+    const result = await new StorySkeletonService().processNextIfNeeded();
+
+    expect(result.state?.storySkeleton.text).toBe(verified);
+    expect(installed.routedGenerateRaw).toHaveBeenCalledTimes(2);
+    const verificationRequest = installed.routedGenerateRaw.mock.calls[1]?.[0];
+    expect(String(verificationRequest?.prompt ?? '')).toContain(overBudgetCandidate);
+  });
+
   it('fully rebuilds cleanly from all summaries and discards the saved old skeleton', async () => {
     const generateRaw = vi.fn(async (options: { prompt: string }) => {
       expect(options.prompt).toContain('<baseline_status>full-rebuild</baseline_status>');

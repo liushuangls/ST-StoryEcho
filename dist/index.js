@@ -2733,7 +2733,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.6";
+var EXTENSION_VERSION = "0.20.7";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -3414,12 +3414,19 @@ function skeletonSourceBatches(entries, maxCharacters = MAX_SKELETON_SOURCE_BATC
   }
   return batches;
 }
-function normalizeStorySkeletonText(raw, maxTokens) {
+function normalizeStorySkeletonDraft(raw) {
   const text2 = String(raw ?? "").trim().replace(/^```(?:text|markdown|md)?\s*/iu, "").replace(/\s*```$/u, "").replace(/^<story_echo_skeleton>\s*/iu, "").replace(/\s*<\/story_echo_skeleton>$/iu, "").trim();
   if (!text2) {
     throw new Error("\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u4E0D\u80FD\u4E3A\u7A7A\uFF0C\u4E5F\u4E0D\u80FD\u5220\u9664\u3002");
   }
-  if (text2.length > MAX_STORED_SKELETON_CHARACTERS || estimateTokens(text2) > maxTokens) {
+  if (text2.length > MAX_STORED_SKELETON_CHARACTERS) {
+    throw new Error(`\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u4E0D\u80FD\u8D85\u8FC7 ${MAX_STORED_SKELETON_CHARACTERS} \u5B57\u7B26\u3002`);
+  }
+  return text2;
+}
+function normalizeStorySkeletonText(raw, maxTokens) {
+  const text2 = normalizeStorySkeletonDraft(raw);
+  if (estimateTokens(text2) > maxTokens) {
     throw new Error(`\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u4E0D\u80FD\u8D85\u8FC7 ${maxTokens} Token\u3002`);
   }
   return text2;
@@ -8425,10 +8432,7 @@ var StorySkeletonService = class {
         }),
         maxTokens: settings.summary.skeletonMaxTokens
       });
-      const candidateSkeleton = normalizeStorySkeletonText(
-        raw,
-        settings.summary.skeletonMaxTokens
-      );
+      const candidateSkeleton = normalizeStorySkeletonDraft(raw);
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       draft = await this.verifyDraft(settings, {
         existingSkeleton: acceptedPreviousSkeleton,
@@ -8514,10 +8518,7 @@ var StorySkeletonService = class {
         }),
         maxTokens: settings.summary.skeletonMaxTokens
       });
-      const candidateSkeleton = normalizeStorySkeletonText(
-        raw,
-        settings.summary.skeletonMaxTokens
-      );
+      const candidateSkeleton = normalizeStorySkeletonDraft(raw);
       this.validateIncrementalSources(
         state,
         settings,

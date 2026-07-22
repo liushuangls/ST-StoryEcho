@@ -23,6 +23,7 @@ import {
 import {
   activeStageSummaryEntries,
   archivedStageSummaryEntries,
+  normalizeStorySkeletonDraft,
   normalizeStorySkeletonText,
   pendingArchivedStageSummaryEntries,
   skeletonSourceBatches,
@@ -452,10 +453,11 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
       });
-      const candidateSkeleton = normalizeStorySkeletonText(
-        raw,
-        settings.summary.skeletonMaxTokens,
-      );
+      // The first-pass draft may overshoot the configured budget because the
+      // provider tokenizer and StoryEcho's conservative estimator differ.
+      // Let the mandatory verification pass compress it; only the verified
+      // result must satisfy the configured injection limit.
+      const candidateSkeleton = normalizeStorySkeletonDraft(raw);
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       draft = await this.verifyDraft(settings, {
         existingSkeleton: acceptedPreviousSkeleton,
@@ -552,10 +554,7 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
       });
-      const candidateSkeleton = normalizeStorySkeletonText(
-        raw,
-        settings.summary.skeletonMaxTokens,
-      );
+      const candidateSkeleton = normalizeStorySkeletonDraft(raw);
       this.validateIncrementalSources(
         state,
         settings,

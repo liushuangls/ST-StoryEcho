@@ -116,7 +116,7 @@ export function skeletonSourceBatches(
   return batches;
 }
 
-export function normalizeStorySkeletonText(raw: string, maxTokens: number): string {
+export function normalizeStorySkeletonDraft(raw: string): string {
   const text = String(raw ?? '')
     .trim()
     .replace(/^```(?:text|markdown|md)?\s*/iu, '')
@@ -127,7 +127,15 @@ export function normalizeStorySkeletonText(raw: string, maxTokens: number): stri
   if (!text) {
     throw new Error('全局剧情骨架不能为空，也不能删除。');
   }
-  if (text.length > MAX_STORED_SKELETON_CHARACTERS || estimateTokens(text) > maxTokens) {
+  if (text.length > MAX_STORED_SKELETON_CHARACTERS) {
+    throw new Error(`全局剧情骨架不能超过 ${MAX_STORED_SKELETON_CHARACTERS} 字符。`);
+  }
+  return text;
+}
+
+export function normalizeStorySkeletonText(raw: string, maxTokens: number): string {
+  const text = normalizeStorySkeletonDraft(raw);
+  if (estimateTokens(text) > maxTokens) {
     throw new Error(`全局剧情骨架不能超过 ${maxTokens} Token。`);
   }
   return text;

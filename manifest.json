@@ -4,10 +4,10 @@
   "requires": [],
   "optional": [],
   "dependencies": [],
-  "js": "dist/index.js?v=0.20.6",
-  "css": "style.css?v=0.20.6",
+  "js": "dist/index.js?v=0.20.7",
+  "css": "style.css?v=0.20.7",
   "author": "liushuang",
-  "version": "0.20.6",
+  "version": "0.20.7",
   "generate_interceptor": "storyEchoGenerateInterceptor",
   "hooks": {
     "activate": "onActivate"
