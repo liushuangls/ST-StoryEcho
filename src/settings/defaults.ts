@@ -41,7 +41,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
       baseUrl: '',
       model: '',
       apiKey: '',
-      timeoutMs: 60_000,
+      timeoutMs: 300_000,
       allowInsecureHttp: false,
       fallbackToMain: true,
       strictJsonSchema: false,

@@ -6,6 +6,7 @@ import type {
 } from '../core/types';
 import { getRequestHeaders } from '../platform/sillytavern';
 import { normalizeChatCompletionsBaseUrl } from './url';
+import { LlmRequestTimeoutError } from './errors';
 
 type FetchLike = typeof fetch;
 type RequestHeadersProvider = () => Promise<Record<string, string>>;
@@ -179,7 +180,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         throw error;
       }
       if (controller.signal.aborted) {
-        throw new Error(`自定义LLM请求超时（${timeoutMs}ms）。`);
+        throw new LlmRequestTimeoutError(timeoutMs);
       }
       throw error;
     } finally {

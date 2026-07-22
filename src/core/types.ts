@@ -39,7 +39,7 @@ export interface ExternalEmbeddingSettings {
 }
 
 export interface StoryEchoSettings {
-  version: 8;
+  version: 9;
   enabled: boolean;
   memory: {
     enabled: boolean;

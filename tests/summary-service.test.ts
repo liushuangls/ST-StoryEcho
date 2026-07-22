@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MODULE_ID } from '../src/core/constants';
 import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
+import { LlmRequestTimeoutError } from '../src/llm/errors';
 import {
   boundedPreviousStageSummary,
   buildStageSummaryGrounding,
@@ -574,6 +575,34 @@ describe('independent stage summaries', () => {
       stale: true,
     });
     expect(installed.context.saveMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries only the timed-out rebuild batch without regenerating completed batches', async () => {
+    const generateRaw = vi.fn()
+      .mockResolvedValueOnce('第一阶段只生成一次。')
+      .mockRejectedValueOnce(new LlmRequestTimeoutError(300_000))
+      .mockResolvedValueOnce('第二阶段在当前批次重试成功。');
+    installContext([
+      { is_user: true, mes: 'u1' },
+      { is_user: false, mes: 'a1' },
+      { is_user: true, mes: 'u2' },
+      { is_user: false, mes: 'a2' },
+      { is_user: true, mes: 'u3' },
+      { is_user: false, mes: 'a3' },
+      { is_user: true, mes: 'u4' },
+      { is_user: false, mes: 'a4' },
+    ], generateRaw, 2);
+
+    const result = await new StageSummaryService().rebuildAllThrough(7);
+
+    expect(result.updatedChunks).toBe(2);
+    expect(generateRaw).toHaveBeenCalledTimes(3);
+    expect(String(generateRaw.mock.calls[0]?.[0]?.prompt ?? '')).toContain('"content":"u1"');
+    for (const callIndex of [1, 2]) {
+      const prompt = String(generateRaw.mock.calls[callIndex]?.[0]?.prompt ?? '');
+      expect(prompt).toContain('"content":"u3"');
+      expect(prompt).not.toContain('"content":"u1"');
+    }
   });
 
   it('keeps the complete old summary set when a rebuild batch fails', async () => {

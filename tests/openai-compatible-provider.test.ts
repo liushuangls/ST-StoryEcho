@@ -1,11 +1,16 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { StoryEchoSettings } from '../src/core/types';
+import { LlmRequestTimeoutError } from '../src/llm/errors';
 import { OpenAiCompatibleProvider } from '../src/llm/openai-compatible-provider';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 
 function customConfig(): StoryEchoSettings['llm']['custom'] {
   return structuredClone(DEFAULT_SETTINGS.llm.custom);
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('OpenAiCompatibleProvider', () => {
   it('uses the SillyTavern custom backend so the server sends the LLM request', async () => {
@@ -134,5 +139,27 @@ describe('OpenAiCompatibleProvider', () => {
     const error = await provider.complete({ system: 'system', prompt: 'prompt' }).catch((value) => value);
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).not.toContain('llm-secret');
+  });
+
+  it('marks a local request deadline as a retriable LLM timeout', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn<typeof fetch>((_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    }));
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'model-name';
+    config.timeoutMs = 1_000;
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    const outcome = provider.complete({ system: 'system', prompt: 'prompt' })
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const error = await outcome;
+    expect(error).toBeInstanceOf(LlmRequestTimeoutError);
+    expect(error).toMatchObject({ timeoutMs: 1_000 });
   });
 });

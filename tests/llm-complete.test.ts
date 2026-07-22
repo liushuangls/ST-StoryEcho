@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { completeWithConfiguredProvider } from '../src/llm/complete';
+import {
+  completeWithConfiguredProvider,
+  MAX_LLM_TIMEOUT_RETRIES,
+} from '../src/llm/complete';
+import { LlmRequestTimeoutError } from '../src/llm/errors';
 import { isInternalGeneration } from '../src/llm/internal-generation';
 import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
 import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
@@ -74,5 +78,41 @@ describe('completeWithConfiguredProvider', () => {
     })).rejects.toThrow(/连续两次返回空内容/);
     expect(generateRaw).toHaveBeenCalledTimes(2);
     expect(generateRaw).toHaveBeenLastCalledWith(expect.objectContaining({ responseLength: 10_000 }));
+  });
+
+  it('retries only the current LLM request after a timeout', async () => {
+    const generateRaw = vi.fn()
+      .mockRejectedValueOnce(new LlmRequestTimeoutError(300_000))
+      .mockResolvedValueOnce('当前批次重试成功');
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ generateRaw }),
+    });
+
+    await expect(completeWithConfiguredProvider(DEFAULT_SETTINGS, {
+      system: 'same-system',
+      prompt: 'same-current-batch',
+      maxTokens: 1_600,
+    })).resolves.toBe('当前批次重试成功');
+
+    expect(MAX_LLM_TIMEOUT_RETRIES).toBe(1);
+    expect(generateRaw).toHaveBeenCalledTimes(2);
+    for (const [options] of generateRaw.mock.calls) {
+      expect(options).toMatchObject({ responseLength: 1_600 });
+      expect(options.systemPrompt).toContain('same-system');
+      expect(options.prompt).toContain('same-current-batch');
+    }
+  });
+
+  it('stops the current operation after its bounded timeout retry also fails', async () => {
+    const generateRaw = vi.fn().mockRejectedValue(new LlmRequestTimeoutError(300_000));
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ generateRaw }),
+    });
+
+    await expect(completeWithConfiguredProvider(DEFAULT_SETTINGS, {
+      system: 'system',
+      prompt: 'current-batch',
+    })).rejects.toThrow(/300000ms/);
+    expect(generateRaw).toHaveBeenCalledTimes(2);
   });
 });

@@ -1388,6 +1388,18 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
   return endpoint.toString().replace(/\/+$/, "");
 }
 
+// src/llm/errors.ts
+var LlmRequestTimeoutError = class extends Error {
+  constructor(timeoutMs) {
+    super(`\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+    this.timeoutMs = timeoutMs;
+    this.name = "LlmRequestTimeoutError";
+  }
+};
+function isLlmRequestTimeoutError(error) {
+  return error instanceof LlmRequestTimeoutError;
+}
+
 // src/llm/openai-compatible-provider.ts
 var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
 var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -1539,7 +1551,7 @@ var OpenAiCompatibleProvider = class {
         throw error;
       }
       if (controller.signal.aborted) {
-        throw new Error(`\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+        throw new LlmRequestTimeoutError(timeoutMs);
       }
       throw error;
     } finally {
@@ -1962,6 +1974,7 @@ function repairedJsonText(raw) {
 
 // src/llm/complete.ts
 var MAX_RETRY_TOKENS = 1e4;
+var MAX_LLM_TIMEOUT_RETRIES = 1;
 function withActiveTaskSignal(request) {
   if (request.signal) {
     return request;
@@ -1993,6 +2006,22 @@ async function completeNonEmpty(provider, request) {
     throw new Error("\u5185\u90E8LLM\u8FDE\u7EED\u4E24\u6B21\u8FD4\u56DE\u7A7A\u5185\u5BB9\u3002");
   }
   return second;
+}
+async function completeNonEmptyWithTimeoutRetry(provider, request) {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await completeNonEmpty(provider, request);
+    } catch (error) {
+      throwIfStoryEchoTaskCancelled(request.signal);
+      if (!isLlmRequestTimeoutError(error) || retry >= MAX_LLM_TIMEOUT_RETRIES) {
+        throw error;
+      }
+      yieldBackgroundAtRetryBoundary();
+      logger.warn(
+        `\u5185\u90E8LLM\u8BF7\u6C42\u8D85\u65F6\uFF0C\u4EC5\u91CD\u8BD5\u5F53\u524D\u8BF7\u6C42\uFF08${retry + 1}/${MAX_LLM_TIMEOUT_RETRIES}\uFF09\u3002`
+      );
+    }
+  }
 }
 function exampleFromSchema(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -2062,7 +2091,7 @@ async function completeStructuredWithProvider(provider, request, parse) {
     }
     try {
       recordStructuredAttempt(provider.id, mode);
-      const raw = await completeNonEmpty(provider, {
+      const raw = await completeNonEmptyWithTimeoutRetry(provider, {
         ...instructed,
         structuredOutput: mode
       });
@@ -2110,7 +2139,7 @@ async function completeWithConfiguredProvider(settings, request) {
   request = withActiveTaskSignal(request);
   const provider = createLlmProvider(settings);
   try {
-    return await completeNonEmpty(provider, request);
+    return await completeNonEmptyWithTimeoutRetry(provider, request);
   } catch (error) {
     throwIfStoryEchoTaskCancelled(request.signal);
     if (provider.id !== "openai-compatible" || !settings.llm.custom.fallbackToMain) {
@@ -2118,7 +2147,7 @@ async function completeWithConfiguredProvider(settings, request) {
     }
     yieldBackgroundAtRetryBoundary();
     logger.warn("\u81EA\u5B9A\u4E49LLM\u8C03\u7528\u5931\u8D25\uFF0C\u56DE\u9000\u5230SillyTavern\u4E3B\u8FDE\u63A5\u3002", error);
-    return completeNonEmpty(new MainLlmProvider(), request);
+    return completeNonEmptyWithTimeoutRetry(new MainLlmProvider(), request);
   }
 }
 
@@ -2702,9 +2731,9 @@ var SourceRevisionCache = class {
 var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
-var SETTINGS_VERSION = 8;
+var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.5";
+var EXTENSION_VERSION = "0.20.6";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -2747,7 +2776,7 @@ var DEFAULT_SETTINGS = Object.freeze({
       baseUrl: "",
       model: "",
       apiKey: "",
-      timeoutMs: 6e4,
+      timeoutMs: 3e5,
       allowInsecureHttp: false,
       fallbackToMain: true,
       strictJsonSchema: false
@@ -2834,6 +2863,11 @@ function migratePerformanceDefaults(settings, stored) {
   const storedRecall = isRecord3(storedRoot["recall"]) ? storedRoot["recall"] : {};
   if ((!Number.isFinite(storedVersion) || storedVersion < 5) && Number(storedRecall["maxEvents"]) === 5) {
     settings.recall.maxEvents = DEFAULT_SETTINGS.recall.maxEvents;
+  }
+  const storedLlm = isRecord3(storedRoot["llm"]) ? storedRoot["llm"] : {};
+  const storedCustomLlm = isRecord3(storedLlm["custom"]) ? storedLlm["custom"] : {};
+  if ((!Number.isFinite(storedVersion) || storedVersion < 9) && Number(storedCustomLlm["timeoutMs"]) === 6e4) {
+    settings.llm.custom.timeoutMs = DEFAULT_SETTINGS.llm.custom.timeoutMs;
   }
   settings.version = DEFAULT_SETTINGS.version;
 }
@@ -11605,13 +11639,25 @@ var StageSummaryMetadataManager = class {
               await extractionService.processThrough(targetEndMessageId);
             }
             const summaryResult = await stageSummaryService.rebuildAllThrough(
-              targetEndMessageId
+              targetEndMessageId,
+              (progress) => {
+                if (label) {
+                  label.textContent = `\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
+                }
+              }
             );
             if (summaryResult.updatedChunks === 0) {
               throw new Error("\u7A97\u53E3\u5916\u5386\u53F2\u5C1A\u4E0D\u8DB3\u4E00\u4E2A\u5B8C\u6574\u9636\u6BB5\u603B\u7ED3\u6279\u6B21\uFF0C\u672A\u66FF\u6362\u73B0\u6709\u7ED3\u679C\u3002");
             }
             summariesRebuilt = true;
-            const skeletonResult = await storySkeletonService.rebuildAll();
+            if (label) {
+              label.textContent = "\u6B63\u5728\u91CD\u5EFA\u5168\u5C40\u9AA8\u67B6\u2026";
+            }
+            const skeletonResult = await storySkeletonService.rebuildAll((progress) => {
+              if (label) {
+                label.textContent = progress.pendingEntries > 0 ? `\u5168\u5C40\u9AA8\u67B6\uFF1A\u5269\u4F59 ${progress.pendingEntries} \u6761\u603B\u7ED3` : "\u6B63\u5728\u6838\u9A8C\u5E76\u4FDD\u5B58\u5168\u5C40\u9AA8\u67B6\u2026";
+              }
+            });
             return { summaryResult, skeletonResult };
           }
         );

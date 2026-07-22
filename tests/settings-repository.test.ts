@@ -13,11 +13,12 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 8,
+      version: 9,
       enabled: false,
       memory: { enabled: false },
       summary: { enabled: true, automatic: true },
       extraction: { automatic: false },
+      llm: { custom: { timeoutMs: 300_000 } },
     });
   });
 
@@ -294,7 +295,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 8,
+      version: 9,
       memory: { enabled: true },
       extraction: { automatic: true, targetTurnsPerChunk: 5 },
       summary: {
@@ -326,7 +327,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 8,
+      version: 9,
       memory: { enabled: true },
       recentWindow: { size: 12, unit: 'turns' },
       summary: {
@@ -352,7 +353,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 8,
+      version: 9,
       memory: { enabled: true },
       recall: { maxEvents: 3 },
     });
@@ -376,7 +377,7 @@ describe('SettingsRepository credential persistence', () => {
     });
 
     expect(new SettingsRepository().get()).toMatchObject({
-      version: 8,
+      version: 9,
       memory: { enabled: true },
       extraction: {
         automatic: true,
@@ -387,6 +388,32 @@ describe('SettingsRepository credential persistence', () => {
           maxWorldInfoEntries: 5,
         },
       },
+    });
+  });
+
+  it('migrates only the persisted old default LLM timeout to 300 seconds', () => {
+    const extensionSettings: Record<string, unknown> = {
+      story_echo: {
+        version: 8,
+        llm: { custom: { timeoutMs: 60_000 } },
+      },
+    };
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ extensionSettings, saveSettingsDebounced: vi.fn() }),
+    });
+
+    expect(new SettingsRepository().get()).toMatchObject({
+      version: 9,
+      llm: { custom: { timeoutMs: 300_000 } },
+    });
+
+    extensionSettings['story_echo'] = {
+      version: 8,
+      llm: { custom: { timeoutMs: 75_000 } },
+    };
+    expect(new SettingsRepository().get()).toMatchObject({
+      version: 9,
+      llm: { custom: { timeoutMs: 75_000 } },
     });
   });
 });

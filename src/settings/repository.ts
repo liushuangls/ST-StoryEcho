@@ -75,6 +75,17 @@ function migratePerformanceDefaults(settings: StoryEchoSettings, stored: unknown
   ) {
     settings.recall.maxEvents = DEFAULT_SETTINGS.recall.maxEvents;
   }
+  const storedLlm = isRecord(storedRoot['llm']) ? storedRoot['llm'] : {};
+  const storedCustomLlm = isRecord(storedLlm['custom']) ? storedLlm['custom'] : {};
+  if (
+    (!Number.isFinite(storedVersion) || storedVersion < 9) &&
+    Number(storedCustomLlm['timeoutMs']) === 60_000
+  ) {
+    // Existing installs persisted the old default like an explicit setting.
+    // Move only that exact default forward; preserve any timeout the user
+    // deliberately chose.
+    settings.llm.custom.timeoutMs = DEFAULT_SETTINGS.llm.custom.timeoutMs;
+  }
   settings.version = DEFAULT_SETTINGS.version;
 }
 

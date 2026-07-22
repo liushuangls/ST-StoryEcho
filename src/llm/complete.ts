@@ -20,8 +20,10 @@ import {
   recordStructuredSuccess,
 } from './structured-diagnostics';
 import { repairedJsonText } from './json-repair';
+import { isLlmRequestTimeoutError } from './errors';
 
 const MAX_RETRY_TOKENS = 10_000;
+export const MAX_LLM_TIMEOUT_RETRIES = 1;
 
 function withActiveTaskSignal(request: LlmRequest): LlmRequest {
   if (request.signal) {
@@ -60,6 +62,26 @@ async function completeNonEmpty(
     throw new Error('内部LLM连续两次返回空内容。');
   }
   return second;
+}
+
+async function completeNonEmptyWithTimeoutRetry(
+  provider: LlmProvider,
+  request: LlmRequest,
+): Promise<string> {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await completeNonEmpty(provider, request);
+    } catch (error) {
+      throwIfStoryEchoTaskCancelled(request.signal);
+      if (!isLlmRequestTimeoutError(error) || retry >= MAX_LLM_TIMEOUT_RETRIES) {
+        throw error;
+      }
+      yieldBackgroundAtRetryBoundary();
+      logger.warn(
+        `内部LLM请求超时，仅重试当前请求（${retry + 1}/${MAX_LLM_TIMEOUT_RETRIES}）。`,
+      );
+    }
+  }
 }
 
 function exampleFromSchema(value: unknown): unknown {
@@ -138,7 +160,7 @@ async function completeStructuredWithProvider<T>(
     }
     try {
       recordStructuredAttempt(provider.id, mode);
-      const raw = await completeNonEmpty(provider, {
+      const raw = await completeNonEmptyWithTimeoutRetry(provider, {
         ...instructed,
         structuredOutput: mode,
       });
@@ -195,7 +217,7 @@ export async function completeWithConfiguredProvider(
   request = withActiveTaskSignal(request);
   const provider = createLlmProvider(settings);
   try {
-    return await completeNonEmpty(provider, request);
+    return await completeNonEmptyWithTimeoutRetry(provider, request);
   } catch (error) {
     throwIfStoryEchoTaskCancelled(request.signal);
     if (provider.id !== 'openai-compatible' || !settings.llm.custom.fallbackToMain) {
@@ -203,6 +225,6 @@ export async function completeWithConfiguredProvider(
     }
     yieldBackgroundAtRetryBoundary();
     logger.warn('自定义LLM调用失败，回退到SillyTavern主连接。', error);
-    return completeNonEmpty(new MainLlmProvider(), request);
+    return completeNonEmptyWithTimeoutRetry(new MainLlmProvider(), request);
   }
 }

@@ -400,12 +400,26 @@ export class StageSummaryMetadataManager {
             }
             const summaryResult = await stageSummaryService.rebuildAllThrough(
               targetEndMessageId,
+              (progress) => {
+                if (label) {
+                  label.textContent = `阶段总结：消息 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
+                }
+              },
             );
             if (summaryResult.updatedChunks === 0) {
               throw new Error('窗口外历史尚不足一个完整阶段总结批次，未替换现有结果。');
             }
             summariesRebuilt = true;
-            const skeletonResult = await storySkeletonService.rebuildAll();
+            if (label) {
+              label.textContent = '正在重建全局骨架…';
+            }
+            const skeletonResult = await storySkeletonService.rebuildAll((progress) => {
+              if (label) {
+                label.textContent = progress.pendingEntries > 0
+                  ? `全局骨架：剩余 ${progress.pendingEntries} 条总结`
+                  : '正在核验并保存全局骨架…';
+              }
+            });
             return { summaryResult, skeletonResult };
           },
         );
