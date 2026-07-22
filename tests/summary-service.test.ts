@@ -58,6 +58,8 @@ describe('independent stage summaries', () => {
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可重点说明境界、功法术法');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('概括性标题、动态小节、内容分类、自然段落');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修炼、学习、赠礼、照料、同行');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('触发互动—具体回应—造成的变化或留下的问题');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('好感数值和关系阶段继续由MVU变量呈现');
   });
 
   it('advances independently of the extraction cursor in summary-only mode', async () => {
