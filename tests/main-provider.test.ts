@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { LlmRequestTimeoutError } from '../src/llm/errors';
 import { MainLlmProvider, tuneInternalGenerationSettings } from '../src/llm/main-provider';
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -35,6 +37,34 @@ describe('MainLlmProvider', () => {
     await new MainLlmProvider().complete({ system: 'system', prompt: 'prompt', maxTokens: 20_000 });
 
     expect(generateRaw).toHaveBeenCalledWith(expect.objectContaining({ responseLength: 10_000 }));
+  });
+
+  it('honors an explicit 600-second summary request deadline', async () => {
+    vi.useFakeTimers();
+    const generateRaw = vi.fn(() => new Promise<string>(() => undefined));
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ generateRaw }),
+    });
+
+    let settled = false;
+    const outcome = new MainLlmProvider().complete({
+      system: 'system',
+      prompt: 'prompt',
+      timeoutMs: 600_000,
+    }).catch((error: unknown) => error);
+    void outcome.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(outcome).resolves.toMatchObject({
+      timeoutMs: 600_000,
+    });
+    expect(await outcome).toBeInstanceOf(LlmRequestTimeoutError);
+    expect(generateRaw).toHaveBeenCalledOnce();
   });
 
   it('removes an echoed internal request marker from the returned content', async () => {

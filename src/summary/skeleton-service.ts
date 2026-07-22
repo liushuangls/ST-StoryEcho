@@ -13,6 +13,7 @@ import { getCurrentChatId } from '../platform/sillytavern';
 import { buildStorySkeletonWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
+import { SUMMARY_LLM_TIMEOUT_MS } from './constants';
 import {
   buildStorySkeletonPrompt,
   STORY_SKELETON_SYSTEM_PROMPT,
@@ -427,6 +428,7 @@ export class StorySkeletonService {
           worldBackground,
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
+        timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
       });
       draft = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
       processedEntries += batch.length;
@@ -460,6 +462,7 @@ export class StorySkeletonService {
       ),
       skeletonCharacters: draft.length,
       skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+      requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1_000,
       llmCallsPerBatch: 1,
       mode: options.rebuild ? 'full-rebuild' : staleAtStart ? 'stale-rebuild' : 'initial-build',
     });
@@ -516,6 +519,7 @@ export class StorySkeletonService {
           worldBackground,
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
+        timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
       });
       const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
       const live = this.validateIncrementalSources(
@@ -545,6 +549,7 @@ export class StorySkeletonService {
         sourceCharacters: skeletonSourceEntryCharacters(sourceEntry),
         skeletonCharacters: text.length,
         skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+        requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1_000,
         llmCallsPerBatch: 1,
         mode: 'incremental-update',
       });

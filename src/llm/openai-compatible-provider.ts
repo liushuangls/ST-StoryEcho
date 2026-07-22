@@ -17,6 +17,7 @@ type RequestHeadersProvider = () => Promise<Record<string, string>>;
 
 const GENERATE_ENDPOINT = '/api/backends/chat-completions/generate';
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_REQUEST_TIMEOUT_MS = 600_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -108,7 +109,15 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       throw new Error('自定义LLM API Key不能包含换行符。');
     }
     const controller = new AbortController();
-    const timeoutMs = Math.min(300_000, Math.max(1_000, Math.floor(this.config.timeoutMs)));
+    const rawRequestTimeoutMs = request.timeoutMs;
+    const requestedTimeoutMs = typeof rawRequestTimeoutMs === 'number'
+      && Number.isFinite(rawRequestTimeoutMs)
+      ? rawRequestTimeoutMs
+      : this.config.timeoutMs;
+    const timeoutMs = Math.min(
+      MAX_REQUEST_TIMEOUT_MS,
+      Math.max(1_000, Math.floor(requestedTimeoutMs)),
+    );
     const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
     const abort = () => controller.abort();
     request.signal?.addEventListener('abort', abort, { once: true });

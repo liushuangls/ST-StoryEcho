@@ -1199,7 +1199,44 @@ function runStoryEchoTaskAbortable(operation, signal) {
   });
 }
 
+// src/llm/errors.ts
+var LlmRequestTimeoutError = class extends Error {
+  constructor(timeoutMs, upstreamStatus) {
+    super(upstreamStatus ? `LLM\u4E0A\u6E38\u6682\u65F6\u4E0D\u53EF\u7528\uFF08HTTP ${upstreamStatus}\uFF09\uFF0C\u6309\u8D85\u65F6\u5904\u7406\u3002` : `LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+    this.timeoutMs = timeoutMs;
+    this.upstreamStatus = upstreamStatus;
+    this.name = "LlmRequestTimeoutError";
+  }
+};
+function isLlmRequestTimeoutError(error) {
+  return error instanceof LlmRequestTimeoutError;
+}
+var RETRIABLE_UPSTREAM_TIMEOUT_STATUSES = /* @__PURE__ */ new Set([
+  408,
+  502,
+  503,
+  504,
+  520,
+  521,
+  522,
+  523,
+  524
+]);
+function isRetriableUpstreamTimeoutStatus(status) {
+  return RETRIABLE_UPSTREAM_TIMEOUT_STATUSES.has(status);
+}
+function findRetriableUpstreamTimeoutStatus(message) {
+  for (const match of message.matchAll(/\b(?:HTTP|status)\s*[:=]?\s*(\d{3})\b/gi)) {
+    const status = Number(match[1]);
+    if (isRetriableUpstreamTimeoutStatus(status)) {
+      return status;
+    }
+  }
+  return null;
+}
+
 // src/llm/main-provider.ts
+var MAX_REQUEST_TIMEOUT_MS = 6e5;
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1317,14 +1354,41 @@ var MainLlmProvider = class {
     if (request.maxTokens) {
       options.responseLength = Math.min(1e4, Math.max(16, Math.floor(request.maxTokens)));
     }
-    const response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
-      context,
-      request,
-      () => runStoryEchoTaskAbortable(
-        () => context.generateRaw(options),
-        request.signal
-      )
-    ));
+    const rawRequestTimeoutMs = request.timeoutMs;
+    const requestedTimeoutMs = typeof rawRequestTimeoutMs === "number" && Number.isFinite(rawRequestTimeoutMs) ? Math.min(MAX_REQUEST_TIMEOUT_MS, Math.max(1e3, Math.floor(rawRequestTimeoutMs))) : null;
+    const timeoutController = requestedTimeoutMs === null ? null : new AbortController();
+    const onRequestAbort = () => {
+      timeoutController?.abort(
+        request.signal?.reason ?? new StoryEchoTaskCancelledError("\u8BF7\u6C42\u5DF2\u5931\u6548")
+      );
+    };
+    if (timeoutController && request.signal) {
+      if (request.signal.aborted) {
+        onRequestAbort();
+      } else {
+        request.signal.addEventListener("abort", onRequestAbort, { once: true });
+      }
+    }
+    const timeout = timeoutController && requestedTimeoutMs !== null ? globalThis.setTimeout(
+      () => timeoutController.abort(new LlmRequestTimeoutError(requestedTimeoutMs)),
+      requestedTimeoutMs
+    ) : null;
+    let response;
+    try {
+      response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
+        context,
+        request,
+        () => runStoryEchoTaskAbortable(
+          () => context.generateRaw(options),
+          timeoutController?.signal ?? request.signal
+        )
+      ));
+    } finally {
+      if (timeout !== null) {
+        globalThis.clearTimeout(timeout);
+      }
+      request.signal?.removeEventListener("abort", onRequestAbort);
+    }
     return response.replaceAll(`[${markedRequest.marker}]`, "").trim();
   }
   async testConnection() {
@@ -1388,45 +1452,10 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
   return endpoint.toString().replace(/\/+$/, "");
 }
 
-// src/llm/errors.ts
-var LlmRequestTimeoutError = class extends Error {
-  constructor(timeoutMs, upstreamStatus) {
-    super(upstreamStatus ? `\u81EA\u5B9A\u4E49LLM\u4E0A\u6E38\u6682\u65F6\u4E0D\u53EF\u7528\uFF08HTTP ${upstreamStatus}\uFF09\uFF0C\u6309\u8D85\u65F6\u5904\u7406\u3002` : `\u81EA\u5B9A\u4E49LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
-    this.timeoutMs = timeoutMs;
-    this.upstreamStatus = upstreamStatus;
-    this.name = "LlmRequestTimeoutError";
-  }
-};
-function isLlmRequestTimeoutError(error) {
-  return error instanceof LlmRequestTimeoutError;
-}
-var RETRIABLE_UPSTREAM_TIMEOUT_STATUSES = /* @__PURE__ */ new Set([
-  408,
-  502,
-  503,
-  504,
-  520,
-  521,
-  522,
-  523,
-  524
-]);
-function isRetriableUpstreamTimeoutStatus(status) {
-  return RETRIABLE_UPSTREAM_TIMEOUT_STATUSES.has(status);
-}
-function findRetriableUpstreamTimeoutStatus(message) {
-  for (const match of message.matchAll(/\b(?:HTTP|status)\s*[:=]?\s*(\d{3})\b/gi)) {
-    const status = Number(match[1]);
-    if (isRetriableUpstreamTimeoutStatus(status)) {
-      return status;
-    }
-  }
-  return null;
-}
-
 // src/llm/openai-compatible-provider.ts
 var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
 var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+var MAX_REQUEST_TIMEOUT_MS2 = 6e5;
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1505,7 +1534,12 @@ var OpenAiCompatibleProvider = class {
       throw new Error("\u81EA\u5B9A\u4E49LLM API Key\u4E0D\u80FD\u5305\u542B\u6362\u884C\u7B26\u3002");
     }
     const controller = new AbortController();
-    const timeoutMs = Math.min(3e5, Math.max(1e3, Math.floor(this.config.timeoutMs)));
+    const rawRequestTimeoutMs = request.timeoutMs;
+    const requestedTimeoutMs = typeof rawRequestTimeoutMs === "number" && Number.isFinite(rawRequestTimeoutMs) ? rawRequestTimeoutMs : this.config.timeoutMs;
+    const timeoutMs = Math.min(
+      MAX_REQUEST_TIMEOUT_MS2,
+      Math.max(1e3, Math.floor(requestedTimeoutMs))
+    );
     const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
     const abort = () => controller.abort();
     request.signal?.addEventListener("abort", abort, { once: true });
@@ -2761,7 +2795,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.16";
+var EXTENSION_VERSION = "0.20.17";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -7349,6 +7383,9 @@ function scopeMemoriesToCurrentStoryPhase(memories, messages, currentInputMessag
   };
 }
 
+// src/summary/constants.ts
+var SUMMARY_LLM_TIMEOUT_MS = 6e5;
+
 // src/summary/prompts.ts
 var STAGE_SUMMARY_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u540D\u4E13\u4E1A\u7684\u957F\u7BC7\u89D2\u8272\u626E\u6F14\u5267\u60C5\u8FDE\u7EED\u6027\u7F16\u8F91\u5668\u3002
 
@@ -7781,13 +7818,15 @@ ${prompt}`;
         sourceCharacterLimit: MAX_SUMMARY_SOURCE_CHARACTERS,
         previousSummaryCharacters: Array.from(boundedPrevious).length,
         requestCharacters: requestInput.length,
-        estimatedRequestTokens: estimateTokens(requestInput)
+        estimatedRequestTokens: estimateTokens(requestInput),
+        requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1e3
       });
     }
     const raw = await completeWithConfiguredProvider(settings, {
       system: STAGE_SUMMARY_SYSTEM_PROMPT,
       prompt,
-      maxTokens: settings.summary.maxTokens
+      maxTokens: settings.summary.maxTokens,
+      timeoutMs: SUMMARY_LLM_TIMEOUT_MS
     });
     const currentChat = getContext().chat;
     const currentHash = await sha256(sourcePayload3(
@@ -8409,7 +8448,8 @@ var StorySkeletonService = class {
           mode,
           worldBackground
         }),
-        maxTokens: settings.summary.skeletonMaxTokens
+        maxTokens: settings.summary.skeletonMaxTokens,
+        timeoutMs: SUMMARY_LLM_TIMEOUT_MS
       });
       draft = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
       processedEntries += batch.length;
@@ -8442,6 +8482,7 @@ var StorySkeletonService = class {
       ),
       skeletonCharacters: draft.length,
       skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+      requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1e3,
       llmCallsPerBatch: 1,
       mode: options.rebuild ? "full-rebuild" : staleAtStart ? "stale-rebuild" : "initial-build"
     });
@@ -8487,7 +8528,8 @@ var StorySkeletonService = class {
           mode: "incremental-update",
           worldBackground
         }),
-        maxTokens: settings.summary.skeletonMaxTokens
+        maxTokens: settings.summary.skeletonMaxTokens,
+        timeoutMs: SUMMARY_LLM_TIMEOUT_MS
       });
       const text2 = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
       const live = this.validateIncrementalSources(
@@ -8517,6 +8559,7 @@ var StorySkeletonService = class {
         sourceCharacters: skeletonSourceEntryCharacters(sourceEntry),
         skeletonCharacters: text2.length,
         skeletonMaxTokens: settings.summary.skeletonMaxTokens,
+        requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1e3,
         llmCallsPerBatch: 1,
         mode: "incremental-update"
       });
@@ -12181,7 +12224,7 @@ function panelTemplate() {
               <input id="story-echo-skeleton-max-tokens" class="text_pole" type="number" min="512" max="10000" step="128">
             </label>
             <p class="story-echo-hint story-echo-field-wide">
-              \u603B\u5F00\u5173\u5F00\u542F\u540E\u81EA\u52A8\u7EF4\u62A4\u9636\u6BB5\u603B\u7ED3\u3002\u6700\u5C0F\u7A97\u53E3 W \u5185\u539F\u6587\u59CB\u7EC8\u4FDD\u7559\uFF1B\u7A97\u53E3\u5916\u6BCF\u6EE1 N \u8F6E\u751F\u6210\u4E00\u6761\u72EC\u7ACB\u603B\u7ED3\uFF0C\u5355\u6279\u539F\u6587\u6700\u591A\u7EA6 100000 \u5B57\u7B26\uFF0C\u672A\u6EE1 N \u8F6E\u7EE7\u7EED\u4FDD\u7559\u539F\u6587\u3002\u65B0\u603B\u7ED3\u4F1A\u53C2\u8003\u7D27\u90BB\u4E0A\u4E00\u6761\u603B\u7ED3\u672B\u5C3E\u6700\u591A 5000 \u5B57\u7B26\u4EE5\u8854\u63A5\u65F6\u95F4\u7EBF\uFF0C\u672C\u6279\u539F\u6587\u8D1F\u8D23\u63D0\u4F9B\u8F83\u65B0\u5267\u60C5\u3002\u5E38\u89C4\u603B\u7ED3\u7EA6 1000\uFF5E1600 \u4E2A\u4E2D\u6587\u5B57\u7B26\uFF0C\u590D\u6742\u591A\u7EBF\u5267\u60C5\u53EF\u81EA\u7136\u6269\u5C55\u3002\u8F83\u8001\u603B\u7ED3\u4F1A\u6C47\u5165\u8BB0\u5F55\u91CD\u8981\u5386\u53F2\u4E8B\u4EF6\u4E0E\u5267\u60C5\u5927\u7EB2\u7684\u957F\u671F\u9AA8\u67B6\uFF0C\u8BF7\u6C42\u540C\u65F6\u643A\u5E26\u6700\u8FD1 S \u6761\u9636\u6BB5\u603B\u7ED3\uFF1B\u5F53\u524D\u72B6\u6001\u548C\u4EBA\u7269\u6863\u6848\u7531\u8FD1\u671F\u4E0A\u4E0B\u6587\u3001MVU\u53D8\u91CF\u4E0E\u4E16\u754C\u4E66\u627F\u62C5\u3002\u9AA8\u67B6\u6BCF\u6279\u53EA\u8BF7\u6C42\u4E00\u6B21 LLM\uFF0C\u5728\u4E3B\u63D0\u793A\u8BCD\u4E2D\u540C\u65F6\u5B8C\u6210\u4E8B\u5B9E\u5F52\u5C5E\u4E0E\u5386\u53F2\u7EC4\u7EC7\uFF1B\u9ED8\u8BA4\u4E0A\u9650\u4E3A 5000 Token\uFF0C\u53EF\u5728 512\uFF5E10000 \u4E4B\u95F4\u8C03\u6574\u3002
+              \u603B\u5F00\u5173\u5F00\u542F\u540E\u81EA\u52A8\u7EF4\u62A4\u9636\u6BB5\u603B\u7ED3\u3002\u6700\u5C0F\u7A97\u53E3 W \u5185\u539F\u6587\u59CB\u7EC8\u4FDD\u7559\uFF1B\u7A97\u53E3\u5916\u6BCF\u6EE1 N \u8F6E\u751F\u6210\u4E00\u6761\u72EC\u7ACB\u603B\u7ED3\uFF0C\u5355\u6279\u539F\u6587\u6700\u591A\u7EA6 100000 \u5B57\u7B26\uFF0C\u672A\u6EE1 N \u8F6E\u7EE7\u7EED\u4FDD\u7559\u539F\u6587\u3002\u65B0\u603B\u7ED3\u4F1A\u53C2\u8003\u7D27\u90BB\u4E0A\u4E00\u6761\u603B\u7ED3\u672B\u5C3E\u6700\u591A 5000 \u5B57\u7B26\u4EE5\u8854\u63A5\u65F6\u95F4\u7EBF\uFF0C\u672C\u6279\u539F\u6587\u8D1F\u8D23\u63D0\u4F9B\u8F83\u65B0\u5267\u60C5\u3002\u5E38\u89C4\u603B\u7ED3\u7EA6 1000\uFF5E1600 \u4E2A\u4E2D\u6587\u5B57\u7B26\uFF0C\u590D\u6742\u591A\u7EBF\u5267\u60C5\u53EF\u81EA\u7136\u6269\u5C55\u3002\u8F83\u8001\u603B\u7ED3\u4F1A\u6C47\u5165\u8BB0\u5F55\u91CD\u8981\u5386\u53F2\u4E8B\u4EF6\u4E0E\u5267\u60C5\u5927\u7EB2\u7684\u957F\u671F\u9AA8\u67B6\uFF0C\u8BF7\u6C42\u540C\u65F6\u643A\u5E26\u6700\u8FD1 S \u6761\u9636\u6BB5\u603B\u7ED3\uFF1B\u5F53\u524D\u72B6\u6001\u548C\u4EBA\u7269\u6863\u6848\u7531\u8FD1\u671F\u4E0A\u4E0B\u6587\u3001MVU\u53D8\u91CF\u4E0E\u4E16\u754C\u4E66\u627F\u62C5\u3002\u9636\u6BB5\u603B\u7ED3\u548C\u9AA8\u67B6\u7684\u6BCF\u6B21 LLM \u8BF7\u6C42\u8D85\u65F6\u5747\u4E3A 600 \u79D2\u3002\u9AA8\u67B6\u6BCF\u6279\u53EA\u8BF7\u6C42\u4E00\u6B21 LLM\uFF0C\u5728\u4E3B\u63D0\u793A\u8BCD\u4E2D\u540C\u65F6\u5B8C\u6210\u4E8B\u5B9E\u5F52\u5C5E\u4E0E\u5386\u53F2\u7EC4\u7EC7\uFF1B\u9ED8\u8BA4\u4E0A\u9650\u4E3A 5000 Token\uFF0C\u53EF\u5728 512\uFF5E10000 \u4E4B\u95F4\u8C03\u6574\u3002
             </p>
             <div class="story-echo-field-wide">
               ${stageSummaryManagerTemplate()}

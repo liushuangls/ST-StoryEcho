@@ -296,6 +296,8 @@ export interface LlmRequest {
   jsonExample?: unknown;
   structuredOutput?: LlmStructuredOutputMode;
   maxTokens?: number;
+  /** Optional per-request deadline. Providers keep their normal default when omitted. */
+  timeoutMs?: number;
   signal?: AbortSignal;
 }
 

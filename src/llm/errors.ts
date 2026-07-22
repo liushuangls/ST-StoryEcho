@@ -4,8 +4,8 @@ export class LlmRequestTimeoutError extends Error {
     readonly upstreamStatus?: number,
   ) {
     super(upstreamStatus
-      ? `自定义LLM上游暂时不可用（HTTP ${upstreamStatus}），按超时处理。`
-      : `自定义LLM请求超时（${timeoutMs}ms）。`);
+      ? `LLM上游暂时不可用（HTTP ${upstreamStatus}），按超时处理。`
+      : `LLM请求超时（${timeoutMs}ms）。`);
     this.name = 'LlmRequestTimeoutError';
   }
 }

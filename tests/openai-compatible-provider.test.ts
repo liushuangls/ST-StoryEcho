@@ -163,6 +163,38 @@ describe('OpenAiCompatibleProvider', () => {
     expect(error).toMatchObject({ timeoutMs: 1_000 });
   });
 
+  it('lets a stage-summary request override the provider default with 600 seconds', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn<typeof fetch>((_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('Aborted', 'AbortError'));
+      }, { once: true });
+    }));
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'model-name';
+    config.timeoutMs = 1_000;
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    let settled = false;
+    const outcome = provider.complete({
+      system: 'system',
+      prompt: 'prompt',
+      timeoutMs: 600_000,
+    }).catch((error: unknown) => error);
+    void outcome.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    const error = await outcome;
+    expect(error).toBeInstanceOf(LlmRequestTimeoutError);
+    expect(error).toMatchObject({ timeoutMs: 600_000 });
+  });
+
   it('marks a SillyTavern-wrapped upstream 524 as the same retriable timeout', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       error: { message: 'Got response status 524' },

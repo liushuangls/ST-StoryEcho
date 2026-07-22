@@ -5,7 +5,13 @@ import {
   type MainConnectionIdentity,
 } from '../platform/sillytavern';
 import { markInternalGenerationRequest, withInternalGeneration } from './internal-generation';
-import { runStoryEchoTaskAbortable } from '../runtime/task-cancellation';
+import {
+  runStoryEchoTaskAbortable,
+  StoryEchoTaskCancelledError,
+} from '../runtime/task-cancellation';
+import { LlmRequestTimeoutError } from './errors';
+
+const MAX_REQUEST_TIMEOUT_MS = 600_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -169,14 +175,46 @@ export class MainLlmProvider implements LlmProvider {
       options.responseLength = Math.min(10_000, Math.max(16, Math.floor(request.maxTokens)));
     }
 
-    const response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
-      context,
-      request,
-      () => runStoryEchoTaskAbortable(
-        () => context.generateRaw(options),
-        request.signal,
-      ),
-    ));
+    const rawRequestTimeoutMs = request.timeoutMs;
+    const requestedTimeoutMs = typeof rawRequestTimeoutMs === 'number'
+      && Number.isFinite(rawRequestTimeoutMs)
+      ? Math.min(MAX_REQUEST_TIMEOUT_MS, Math.max(1_000, Math.floor(rawRequestTimeoutMs)))
+      : null;
+    const timeoutController = requestedTimeoutMs === null ? null : new AbortController();
+    const onRequestAbort = (): void => {
+      timeoutController?.abort(
+        request.signal?.reason ?? new StoryEchoTaskCancelledError('请求已失效'),
+      );
+    };
+    if (timeoutController && request.signal) {
+      if (request.signal.aborted) {
+        onRequestAbort();
+      } else {
+        request.signal.addEventListener('abort', onRequestAbort, { once: true });
+      }
+    }
+    const timeout = timeoutController && requestedTimeoutMs !== null
+      ? globalThis.setTimeout(
+        () => timeoutController.abort(new LlmRequestTimeoutError(requestedTimeoutMs)),
+        requestedTimeoutMs,
+      )
+      : null;
+    let response: string;
+    try {
+      response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
+        context,
+        request,
+        () => runStoryEchoTaskAbortable(
+          () => context.generateRaw(options),
+          timeoutController?.signal ?? request.signal,
+        ),
+      ));
+    } finally {
+      if (timeout !== null) {
+        globalThis.clearTimeout(timeout);
+      }
+      request.signal?.removeEventListener('abort', onRequestAbort);
+    }
     // The marker exists only for request routing. A model may occasionally
     // echo the final prompt line, so strip the exact request nonce before any
     // parser or stage-summary storage sees it.

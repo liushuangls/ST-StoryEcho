@@ -19,6 +19,7 @@ import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
 import { firstStoryPhaseBoundary } from '../retrieval/story-phase';
 import { SettingsRepository } from '../settings/repository';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
+import { SUMMARY_LLM_TIMEOUT_MS } from './constants';
 import {
   boundedPreviousStageSummary,
   buildStageSummaryGrounding,
@@ -460,12 +461,14 @@ export class StageSummaryService {
         previousSummaryCharacters: Array.from(boundedPrevious).length,
         requestCharacters: requestInput.length,
         estimatedRequestTokens: estimateTokens(requestInput),
+        requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1_000,
       });
     }
     const raw = await completeWithConfiguredProvider(settings, {
       system: STAGE_SUMMARY_SYSTEM_PROMPT,
       prompt,
       maxTokens: settings.summary.maxTokens,
+      timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
     });
     // Detect a branch/edit before accepting even the summary format, so a
     // stale request is always reported and discarded for the right cause.
