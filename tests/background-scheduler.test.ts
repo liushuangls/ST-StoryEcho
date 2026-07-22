@@ -497,6 +497,59 @@ describe('backgroundTargetMessageId', () => {
     expect(cancelBackground).toHaveBeenCalledWith('聊天分支已经切换');
   });
 
+  it('releases the reply lease immediately when an assistant swipe changes branch', async () => {
+    const chat = [...turn('u1', 'a1')];
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    settings.enabled = true;
+    settings.memory.enabled = false;
+    const state = chatState([]);
+    state.ownerChatId = 'chat-id';
+    const handlers = new Map<string, (...args: unknown[]) => void | Promise<void>>();
+    const context = {
+      chat,
+      chatId: 'chat-id',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: { [MODULE_ID]: state },
+      event_types: {
+        MESSAGE_RECEIVED: 'message-received',
+        MESSAGE_SWIPED: 'message-swiped',
+      },
+      eventSource: {
+        on: vi.fn((event: string, handler: (...args: unknown[]) => void | Promise<void>) => {
+          handlers.set(event, handler);
+        }),
+        off: vi.fn(),
+      },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'chat-id',
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const scheduler = new BackgroundProcessingScheduler();
+    const schedule = vi.spyOn(scheduler, 'schedule').mockImplementation(() => undefined);
+    const cancelBackground = vi.spyOn(storyEchoTaskCoordinator, 'cancelRunningBackground');
+    scheduler.register();
+    schedule.mockClear();
+
+    await storyEchoTaskCoordinator.enqueueForeground('old reply', async () => true);
+    expect(storyEchoTaskCoordinator.snapshot().foregroundLeaseActive).toBe(true);
+    const manualStarted = vi.fn();
+    const manual = storyEchoTaskCoordinator.enqueueManual('queued manual', async () => {
+      manualStarted();
+    });
+    await Promise.resolve();
+    expect(manualStarted).not.toHaveBeenCalled();
+
+    handlers.get('message-swiped')?.();
+    await manual;
+    scheduler.unregister();
+
+    expect(storyEchoTaskCoordinator.snapshot().foregroundLeaseActive).toBe(false);
+    expect(cancelBackground).toHaveBeenCalledWith('聊天回复分支已经切换');
+    expect(schedule).toHaveBeenCalledOnce();
+  });
+
   it('forces reconciliation when history mutates during background extraction', async () => {
     const chat = [...turn('u1', 'a1'), ...turn('u2', 'a2')];
     const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;

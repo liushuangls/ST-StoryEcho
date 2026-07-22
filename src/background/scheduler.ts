@@ -144,17 +144,26 @@ export class BackgroundProcessingScheduler {
       'MESSAGE_EDITED',
       'MESSAGE_UPDATED',
       'MESSAGE_SWIPED',
+      'MESSAGE_SWIPE_DELETED',
     ];
+    const branchMutationEvents = new Set([
+      'CHAT_CHANGED',
+      'MESSAGE_SWIPED',
+      'MESSAGE_SWIPE_DELETED',
+    ]);
     const registeredNames = new Set([eventName]);
     for (const eventKey of mutationEvents) {
       const mutationEventName = eventTypes?.[eventKey];
       if (!mutationEventName || registeredNames.has(mutationEventName)) {
         continue;
       }
-      const mutationHandler = eventKey === 'CHAT_CHANGED'
+      const mutationHandler = branchMutationEvents.has(eventKey)
         ? (): void => {
-            markHistoryDirty('聊天分支已经切换');
-            storyEchoTaskCoordinator.releaseForegroundLease('chat-changed');
+            const isChatChange = eventKey === 'CHAT_CHANGED';
+            markHistoryDirty(isChatChange ? '聊天分支已经切换' : '聊天回复分支已经切换');
+            storyEchoTaskCoordinator.releaseForegroundLease(
+              isChatChange ? 'chat-changed' : 'message-swiped',
+            );
             this.schedule();
           }
         : (): void => markHistoryDirty(`聊天历史事件：${eventKey}`);

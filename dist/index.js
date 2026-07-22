@@ -2823,7 +2823,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.21";
+var EXTENSION_VERSION = "0.20.22";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -8734,17 +8734,26 @@ var BackgroundProcessingScheduler = class {
       "MESSAGE_DELETED",
       "MESSAGE_EDITED",
       "MESSAGE_UPDATED",
-      "MESSAGE_SWIPED"
+      "MESSAGE_SWIPED",
+      "MESSAGE_SWIPE_DELETED"
     ];
+    const branchMutationEvents = /* @__PURE__ */ new Set([
+      "CHAT_CHANGED",
+      "MESSAGE_SWIPED",
+      "MESSAGE_SWIPE_DELETED"
+    ]);
     const registeredNames = /* @__PURE__ */ new Set([eventName]);
     for (const eventKey of mutationEvents) {
       const mutationEventName = eventTypes?.[eventKey];
       if (!mutationEventName || registeredNames.has(mutationEventName)) {
         continue;
       }
-      const mutationHandler = eventKey === "CHAT_CHANGED" ? () => {
-        markHistoryDirty("\u804A\u5929\u5206\u652F\u5DF2\u7ECF\u5207\u6362");
-        storyEchoTaskCoordinator.releaseForegroundLease("chat-changed");
+      const mutationHandler = branchMutationEvents.has(eventKey) ? () => {
+        const isChatChange = eventKey === "CHAT_CHANGED";
+        markHistoryDirty(isChatChange ? "\u804A\u5929\u5206\u652F\u5DF2\u7ECF\u5207\u6362" : "\u804A\u5929\u56DE\u590D\u5206\u652F\u5DF2\u7ECF\u5207\u6362");
+        storyEchoTaskCoordinator.releaseForegroundLease(
+          isChatChange ? "chat-changed" : "message-swiped"
+        );
         this.schedule();
       } : () => markHistoryDirty(`\u804A\u5929\u5386\u53F2\u4E8B\u4EF6\uFF1A${eventKey}`);
       eventSource.on(mutationEventName, mutationHandler);
