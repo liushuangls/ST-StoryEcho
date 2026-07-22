@@ -2704,7 +2704,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 8;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.4";
+var EXTENSION_VERSION = "0.20.5";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
