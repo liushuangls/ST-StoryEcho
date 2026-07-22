@@ -88,7 +88,7 @@ describe('global story skeleton lifecycle', () => {
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('完整人物资料');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('最新境界、属性数值、生命状态');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前工作状态继续由近期剧情与MVU变量承载');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('短期安排本身保持为当前工作状态');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('未来计划、短期安排和下一步操作在实际造成长期变化后');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('候选路径');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('既定方案');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('已执行事件');
@@ -97,11 +97,17 @@ describe('global story skeleton lifecycle', () => {
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择合适的标题');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('事情如何走到这里');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('分别视为独立实体');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('其持有傀儡的阶位');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('世界背景本身不提供事件发生证据');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('已发生事件、持久影响、当前状态快照、未来计划');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('仍未揭晓的核心问题');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('存在明显矛盾或不影响长期理解时');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('未产生新变化的重复互动');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('内容上限而非填充目标');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每条关系句都以可观察互动、明确原话、决定或行动为主体');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每件历史事件选择一个主要叙述位置');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('在这一次生成中同时完成');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('下一触发条件');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('其持有傀儡的阶位');
     expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('恋爱确认');
   });
 
@@ -180,7 +186,7 @@ describe('global story skeleton lifecycle', () => {
     expect(prompt).toContain('用户角色长期持有太虚剑');
     expect(prompt).toContain('用户角色开始修炼无我剑诀');
     expect(prompt).not.toContain('第3阶段');
-    expect(String(request?.systemPrompt ?? '')).toContain('旧骨架与阶段总结提供已经发生的剧情');
+    expect(String(request?.systemPrompt ?? '')).toContain('世界背景本身不提供事件发生证据');
   });
 
   it('generates and fact-aligns each batch in one LLM call', async () => {
