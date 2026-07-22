@@ -107,6 +107,63 @@ describe('StoryEchoTaskCoordinator', () => {
     expect(coordinator.snapshot().foregroundLeaseActive).toBe(false);
   });
 
+  it('releases a stale reply lease when a new foreground generation arrives', async () => {
+    const coordinator = new StoryEchoTaskCoordinator(60_000);
+    const order: string[] = [];
+
+    await coordinator.enqueueForeground('first', async () => {
+      order.push('first');
+      return true;
+    });
+    expect(coordinator.snapshot().foregroundLeaseActive).toBe(true);
+
+    await coordinator.enqueueForeground(
+      'retry',
+      async () => {
+        order.push('retry');
+        return false;
+      },
+      { holdForegroundLease: (prepared) => prepared },
+    );
+
+    expect(order).toEqual(['first', 'retry']);
+    expect(coordinator.snapshot()).toMatchObject({
+      runningKind: null,
+      queuedForeground: 0,
+      foregroundLeaseActive: false,
+    });
+  });
+
+  it('does not let an older foreground task reacquire the lease after a retry is queued', async () => {
+    const coordinator = new StoryEchoTaskCoordinator(60_000);
+    const firstStarted = deferred();
+    const firstGate = deferred();
+    const order: string[] = [];
+
+    const first = coordinator.enqueueForeground('first', async () => {
+      order.push('first');
+      firstStarted.resolve(undefined);
+      await firstGate.promise;
+      return true;
+    });
+    await firstStarted.promise;
+
+    const retry = coordinator.enqueueForeground('retry', async () => {
+      order.push('retry');
+      return true;
+    });
+    firstGate.resolve(undefined);
+
+    await Promise.all([first, retry]);
+    expect(order).toEqual(['first', 'retry']);
+    expect(coordinator.snapshot()).toMatchObject({
+      runningKind: null,
+      queuedForeground: 0,
+      foregroundLeaseActive: true,
+    });
+    coordinator.releaseForegroundLease('test-cleanup');
+  });
+
   it('continues draining after a task rejects', async () => {
     const coordinator = new StoryEchoTaskCoordinator(60_000);
     const failure = coordinator.enqueueManual('failure', async () => {

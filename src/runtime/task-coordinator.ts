@@ -71,6 +71,13 @@ export class StoryEchoTaskCoordinator {
         timeout: ReturnType<typeof setTimeout>;
       }
     | undefined;
+  /**
+   * Only the newest real generation may hold the post-interceptor lease.
+   * A retry can arrive while an older foreground preparation is still
+   * running; without this revision guard the older task would finish first,
+   * acquire a fresh lease, and block the retry that superseded it.
+   */
+  private latestForegroundTaskId = 0;
   private pumpScheduled = false;
   private lastQueueWaitMs = 0;
   private maximumQueueWaitMs = 0;
@@ -85,6 +92,12 @@ export class StoryEchoTaskCoordinator {
     options: EnqueueOptions<T> = {},
   ): Promise<T> {
     const queued = this.enqueue('foreground', name, operation, options);
+    // Reaching the interceptor for a new real generation proves that any
+    // lease left by the preceding generation is obsolete. SillyTavern does
+    // not emit MESSAGE_RECEIVED when a request ends without an assistant
+    // message, and some failure paths also omit the stop event. Do not make a
+    // user retry wait for the ten-minute lease watchdog in those cases.
+    this.releaseForegroundLease('new-foreground-request');
     // A real character generation must never wait forever behind a stale
     // internal request. The background scheduler will retry its uncommitted
     // block after the foreground lease is released.
@@ -159,6 +172,7 @@ export class StoryEchoTaskCoordinator {
       queue.splice(0, queue.length);
     }
     this.running = undefined;
+    this.latestForegroundTaskId = 0;
     this.pumpScheduled = false;
     this.lastQueueWaitMs = 0;
     this.maximumQueueWaitMs = 0;
@@ -184,6 +198,9 @@ export class StoryEchoTaskCoordinator {
         task.holdForegroundLease = options.holdForegroundLease;
       }
       this.nextTaskId += 1;
+      if (kind === 'foreground') {
+        this.latestForegroundTaskId = task.id;
+      }
       this.queues[kind].push(task as QueuedTask<unknown>);
     });
     emitDiagnosticsUpdated();
@@ -232,6 +249,7 @@ export class StoryEchoTaskCoordinator {
     try {
       const result = await task.operation(controller.signal);
       const shouldHoldLease = task.kind === 'foreground'
+        && task.id === this.latestForegroundTaskId
         && (task.holdForegroundLease?.(result) ?? true);
       if (shouldHoldLease) {
         this.acquireForegroundLease(task.id);

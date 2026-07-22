@@ -1682,11 +1682,19 @@ var StoryEchoTaskCoordinator = class {
   nextTaskId = 1;
   running;
   foregroundLease;
+  /**
+   * Only the newest real generation may hold the post-interceptor lease.
+   * A retry can arrive while an older foreground preparation is still
+   * running; without this revision guard the older task would finish first,
+   * acquire a fresh lease, and block the retry that superseded it.
+   */
+  latestForegroundTaskId = 0;
   pumpScheduled = false;
   lastQueueWaitMs = 0;
   maximumQueueWaitMs = 0;
   enqueueForeground(name, operation, options = {}) {
     const queued = this.enqueue("foreground", name, operation, options);
+    this.releaseForegroundLease("new-foreground-request");
     this.cancelRunningBackground("\u65B0\u7684\u89D2\u8272\u751F\u6210\u9700\u8981\u4F18\u5148\u6267\u884C");
     return queued;
   }
@@ -1748,6 +1756,7 @@ var StoryEchoTaskCoordinator = class {
       queue.splice(0, queue.length);
     }
     this.running = void 0;
+    this.latestForegroundTaskId = 0;
     this.pumpScheduled = false;
     this.lastQueueWaitMs = 0;
     this.maximumQueueWaitMs = 0;
@@ -1767,6 +1776,9 @@ var StoryEchoTaskCoordinator = class {
         task.holdForegroundLease = options.holdForegroundLease;
       }
       this.nextTaskId += 1;
+      if (kind === "foreground") {
+        this.latestForegroundTaskId = task.id;
+      }
       this.queues[kind].push(task);
     });
     emitDiagnosticsUpdated();
@@ -1808,7 +1820,7 @@ var StoryEchoTaskCoordinator = class {
     emitDiagnosticsUpdated();
     try {
       const result = await task.operation(controller.signal);
-      const shouldHoldLease = task.kind === "foreground" && (task.holdForegroundLease?.(result) ?? true);
+      const shouldHoldLease = task.kind === "foreground" && task.id === this.latestForegroundTaskId && (task.holdForegroundLease?.(result) ?? true);
       if (shouldHoldLease) {
         this.acquireForegroundLease(task.id);
       }
@@ -2811,7 +2823,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.20";
+var EXTENSION_VERSION = "0.20.21";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
