@@ -60,6 +60,8 @@ describe('independent stage summaries', () => {
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('修炼、学习、赠礼、照料、同行');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('触发互动—具体回应—造成的变化或留下的问题');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('好感数值和关系阶段继续由MVU变量呈现');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('关系结论只取材于角色明确说出的身份、承诺、拒绝或界限');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).not.toContain('恋爱确认');
   });
 
   it('advances independently of the extraction cursor in summary-only mode', async () => {
