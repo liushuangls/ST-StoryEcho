@@ -26,11 +26,17 @@ describe('extension manifest', () => {
     expect(existsSync(resolve(jsAsset))).toBe(true);
     expect(existsSync(resolve(cssAsset))).toBe(true);
     expect(manifest.generate_interceptor).toBe('storyEchoGenerateInterceptor');
-    expect(manifest.hooks).toEqual({ activate: 'onActivate' });
+    expect(manifest.hooks).toEqual({
+      activate: 'onActivate',
+      enable: 'onEnable',
+      disable: 'onDisable',
+    });
 
     const bundle = readFileSync(resolve(jsAsset), 'utf8');
     expect(bundle).toContain('globalThis.storyEchoGenerateInterceptor');
     expect(bundle).toContain('memoryMetadataManager');
     expect(bundle).toMatch(/export\s*\{[\s\S]*onActivate/);
+    expect(bundle).toMatch(/export\s*\{[\s\S]*onDisable/);
+    expect(bundle).toMatch(/export\s*\{[\s\S]*onEnable/);
   });
 });

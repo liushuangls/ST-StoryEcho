@@ -42,7 +42,10 @@ import {
 } from '../summary/skeleton-state';
 import type { VectorQueryResult } from '../vector/adapter';
 import { resolveVectorConfig } from '../vector/config';
-import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
+import {
+  FOREGROUND_VECTOR_QUERY_TIMEOUT_MS,
+  SillyTavernVectorStore,
+} from '../vector/sillytavern-vector-store';
 import {
   buildEntityDisambiguationConstraints,
   estimateMessageTokens,
@@ -395,6 +398,7 @@ async function prepareStoryEchoPrompt(
             topK,
             settings.recall.scoreThreshold,
             vectorConfig,
+            { timeoutMs: FOREGROUND_VECTOR_QUERY_TIMEOUT_MS },
           );
         } catch (error) {
           state.metrics.vectorQueryFailures += 1;

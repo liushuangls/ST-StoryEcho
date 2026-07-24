@@ -1,14 +1,25 @@
 import { getRequestHeaders } from '../platform/sillytavern';
+import { readResponseTextWithLimit } from '../http/response';
+import {
+  runStoryEchoTaskAbortable,
+} from '../runtime/task-cancellation';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import type {
   VectorItem,
   VectorQueryResult,
   VectorRequestConfig,
+  VectorRequestOptions,
   VectorStoreAdapter,
 } from './adapter';
 import type { EmbeddingClientResolver } from './embedding-providers';
 import { resolveEmbeddingClient } from './embedding-providers';
 
 const EMBEDDING_BATCH_SIZE = 64;
+const DEFAULT_VECTOR_QUERY_TIMEOUT_MS = 30_000;
+const DEFAULT_VECTOR_MUTATION_TIMEOUT_MS = 120_000;
+const MAX_VECTOR_REQUEST_TIMEOUT_MS = 300_000;
+const MAX_VECTOR_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const FOREGROUND_VECTOR_QUERY_TIMEOUT_MS = 8_000;
 
 interface VectorMetadata {
   hash?: number | string;
@@ -43,6 +54,7 @@ export class SillyTavernVectorStore implements VectorStoreAdapter {
   private async embedTexts(
     texts: string[],
     config: NonNullable<VectorRequestConfig['precomputed']>,
+    signal: AbortSignal,
   ): Promise<number[][]> {
     const embeddingClient = this.embeddingClientResolver(config.provider);
     const vectors: number[][] = [];
@@ -50,25 +62,33 @@ export class SillyTavernVectorStore implements VectorStoreAdapter {
       vectors.push(...await embeddingClient.embed({
         ...config,
         texts: texts.slice(start, start + EMBEDDING_BATCH_SIZE),
+        signal,
       }));
     }
     return vectors;
   }
 
-  async insert(collectionId: string, items: VectorItem[], config: VectorRequestConfig): Promise<void> {
+  async insert(
+    collectionId: string,
+    items: VectorItem[],
+    config: VectorRequestConfig,
+    options?: VectorRequestOptions,
+  ): Promise<void> {
     if (items.length === 0) {
       return;
     }
-    const embeddings = config.precomputed
-      ? embeddingMap(
-          items.map((item) => item.text),
-          await this.embedTexts(items.map((item) => item.text), config.precomputed),
-        )
-      : undefined;
-    await this.post('/api/vector/insert', requestBody(collectionId, config, {
-      items,
-      ...(embeddings ? { embeddings } : {}),
-    }));
+    await this.runRequest('写入', DEFAULT_VECTOR_MUTATION_TIMEOUT_MS, options, async (signal) => {
+      const embeddings = config.precomputed
+        ? embeddingMap(
+            items.map((item) => item.text),
+            await this.embedTexts(items.map((item) => item.text), config.precomputed, signal),
+          )
+        : undefined;
+      await this.post('/api/vector/insert', requestBody(collectionId, config, {
+        items,
+        ...(embeddings ? { embeddings } : {}),
+      }), signal);
+    });
   }
 
   async query(
@@ -77,65 +97,130 @@ export class SillyTavernVectorStore implements VectorStoreAdapter {
     topK: number,
     threshold: number,
     config: VectorRequestConfig,
+    options?: VectorRequestOptions,
   ): Promise<VectorQueryResult[]> {
-    const embeddings = config.precomputed
-      ? embeddingMap(
-          [searchText],
-          await this.embedTexts([searchText], config.precomputed),
-        )
-      : undefined;
-    const response = await this.post('/api/vector/query',
-      requestBody(collectionId, config, {
-        searchText,
-        topK,
-        threshold,
-        ...(embeddings ? { embeddings } : {}),
-      }));
-    const responseRecord = Array.isArray(response) ? {} : response;
-    const metadata = Array.isArray(responseRecord['metadata'])
-      ? (responseRecord['metadata'] as VectorMetadata[])
-      : [];
+    return this.runRequest('查询', DEFAULT_VECTOR_QUERY_TIMEOUT_MS, options, async (signal) => {
+      const embeddings = config.precomputed
+        ? embeddingMap(
+            [searchText],
+            await this.embedTexts([searchText], config.precomputed, signal),
+          )
+        : undefined;
+      const response = await this.post('/api/vector/query',
+        requestBody(collectionId, config, {
+          searchText,
+          topK,
+          threshold,
+          ...(embeddings ? { embeddings } : {}),
+        }),
+        signal);
+      const responseRecord = Array.isArray(response) ? {} : response;
+      const metadata = Array.isArray(responseRecord['metadata'])
+        ? (responseRecord['metadata'] as VectorMetadata[])
+        : [];
 
-    return metadata.flatMap((item, rank) => {
-      const hash = Number(item.hash);
-      const index = Number(item.index);
-      if (!Number.isFinite(hash)) {
-        return [];
-      }
-      return [{
-        hash,
-        text: typeof item.text === 'string' ? item.text : '',
-        index: Number.isFinite(index) ? index : -1,
-        rank,
-      }];
+      return metadata.flatMap((item, rank) => {
+        const hash = Number(item.hash);
+        const index = Number(item.index);
+        if (!Number.isFinite(hash)) {
+          return [];
+        }
+        return [{
+          hash,
+          text: typeof item.text === 'string' ? item.text : '',
+          index: Number.isFinite(index) ? index : -1,
+          rank,
+        }];
+      });
     });
   }
 
-  async list(collectionId: string, config: VectorRequestConfig): Promise<number[]> {
-    const response = await this.post('/api/vector/list', requestBody(collectionId, config));
-    if (!Array.isArray(response)) {
-      return [];
-    }
-    return response.map(Number).filter(Number.isFinite);
+  async list(
+    collectionId: string,
+    config: VectorRequestConfig,
+    options?: VectorRequestOptions,
+  ): Promise<number[]> {
+    return this.runRequest('读取', DEFAULT_VECTOR_QUERY_TIMEOUT_MS, options, async (signal) => {
+      const response = await this.post(
+        '/api/vector/list',
+        requestBody(collectionId, config),
+        signal,
+      );
+      if (!Array.isArray(response)) {
+        return [];
+      }
+      return response.map(Number).filter(Number.isFinite);
+    });
   }
 
-  async delete(collectionId: string, hashes: number[], config: VectorRequestConfig): Promise<void> {
+  async delete(
+    collectionId: string,
+    hashes: number[],
+    config: VectorRequestConfig,
+    options?: VectorRequestOptions,
+  ): Promise<void> {
     if (hashes.length === 0) {
       return;
     }
-    await this.post('/api/vector/delete', requestBody(collectionId, config, { hashes }));
+    await this.runRequest('删除', DEFAULT_VECTOR_MUTATION_TIMEOUT_MS, options, async (signal) => {
+      await this.post(
+        '/api/vector/delete',
+        requestBody(collectionId, config, { hashes }),
+        signal,
+      );
+    });
   }
 
-  async purge(collectionId: string): Promise<void> {
-    await this.post('/api/vector/purge', { collectionId });
+  async purge(collectionId: string, options?: VectorRequestOptions): Promise<void> {
+    await this.runRequest('清空', DEFAULT_VECTOR_MUTATION_TIMEOUT_MS, options, async (signal) => {
+      await this.post('/api/vector/purge', { collectionId }, signal);
+    });
   }
 
-  private async post(path: string, body: Record<string, unknown>): Promise<Record<string, unknown> | unknown[]> {
+  private async runRequest<T>(
+    operationName: string,
+    defaultTimeoutMs: number,
+    options: VectorRequestOptions | undefined,
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const upstreamSignal = options?.signal ?? storyEchoTaskCoordinator.activeTaskSignal();
+    const timeoutMs = Math.min(
+      MAX_VECTOR_REQUEST_TIMEOUT_MS,
+      Math.max(1, Math.floor(options?.timeoutMs ?? defaultTimeoutMs)),
+    );
+    const controller = new AbortController();
+    const abortFromUpstream = (): void => {
+      controller.abort(upstreamSignal?.reason);
+    };
+    if (upstreamSignal?.aborted) {
+      abortFromUpstream();
+    } else {
+      upstreamSignal?.addEventListener('abort', abortFromUpstream, { once: true });
+    }
+    const timeoutError = new Error(`Vector Storage${operationName}超时（${timeoutMs}ms）。`);
+    const timeout = globalThis.setTimeout(() => controller.abort(timeoutError), timeoutMs);
+    try {
+      return await runStoryEchoTaskAbortable(
+        () => operation(controller.signal),
+        controller.signal,
+      );
+    } finally {
+      globalThis.clearTimeout(timeout);
+      upstreamSignal?.removeEventListener('abort', abortFromUpstream);
+    }
+  }
+
+  private async post(
+    path: string,
+    body: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown> | unknown[]> {
     const headers = await getRequestHeaders();
     const response = await fetch(path, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!response.ok) {
@@ -145,7 +230,11 @@ export class SillyTavernVectorStore implements VectorStoreAdapter {
       return {};
     }
 
-    const text = await response.text();
+    const text = await readResponseTextWithLimit(
+      response,
+      MAX_VECTOR_RESPONSE_BYTES,
+      `Vector Storage响应过大：${path}`,
+    );
     if (!text) {
       return {};
     }

@@ -169,6 +169,7 @@ export class PromptTokenStatsCard {
   }
 
   invalidate(): void {
+    this.renderSequence += 1;
     promptItemizationService.clearCache();
   }
 

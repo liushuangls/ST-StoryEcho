@@ -1,5 +1,6 @@
 import { CHAT_STATE_VERSION, MODULE_ID, VECTOR_COLLECTION_PREFIX } from '../core/constants';
 import { allocateVectorHash, sha256 } from '../core/hash';
+import { logger } from '../core/logger';
 import type {
   EvidenceRole,
   MemoryStatus,
@@ -17,7 +18,22 @@ import { createUuid } from '../core/uuid';
 import { deriveLogicalKey } from '../consolidation/identity';
 import { classifyEvidenceRole } from '../extraction/evidence';
 import { SettingsRepository } from '../settings/repository';
+import { vectorCollectionRegistry } from '../vector/collection-registry';
 import { normalizeStorySkeletonText } from '../summary/skeleton-state';
+
+let vectorRegistryWarningReported = false;
+
+function rememberVectorCollection(ownerChatId: string, collectionId: string): void {
+  try {
+    vectorCollectionRegistry.remember(ownerChatId, collectionId);
+    vectorRegistryWarningReported = false;
+  } catch (error) {
+    if (!vectorRegistryWarningReported) {
+      vectorRegistryWarningReported = true;
+      logger.warn('记录聊天向量集合索引失败；聊天元数据仍保持可用。', error);
+    }
+  }
+}
 
 function createCollectionId(chatUuid: string): string {
   return `${VECTOR_COLLECTION_PREFIX}_${chatUuid}_v${CHAT_STATE_VERSION}`;
@@ -645,7 +661,9 @@ export class MemoryRepository {
     if (!isStateBase(stored) || stored.ownerChatId !== getCurrentChatId(context)) {
       return null;
     }
-    return isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
+    const state = isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
+    rememberVectorCollection(state.ownerChatId, state.vectorCollectionId);
+    return state;
   }
 
   async getOrCreate(): Promise<StoryEchoChatState | null> {
@@ -660,6 +678,7 @@ export class MemoryRepository {
       const state = createState(currentChatId);
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
+      rememberVectorCollection(state.ownerChatId, state.vectorCollectionId);
       return state;
     }
 
@@ -691,9 +710,11 @@ export class MemoryRepository {
       delete branchState.lastInspection;
       context.chatMetadata[MODULE_ID] = branchState;
       await context.saveMetadata();
+      rememberVectorCollection(branchState.ownerChatId, branchState.vectorCollectionId);
       return branchState;
     }
 
+    rememberVectorCollection(state.ownerChatId, state.vectorCollectionId);
     return state;
   }
 
@@ -704,6 +725,26 @@ export class MemoryRepository {
     }
     context.chatMetadata[MODULE_ID] = state;
     await context.saveMetadata();
+    rememberVectorCollection(state.ownerChatId, state.vectorCollectionId);
+  }
+
+  async adoptRenamedChat(oldOwnerChatId: string, newOwnerChatId: string): Promise<boolean> {
+    const context = getContext();
+    const stored = context.chatMetadata[MODULE_ID];
+    if (
+      !isStateBase(stored)
+      || stored.ownerChatId !== oldOwnerChatId
+      || getCurrentChatId(context) !== newOwnerChatId
+    ) {
+      return false;
+    }
+    const state = isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
+    state.ownerChatId = newOwnerChatId;
+    context.chatMetadata[MODULE_ID] = state;
+    await context.saveMetadata();
+    vectorCollectionRegistry.rename(oldOwnerChatId, newOwnerChatId);
+    rememberVectorCollection(newOwnerChatId, state.vectorCollectionId);
+    return true;
   }
 
   async upsertMemories(memories: StoryMemory[]): Promise<StoryEchoChatState> {
@@ -948,6 +989,10 @@ export class MemoryRepository {
 
   async clear(): Promise<void> {
     const context = getContext();
+    const stored = context.chatMetadata[MODULE_ID];
+    if (isStateBase(stored)) {
+      vectorCollectionRegistry.queuePurge(stored.ownerChatId);
+    }
     delete context.chatMetadata[MODULE_ID];
     await context.saveMetadata();
   }

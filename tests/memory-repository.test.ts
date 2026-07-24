@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SillyTavernContext } from '../src/platform/sillytavern';
 import { MemoryRepository, type StoryMemoryEdit } from '../src/memory/repository';
+import { VectorCollectionRegistry } from '../src/vector/collection-registry';
 import { chatState, memory } from './fixtures';
 
 function editable(overrides: Partial<StoryMemoryEdit> = {}): StoryMemoryEdit {
@@ -45,6 +46,49 @@ describe('MemoryRepository migration', () => {
     globalThis.SillyTavern = { getContext: () => context };
 
     expect(new MemoryRepository().getExisting()).toBe(state);
+  });
+
+  it('keeps chat metadata readable when the global collection registry cannot be saved', () => {
+    const state = chatState([memory()]);
+    const context: SillyTavernContext = {
+      chat: [],
+      chatId: 'chat-id',
+      extensionSettings: {},
+      chatMetadata: { story_echo: state },
+      saveSettingsDebounced: vi.fn(() => {
+        throw new Error('settings storage unavailable');
+      }),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+
+    expect(new MemoryRepository().getExisting()).toBe(state);
+  });
+
+  it('adopts a renamed current chat without cloning or orphaning its vector collection', async () => {
+    const state = chatState([memory()]);
+    state.ownerChatId = 'old-chat';
+    const context: SillyTavernContext = {
+      chat: [],
+      chatId: 'new-chat',
+      extensionSettings: {},
+      chatMetadata: { story_echo: state },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+    };
+    globalThis.SillyTavern = { getContext: () => context };
+    const repository = new MemoryRepository();
+    const registry = new VectorCollectionRegistry();
+    registry.remember('old-chat', state.vectorCollectionId);
+
+    await expect(repository.adoptRenamedChat('old-chat', 'new-chat')).resolves.toBe(true);
+
+    expect(state.ownerChatId).toBe('new-chat');
+    expect(context.saveMetadata).toHaveBeenCalledOnce();
+    expect(registry.queuePurge('old-chat')).toBeNull();
+    expect(registry.queuePurge('new-chat')).toBe(state.vectorCollectionId);
   });
 
   it('still migrates a state whose diagnostics object predates newer counters', async () => {

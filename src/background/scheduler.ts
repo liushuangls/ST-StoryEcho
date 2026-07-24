@@ -19,15 +19,22 @@ import {
   pendingArchivedStageSummaryEntries,
   storySkeletonUpdateDue,
 } from '../summary/skeleton-state';
+import { vectorCollectionRegistry } from '../vector/collection-registry';
+import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 
 const BACKGROUND_DELAY_MS = 3_000;
 const EXTRACTION_BACKOFF_BASE_MS = 30_000;
 const EXTRACTION_BACKOFF_MAX_MS = 15 * 60_000;
+const DELETED_CHAT_PURGE_TIMEOUT_MS = 10_000;
 
 export interface BackgroundProcessingSnapshot {
   extractionCooldownActive: boolean;
   extractionCooldownRemainingMs: number;
   extractionCooldownFailures: number;
+}
+
+export interface BackgroundProcessingRegistrationOptions {
+  silent?: boolean;
 }
 
 /**
@@ -71,9 +78,11 @@ export function backgroundTargetMessageId(
 export class BackgroundProcessingScheduler {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private operation: Promise<void> | undefined;
+  private stopped = false;
   private rerunRequested = false;
   private requestedChatId: string | null = null;
   private historyRequiresReconcile = true;
+  private memoryHistoryRequiresReconcile = false;
   private historyRevision = 0;
   private extractionCooldown:
     | {
@@ -97,18 +106,21 @@ export class BackgroundProcessingScheduler {
   }> = [];
   private readonly settingsRepository = new SettingsRepository();
   private readonly memoryRepository = new MemoryRepository();
+  private readonly vectorStore = new SillyTavernVectorStore();
 
-  register(): void {
+  register(options: BackgroundProcessingRegistrationOptions = {}): boolean {
     if (this.registeredEvents.length > 0) {
-      return;
+      return true;
     }
 
     let context: ReturnType<typeof getContext>;
     try {
       context = getContext();
     } catch (error) {
-      logger.warn('SillyTavern上下文尚未就绪，暂未注册后台剧情整理。', error);
-      return;
+      if (!options.silent) {
+        logger.warn('SillyTavern上下文尚未就绪，暂未注册后台剧情整理。', error);
+      }
+      return false;
     }
     const eventSource = context.eventSource;
     // MESSAGE_RECEIVED is emitted after the assistant reply has entered the
@@ -121,8 +133,10 @@ export class BackgroundProcessingScheduler {
     };
     const eventName = eventTypes?.['MESSAGE_RECEIVED'];
     if (!eventSource || !eventName) {
-      logger.warn('当前SillyTavern未提供回复完成事件；自动整理无法调度，请使用“处理窗口外历史”。');
-      return;
+      if (!options.silent) {
+        logger.warn('当前SillyTavern未提供回复完成事件；自动整理无法调度，请使用“处理窗口外历史”。');
+      }
+      return false;
     }
 
     const handler = (): void => {
@@ -133,6 +147,7 @@ export class BackgroundProcessingScheduler {
     this.registeredEvents.push({ eventName, eventSource, handler });
     const markHistoryDirty = (reason: string): void => {
       this.historyRequiresReconcile = true;
+      this.memoryHistoryRequiresReconcile = true;
       this.verifiedPrefix = undefined;
       this.extractionCooldown = undefined;
       this.historyRevision += 1;
@@ -166,7 +181,10 @@ export class BackgroundProcessingScheduler {
             );
             this.schedule();
           }
-        : (): void => markHistoryDirty(`聊天历史事件：${eventKey}`);
+        : (): void => {
+            markHistoryDirty(`聊天历史事件：${eventKey}`);
+            this.schedule();
+          };
       eventSource.on(mutationEventName, mutationHandler);
       this.registeredEvents.push({
         eventName: mutationEventName,
@@ -174,6 +192,81 @@ export class BackgroundProcessingScheduler {
         handler: mutationHandler,
       });
       registeredNames.add(mutationEventName);
+    }
+    for (const eventKey of ['CHAT_DELETED', 'GROUP_CHAT_DELETED']) {
+      const deletionEventName = eventTypes?.[eventKey];
+      if (!deletionEventName || registeredNames.has(deletionEventName)) {
+        continue;
+      }
+      const deletionHandler = async (deletedChatId: unknown): Promise<void> => {
+        if (typeof deletedChatId !== 'string' || !deletedChatId) {
+          return;
+        }
+        try {
+          if (this.requestedChatId === deletedChatId) {
+            storyEchoTaskCoordinator.cancelRunningBackground('后台任务所属聊天已删除');
+            storyEchoTaskCoordinator.releaseForegroundLease('chat-deleted');
+          }
+          const collectionId = vectorCollectionRegistry.queuePurge(deletedChatId);
+          if (!collectionId) {
+            return;
+          }
+          const independentSignal = new AbortController().signal;
+          const failures = await vectorCollectionRegistry.drainPending((pendingCollectionId) =>
+            this.vectorStore.purge(pendingCollectionId, {
+              signal: independentSignal,
+              timeoutMs: DELETED_CHAT_PURGE_TIMEOUT_MS,
+            }));
+          for (const failure of failures) {
+            logger.warn(`删除聊天后清理向量集合失败，将在下次后台任务重试：${failure.collectionId}`, failure.error);
+          }
+          if (failures.length > 0) {
+            this.schedule();
+          }
+        } catch (error) {
+          logger.warn(`删除聊天后登记向量清理失败：${deletedChatId}`, error);
+          this.schedule();
+        }
+      };
+      eventSource.on(deletionEventName, deletionHandler);
+      this.registeredEvents.push({
+        eventName: deletionEventName,
+        eventSource,
+        handler: deletionHandler,
+      });
+      registeredNames.add(deletionEventName);
+    }
+    const renamedEventName = eventTypes?.['CHAT_RENAMED'];
+    if (renamedEventName && !registeredNames.has(renamedEventName)) {
+      const renamedHandler = async (value: unknown): Promise<void> => {
+        if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+          return;
+        }
+        const event = value as Record<string, unknown>;
+        const oldOwnerChatId = event['oldFileName'];
+        const newOwnerChatId = event['newFileName'];
+        if (
+          typeof oldOwnerChatId !== 'string'
+          || typeof newOwnerChatId !== 'string'
+          || !oldOwnerChatId
+          || !newOwnerChatId
+        ) {
+          return;
+        }
+        try {
+          vectorCollectionRegistry.rename(oldOwnerChatId, newOwnerChatId);
+          await this.memoryRepository.adoptRenamedChat(oldOwnerChatId, newOwnerChatId);
+        } catch (error) {
+          logger.warn(`聊天重命名后迁移StoryEcho状态失败：${oldOwnerChatId} → ${newOwnerChatId}`, error);
+        }
+      };
+      eventSource.on(renamedEventName, renamedHandler);
+      this.registeredEvents.push({
+        eventName: renamedEventName,
+        eventSource,
+        handler: renamedHandler,
+      });
+      registeredNames.add(renamedEventName);
     }
     const releaseEvents = ['GENERATION_STOPPED', 'GENERATION_ABORTED'];
     const releaseForeground = (): void => {
@@ -193,13 +286,19 @@ export class BackgroundProcessingScheduler {
       registeredNames.add(releaseEventName);
     }
     logger.info('已启用回复后的后台剧情整理。');
+    this.stopped = false;
     // Bootstrap an already-open long chat after the same quiet period used for
     // reply-complete work. This creates the first skeleton without requiring a
     // new role-play turn.
     this.schedule();
+    return true;
   }
 
   unregister(): void {
+    this.stopped = true;
+    this.rerunRequested = false;
+    storyEchoTaskCoordinator.cancelRunningBackground('StoryEcho扩展已停用');
+    storyEchoTaskCoordinator.releaseForegroundLease('extension-disabled');
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -210,6 +309,7 @@ export class BackgroundProcessingScheduler {
     }
     this.registeredEvents = [];
     this.historyRequiresReconcile = true;
+    this.memoryHistoryRequiresReconcile = false;
     this.verifiedPrefix = undefined;
     this.extractionCooldown = undefined;
     this.requestedChatId = null;
@@ -228,6 +328,9 @@ export class BackgroundProcessingScheduler {
   }
 
   schedule(): void {
+    if (this.stopped) {
+      return;
+    }
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
     }
@@ -238,6 +341,9 @@ export class BackgroundProcessingScheduler {
   }
 
   runNow(): Promise<void> {
+    if (this.stopped) {
+      return Promise.resolve();
+    }
     this.requestedChatId = getCurrentChatId(getContext());
     this.rerunRequested = true;
     if (!this.operation) {
@@ -246,7 +352,7 @@ export class BackgroundProcessingScheduler {
         () => this.drain(),
       ).finally(() => {
         this.operation = undefined;
-        if (this.rerunRequested) {
+        if (this.rerunRequested && !this.stopped) {
           void this.runNow();
         }
       });
@@ -255,10 +361,16 @@ export class BackgroundProcessingScheduler {
   }
 
   private async drain(): Promise<void> {
-    while (this.rerunRequested) {
+    while (this.rerunRequested && !this.stopped) {
       this.rerunRequested = false;
       const requestedChatId = this.requestedChatId;
       try {
+        const purgeFailures = await vectorCollectionRegistry.drainPending(
+          (collectionId) => this.vectorStore.purge(collectionId),
+        );
+        for (const failure of purgeFailures) {
+          logger.warn(`重试清理已删除聊天的向量集合失败：${failure.collectionId}`, failure.error);
+        }
         if (!requestedChatId || getCurrentChatId(getContext()) !== requestedChatId) {
           logger.debug('后台剧情整理排队期间聊天已切换，已丢弃过期任务。');
           continue;
@@ -266,8 +378,10 @@ export class BackgroundProcessingScheduler {
         await this.processCurrentChat();
       } catch (error) {
         if (isStoryEchoTaskCancelledError(error)) {
-          this.rerunRequested = true;
-          logger.info('失效的后台剧情整理已取消，将在当前角色回复结束后重试。');
+          this.rerunRequested = !this.stopped;
+          if (!this.stopped) {
+            logger.info('失效的后台剧情整理已取消，将在当前角色回复结束后重试。');
+          }
           return;
         }
         if (isBackgroundYieldForForegroundError(error)) {
@@ -300,6 +414,10 @@ export class BackgroundProcessingScheduler {
     if (!settings.memory.enabled) {
       this.extractionCooldown = undefined;
       this.verifiedPrefix = undefined;
+      if (this.memoryHistoryRequiresReconcile) {
+        state = await extractionService.reconcileHistory(state) ?? state;
+        this.memoryHistoryRequiresReconcile = false;
+      }
       if (this.historyRequiresReconcile) {
         state = await stageSummaryService.reconcileHistory(state) ?? state;
         this.historyRequiresReconcile = false;
@@ -331,6 +449,7 @@ export class BackgroundProcessingScheduler {
         return;
       }
       this.historyRequiresReconcile = false;
+      this.memoryHistoryRequiresReconcile = false;
       this.verifiedPrefix = {
         ownerChatId: state.ownerChatId,
         indexedThroughMessageId: state.indexedThroughMessageId,

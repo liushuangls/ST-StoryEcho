@@ -1,4 +1,5 @@
 import type { StoryEchoSettings } from '../core/types';
+import { readResponseTextWithLimit } from '../http/response';
 import { getRequestHeaders } from '../platform/sillytavern';
 import { normalizeChatCompletionsBaseUrl } from './url';
 
@@ -10,18 +11,6 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-async function readLimitedText(response: Response): Promise<string> {
-  const declaredLength = Number(response.headers.get('content-length'));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-    throw new Error('模型列表响应过大。');
-  }
-  const text = await response.text();
-  if (new TextEncoder().encode(text).byteLength > MAX_RESPONSE_BYTES) {
-    throw new Error('模型列表响应过大。');
-  }
-  return text;
 }
 
 function errorMessage(payload: unknown, response: Response, apiKey: string): string {
@@ -101,7 +90,11 @@ export async function fetchCustomLlmModels(
       }),
       signal: controller.signal,
     });
-    const text = await readLimitedText(response);
+    const text = await readResponseTextWithLimit(
+      response,
+      MAX_RESPONSE_BYTES,
+      '模型列表响应过大。',
+    );
     let payload: unknown = null;
     try {
       payload = text ? JSON.parse(text) as unknown : null;

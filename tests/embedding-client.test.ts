@@ -72,8 +72,11 @@ describe('OpenAiCompatibleEmbeddingClient', () => {
   });
 
   it('distinguishes response-stream failures from proxy networking failures', async () => {
-    const response = new Response('{}', { status: 200 });
-    vi.spyOn(response, 'text').mockRejectedValue(new TypeError('stream terminated'));
+    const response = new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new TypeError('stream terminated'));
+      },
+    }), { status: 200 });
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response);
     const client = new OpenAiCompatibleEmbeddingClient(fetchMock, async () => ({}));
 

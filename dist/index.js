@@ -1422,6 +1422,51 @@ var MainLlmProvider = class {
   }
 };
 
+// src/http/response.ts
+async function readResponseTextWithLimit(response, maxBytes, tooLargeMessage) {
+  const declaredLengthHeader = response.headers.get("content-length");
+  const declaredLength = declaredLengthHeader === null ? Number.NaN : Number(declaredLengthHeader);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    try {
+      await response.body?.cancel();
+    } catch {
+    }
+    throw new Error(tooLargeMessage);
+  }
+  if (!response.body) {
+    const text2 = await response.text();
+    if (new TextEncoder().encode(text2).byteLength > maxBytes) {
+      throw new Error(tooLargeMessage);
+    }
+    return text2;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parts = [];
+  let receivedBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+        }
+        throw new Error(tooLargeMessage);
+      }
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+    return parts.join("");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 // src/llm/url.ts
 function normalizeChatCompletionsUrl(rawUrl, options) {
   const trimmed = rawUrl.trim();
@@ -1474,17 +1519,6 @@ var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 var MAX_REQUEST_TIMEOUT_MS2 = 6e5;
 function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-async function readLimitedText(response) {
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-    throw new Error("\u81EA\u5B9A\u4E49LLM\u54CD\u5E94\u8FC7\u5927\u3002");
-  }
-  const text2 = await response.text();
-  if (new TextEncoder().encode(text2).byteLength > MAX_RESPONSE_BYTES) {
-    throw new Error("\u81EA\u5B9A\u4E49LLM\u54CD\u5E94\u8FC7\u5927\u3002");
-  }
-  return text2;
 }
 function responseContent(payload) {
   if (!isRecord2(payload)) {
@@ -1601,7 +1635,11 @@ var OpenAiCompatibleProvider = class {
         body: JSON.stringify(body),
         signal: controller.signal
       });
-      const text2 = await readLimitedText(response);
+      const text2 = await readResponseTextWithLimit(
+        response,
+        MAX_RESPONSE_BYTES,
+        "\u81EA\u5B9A\u4E49LLM\u54CD\u5E94\u8FC7\u5927\u3002"
+      );
       let payload = null;
       try {
         payload = text2 ? JSON.parse(text2) : null;
@@ -2823,7 +2861,7 @@ var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 1;
 var SETTINGS_VERSION = 9;
 var VECTOR_COLLECTION_PREFIX = "story_echo";
-var EXTENSION_VERSION = "0.20.22";
+var EXTENSION_VERSION = "0.20.23";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -3115,6 +3153,136 @@ var SettingsRepository = class {
     return settings;
   }
 };
+
+// src/vector/collection-registry.ts
+var REGISTRY_KEY = `${MODULE_ID}_vector_registry`;
+var REGISTRY_VERSION = 1;
+var MAX_REGISTRY_ENTRIES = 1e4;
+function validOwnerChatId(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 2048;
+}
+function validCollectionId(value) {
+  return typeof value === "string" && value.startsWith(`${VECTOR_COLLECTION_PREFIX}_`) && value.length <= 256;
+}
+function normalizedRegistry(value) {
+  const record3 = typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+  const collections = [];
+  const seenOwners = /* @__PURE__ */ new Set();
+  if (Array.isArray(record3["collections"])) {
+    for (const candidate of record3["collections"].slice(-MAX_REGISTRY_ENTRIES)) {
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+        continue;
+      }
+      const entry = candidate;
+      if (!validOwnerChatId(entry["ownerChatId"]) || !validCollectionId(entry["collectionId"]) || seenOwners.has(entry["ownerChatId"])) {
+        continue;
+      }
+      seenOwners.add(entry["ownerChatId"]);
+      collections.push({
+        ownerChatId: entry["ownerChatId"],
+        collectionId: entry["collectionId"]
+      });
+    }
+  }
+  const pendingPurges = Array.isArray(record3["pendingPurges"]) ? [...new Set(record3["pendingPurges"].filter(validCollectionId))].slice(-MAX_REGISTRY_ENTRIES) : [];
+  return {
+    version: REGISTRY_VERSION,
+    collections,
+    pendingPurges
+  };
+}
+var VectorCollectionRegistry = class {
+  remember(ownerChatId, collectionId) {
+    if (!validOwnerChatId(ownerChatId) || !validCollectionId(collectionId)) {
+      return;
+    }
+    const registry = this.read();
+    const existing = registry.collections.find((entry) => entry.ownerChatId === ownerChatId);
+    if (existing?.collectionId === collectionId) {
+      return;
+    }
+    registry.collections = registry.collections.filter((entry) => entry.ownerChatId !== ownerChatId);
+    registry.collections.push({ ownerChatId, collectionId });
+    if (registry.collections.length > MAX_REGISTRY_ENTRIES) {
+      registry.collections.splice(0, registry.collections.length - MAX_REGISTRY_ENTRIES);
+    }
+    this.write(registry);
+  }
+  rename(oldOwnerChatId, newOwnerChatId) {
+    if (!validOwnerChatId(oldOwnerChatId) || !validOwnerChatId(newOwnerChatId)) {
+      return;
+    }
+    const registry = this.read();
+    const existing = registry.collections.find((entry) => entry.ownerChatId === oldOwnerChatId);
+    if (!existing) {
+      return;
+    }
+    registry.collections = registry.collections.filter(
+      (entry) => entry.ownerChatId !== oldOwnerChatId && entry.ownerChatId !== newOwnerChatId
+    );
+    registry.collections.push({
+      ownerChatId: newOwnerChatId,
+      collectionId: existing.collectionId
+    });
+    this.write(registry);
+  }
+  queuePurge(ownerChatId) {
+    if (!validOwnerChatId(ownerChatId)) {
+      return null;
+    }
+    const registry = this.read();
+    const matches = registry.collections.filter((entry) => entry.ownerChatId === ownerChatId);
+    if (matches.length === 0) {
+      return null;
+    }
+    registry.collections = registry.collections.filter((entry) => entry.ownerChatId !== ownerChatId);
+    registry.pendingPurges = [.../* @__PURE__ */ new Set([
+      ...registry.pendingPurges,
+      ...matches.map((entry) => entry.collectionId)
+    ])].slice(-MAX_REGISTRY_ENTRIES);
+    this.write(registry);
+    return matches.at(-1)?.collectionId ?? null;
+  }
+  async drainPending(purge) {
+    const registry = this.read();
+    if (registry.pendingPurges.length === 0) {
+      return [];
+    }
+    const completed = /* @__PURE__ */ new Set();
+    const failures = [];
+    for (const collectionId of registry.pendingPurges) {
+      try {
+        await purge(collectionId);
+        completed.add(collectionId);
+      } catch (error) {
+        failures.push({ collectionId, error });
+      }
+    }
+    if (completed.size > 0) {
+      const latest = this.read();
+      latest.pendingPurges = latest.pendingPurges.filter(
+        (collectionId) => !completed.has(collectionId)
+      );
+      latest.collections = latest.collections.filter(
+        (entry) => !completed.has(entry.collectionId)
+      );
+      this.write(latest);
+    }
+    return failures;
+  }
+  pendingCount() {
+    return this.read().pendingPurges.length;
+  }
+  read() {
+    return normalizedRegistry(getContext().extensionSettings[REGISTRY_KEY]);
+  }
+  write(registry) {
+    const context = getContext();
+    context.extensionSettings[REGISTRY_KEY] = registry;
+    context.saveSettingsDebounced();
+  }
+};
+var vectorCollectionRegistry = new VectorCollectionRegistry();
 
 // src/prompt/render.ts
 function estimateTokens(text2) {
@@ -3440,9 +3608,9 @@ function activeStageSummaryEntries(state) {
   return state.stageSummary.entries.filter((entry) => !entry.deleted);
 }
 function archivedStageSummaryEntries(state, windowSize) {
-  const active = activeStageSummaryEntries(state);
+  const active2 = activeStageSummaryEntries(state);
   const retained = Math.max(1, Math.floor(windowSize));
-  return active.slice(0, Math.max(0, active.length - retained));
+  return active2.slice(0, Math.max(0, active2.length - retained));
 }
 function sourcePayload(entries, coveredThroughMessageId) {
   return JSON.stringify(entries.filter((entry) => entry.sourceEndMessageId <= coveredThroughMessageId).map((entry) => ({
@@ -3523,6 +3691,18 @@ function normalizeStorySkeletonText(raw, maxTokens) {
 }
 
 // src/memory/repository.ts
+var vectorRegistryWarningReported = false;
+function rememberVectorCollection(ownerChatId, collectionId) {
+  try {
+    vectorCollectionRegistry.remember(ownerChatId, collectionId);
+    vectorRegistryWarningReported = false;
+  } catch (error) {
+    if (!vectorRegistryWarningReported) {
+      vectorRegistryWarningReported = true;
+      logger.warn("\u8BB0\u5F55\u804A\u5929\u5411\u91CF\u96C6\u5408\u7D22\u5F15\u5931\u8D25\uFF1B\u804A\u5929\u5143\u6570\u636E\u4ECD\u4FDD\u6301\u53EF\u7528\u3002", error);
+    }
+  }
+}
 function createCollectionId(chatUuid) {
   return `${VECTOR_COLLECTION_PREFIX}_${chatUuid}_v${CHAT_STATE_VERSION}`;
 }
@@ -3890,7 +4070,9 @@ var MemoryRepository = class {
     if (!isStateBase(stored) || stored.ownerChatId !== getCurrentChatId(context)) {
       return null;
     }
-    return isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
+    const state = isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
+    rememberVectorCollection(state.ownerChatId, state.vectorCollectionId);
+    return state;
   }
   async getOrCreate() {
     const context = getContext();
@@ -3903,6 +4085,7 @@ var MemoryRepository = class {
       const state2 = createState(currentChatId);
       context.chatMetadata[MODULE_ID] = state2;
       await context.saveMetadata();
+      rememberVectorCollection(state2.ownerChatId, state2.vectorCollectionId);
       return state2;
     }
     const current = isCurrentState(stored);
@@ -3930,8 +4113,10 @@ var MemoryRepository = class {
       delete branchState.lastInspection;
       context.chatMetadata[MODULE_ID] = branchState;
       await context.saveMetadata();
+      rememberVectorCollection(branchState.ownerChatId, branchState.vectorCollectionId);
       return branchState;
     }
+    rememberVectorCollection(state.ownerChatId, state.vectorCollectionId);
     return state;
   }
   async save(state) {
@@ -3941,6 +4126,21 @@ var MemoryRepository = class {
     }
     context.chatMetadata[MODULE_ID] = state;
     await context.saveMetadata();
+    rememberVectorCollection(state.ownerChatId, state.vectorCollectionId);
+  }
+  async adoptRenamedChat(oldOwnerChatId, newOwnerChatId) {
+    const context = getContext();
+    const stored = context.chatMetadata[MODULE_ID];
+    if (!isStateBase(stored) || stored.ownerChatId !== oldOwnerChatId || getCurrentChatId(context) !== newOwnerChatId) {
+      return false;
+    }
+    const state = isCurrentState(stored) ? stored : normalizeState(stored, context.chat);
+    state.ownerChatId = newOwnerChatId;
+    context.chatMetadata[MODULE_ID] = state;
+    await context.saveMetadata();
+    vectorCollectionRegistry.rename(oldOwnerChatId, newOwnerChatId);
+    rememberVectorCollection(newOwnerChatId, state.vectorCollectionId);
+    return true;
   }
   async upsertMemories(memories) {
     const state = await this.getOrCreate();
@@ -4166,6 +4366,10 @@ var MemoryRepository = class {
   }
   async clear() {
     const context = getContext();
+    const stored = context.chatMetadata[MODULE_ID];
+    if (isStateBase(stored)) {
+      vectorCollectionRegistry.queuePurge(stored.ownerChatId);
+    }
     delete context.chatMetadata[MODULE_ID];
     await context.saveMetadata();
   }
@@ -4985,6 +5189,8 @@ function safeEmbeddingFailureDetail(error, apiKey) {
 }
 
 // src/vector/openai-compatible-embedding.ts
+var MAX_RESPONSE_BYTES2 = 32 * 1024 * 1024;
+var RESPONSE_TOO_LARGE_MESSAGE = "Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002";
 function parseVectors(payload, expectedCount) {
   const record3 = isRecord5(payload) ? payload : {};
   const value = Array.isArray(record3["data"]) ? record3["data"] : Array.isArray(record3["embeddings"]) ? record3["embeddings"] : null;
@@ -5073,18 +5279,18 @@ var OpenAiCompatibleEmbeddingClient = class {
         }
         throw error;
       }
-      const declaredLength = Number(response.headers.get("content-length"));
-      if (Number.isFinite(declaredLength) && declaredLength > 32 * 1024 * 1024) {
-        throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
-      }
       let text2;
       try {
-        text2 = await response.text();
+        text2 = await readResponseTextWithLimit(
+          response,
+          MAX_RESPONSE_BYTES2,
+          RESPONSE_TOO_LARGE_MESSAGE
+        );
       } catch (error) {
+        if (error instanceof Error && error.message === RESPONSE_TOO_LARGE_MESSAGE) {
+          throw error;
+        }
         throw new Error(`\u8BFB\u53D6Embedding\u4EE3\u7406\u54CD\u5E94\u5931\u8D25\uFF1A${safeEmbeddingFailureDetail(error, apiKey)}`);
-      }
-      if (new TextEncoder().encode(text2).byteLength > 32 * 1024 * 1024) {
-        throw new Error("Embedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
       }
       let payload = null;
       try {
@@ -5115,7 +5321,8 @@ var openAiCompatibleEmbeddingClient = new OpenAiCompatibleEmbeddingClient();
 
 // src/vector/volcengine-multimodal-embedding.ts
 var DEFAULT_CONCURRENCY = 4;
-var MAX_RESPONSE_BYTES2 = 32 * 1024 * 1024;
+var MAX_RESPONSE_BYTES3 = 32 * 1024 * 1024;
+var RESPONSE_TOO_LARGE_MESSAGE2 = "\u706B\u5C71\u65B9\u821FEmbedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002";
 function parseVolcengineVector(payload) {
   const record3 = isRecord5(payload) ? payload : {};
   const data = isRecord5(record3["data"]) ? record3["data"] : null;
@@ -5186,18 +5393,18 @@ var VolcengineMultimodalEmbeddingClient = class {
         }
         throw error;
       }
-      const declaredLength = Number(response.headers.get("content-length"));
-      if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES2) {
-        throw new Error("\u706B\u5C71\u65B9\u821FEmbedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
-      }
       let responseText;
       try {
-        responseText = await response.text();
+        responseText = await readResponseTextWithLimit(
+          response,
+          MAX_RESPONSE_BYTES3,
+          RESPONSE_TOO_LARGE_MESSAGE2
+        );
       } catch (error) {
+        if (error instanceof Error && error.message === RESPONSE_TOO_LARGE_MESSAGE2) {
+          throw error;
+        }
         throw new Error(`\u8BFB\u53D6\u706B\u5C71\u65B9\u821FEmbedding\u4EE3\u7406\u54CD\u5E94\u5931\u8D25\uFF1A${safeEmbeddingFailureDetail(error, apiKey)}`);
-      }
-      if (new TextEncoder().encode(responseText).byteLength > MAX_RESPONSE_BYTES2) {
-        throw new Error("\u706B\u5C71\u65B9\u821FEmbedding\u63A5\u53E3\u54CD\u5E94\u8FC7\u5927\u3002");
       }
       let payload = null;
       try {
@@ -5260,6 +5467,11 @@ var resolveEmbeddingClient = (provider) => {
 
 // src/vector/sillytavern-vector-store.ts
 var EMBEDDING_BATCH_SIZE = 64;
+var DEFAULT_VECTOR_QUERY_TIMEOUT_MS = 3e4;
+var DEFAULT_VECTOR_MUTATION_TIMEOUT_MS = 12e4;
+var MAX_VECTOR_REQUEST_TIMEOUT_MS = 3e5;
+var MAX_VECTOR_RESPONSE_BYTES = 8 * 1024 * 1024;
+var FOREGROUND_VECTOR_QUERY_TIMEOUT_MS = 8e3;
 function requestBody(collectionId, config, extra = {}) {
   return {
     collectionId,
@@ -5279,82 +5491,130 @@ var SillyTavernVectorStore = class {
   constructor(embeddingClientResolver = resolveEmbeddingClient) {
     this.embeddingClientResolver = embeddingClientResolver;
   }
-  async embedTexts(texts, config) {
+  async embedTexts(texts, config, signal) {
     const embeddingClient = this.embeddingClientResolver(config.provider);
     const vectors = [];
     for (let start = 0; start < texts.length; start += EMBEDDING_BATCH_SIZE) {
       vectors.push(...await embeddingClient.embed({
         ...config,
-        texts: texts.slice(start, start + EMBEDDING_BATCH_SIZE)
+        texts: texts.slice(start, start + EMBEDDING_BATCH_SIZE),
+        signal
       }));
     }
     return vectors;
   }
-  async insert(collectionId, items, config) {
+  async insert(collectionId, items, config, options) {
     if (items.length === 0) {
       return;
     }
-    const embeddings = config.precomputed ? embeddingMap(
-      items.map((item) => item.text),
-      await this.embedTexts(items.map((item) => item.text), config.precomputed)
-    ) : void 0;
-    await this.post("/api/vector/insert", requestBody(collectionId, config, {
-      items,
-      ...embeddings ? { embeddings } : {}
-    }));
-  }
-  async query(collectionId, searchText, topK, threshold, config) {
-    const embeddings = config.precomputed ? embeddingMap(
-      [searchText],
-      await this.embedTexts([searchText], config.precomputed)
-    ) : void 0;
-    const response = await this.post(
-      "/api/vector/query",
-      requestBody(collectionId, config, {
-        searchText,
-        topK,
-        threshold,
+    await this.runRequest("\u5199\u5165", DEFAULT_VECTOR_MUTATION_TIMEOUT_MS, options, async (signal) => {
+      const embeddings = config.precomputed ? embeddingMap(
+        items.map((item) => item.text),
+        await this.embedTexts(items.map((item) => item.text), config.precomputed, signal)
+      ) : void 0;
+      await this.post("/api/vector/insert", requestBody(collectionId, config, {
+        items,
         ...embeddings ? { embeddings } : {}
-      })
-    );
-    const responseRecord = Array.isArray(response) ? {} : response;
-    const metadata = Array.isArray(responseRecord["metadata"]) ? responseRecord["metadata"] : [];
-    return metadata.flatMap((item, rank) => {
-      const hash = Number(item.hash);
-      const index = Number(item.index);
-      if (!Number.isFinite(hash)) {
-        return [];
-      }
-      return [{
-        hash,
-        text: typeof item.text === "string" ? item.text : "",
-        index: Number.isFinite(index) ? index : -1,
-        rank
-      }];
+      }), signal);
     });
   }
-  async list(collectionId, config) {
-    const response = await this.post("/api/vector/list", requestBody(collectionId, config));
-    if (!Array.isArray(response)) {
-      return [];
-    }
-    return response.map(Number).filter(Number.isFinite);
+  async query(collectionId, searchText, topK, threshold, config, options) {
+    return this.runRequest("\u67E5\u8BE2", DEFAULT_VECTOR_QUERY_TIMEOUT_MS, options, async (signal) => {
+      const embeddings = config.precomputed ? embeddingMap(
+        [searchText],
+        await this.embedTexts([searchText], config.precomputed, signal)
+      ) : void 0;
+      const response = await this.post(
+        "/api/vector/query",
+        requestBody(collectionId, config, {
+          searchText,
+          topK,
+          threshold,
+          ...embeddings ? { embeddings } : {}
+        }),
+        signal
+      );
+      const responseRecord = Array.isArray(response) ? {} : response;
+      const metadata = Array.isArray(responseRecord["metadata"]) ? responseRecord["metadata"] : [];
+      return metadata.flatMap((item, rank) => {
+        const hash = Number(item.hash);
+        const index = Number(item.index);
+        if (!Number.isFinite(hash)) {
+          return [];
+        }
+        return [{
+          hash,
+          text: typeof item.text === "string" ? item.text : "",
+          index: Number.isFinite(index) ? index : -1,
+          rank
+        }];
+      });
+    });
   }
-  async delete(collectionId, hashes, config) {
+  async list(collectionId, config, options) {
+    return this.runRequest("\u8BFB\u53D6", DEFAULT_VECTOR_QUERY_TIMEOUT_MS, options, async (signal) => {
+      const response = await this.post(
+        "/api/vector/list",
+        requestBody(collectionId, config),
+        signal
+      );
+      if (!Array.isArray(response)) {
+        return [];
+      }
+      return response.map(Number).filter(Number.isFinite);
+    });
+  }
+  async delete(collectionId, hashes, config, options) {
     if (hashes.length === 0) {
       return;
     }
-    await this.post("/api/vector/delete", requestBody(collectionId, config, { hashes }));
+    await this.runRequest("\u5220\u9664", DEFAULT_VECTOR_MUTATION_TIMEOUT_MS, options, async (signal) => {
+      await this.post(
+        "/api/vector/delete",
+        requestBody(collectionId, config, { hashes }),
+        signal
+      );
+    });
   }
-  async purge(collectionId) {
-    await this.post("/api/vector/purge", { collectionId });
+  async purge(collectionId, options) {
+    await this.runRequest("\u6E05\u7A7A", DEFAULT_VECTOR_MUTATION_TIMEOUT_MS, options, async (signal) => {
+      await this.post("/api/vector/purge", { collectionId }, signal);
+    });
   }
-  async post(path, body) {
+  async runRequest(operationName, defaultTimeoutMs, options, operation) {
+    const upstreamSignal = options?.signal ?? storyEchoTaskCoordinator.activeTaskSignal();
+    const timeoutMs = Math.min(
+      MAX_VECTOR_REQUEST_TIMEOUT_MS,
+      Math.max(1, Math.floor(options?.timeoutMs ?? defaultTimeoutMs))
+    );
+    const controller = new AbortController();
+    const abortFromUpstream = () => {
+      controller.abort(upstreamSignal?.reason);
+    };
+    if (upstreamSignal?.aborted) {
+      abortFromUpstream();
+    } else {
+      upstreamSignal?.addEventListener("abort", abortFromUpstream, { once: true });
+    }
+    const timeoutError = new Error(`Vector Storage${operationName}\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
+    const timeout = globalThis.setTimeout(() => controller.abort(timeoutError), timeoutMs);
+    try {
+      return await runStoryEchoTaskAbortable(
+        () => operation(controller.signal),
+        controller.signal
+      );
+    } finally {
+      globalThis.clearTimeout(timeout);
+      upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+    }
+  }
+  async post(path, body, signal) {
     const headers = await getRequestHeaders();
     const response = await fetch(path, {
       method: "POST",
       headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
     if (!response.ok) {
       throw new Error(`Vector Storage\u8BF7\u6C42\u5931\u8D25\uFF1A${path}\uFF08HTTP ${response.status}\uFF09`);
@@ -5362,7 +5622,11 @@ var SillyTavernVectorStore = class {
     if (response.status === 204 || response.headers.get("content-length") === "0") {
       return {};
     }
-    const text2 = await response.text();
+    const text2 = await readResponseTextWithLimit(
+      response,
+      MAX_VECTOR_RESPONSE_BYTES,
+      `Vector Storage\u54CD\u5E94\u8FC7\u5927\uFF1A${path}`
+    );
     if (!text2) {
       return {};
     }
@@ -8658,6 +8922,7 @@ var storySkeletonService = new StorySkeletonService();
 var BACKGROUND_DELAY_MS = 3e3;
 var EXTRACTION_BACKOFF_BASE_MS = 3e4;
 var EXTRACTION_BACKOFF_MAX_MS = 15 * 6e4;
+var DELETED_CHAT_PURGE_TIMEOUT_MS = 1e4;
 function backgroundTargetMessageId(messages, settings) {
   let lastNonSystem;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -8686,25 +8951,30 @@ function backgroundTargetMessageId(messages, settings) {
 var BackgroundProcessingScheduler = class {
   timer;
   operation;
+  stopped = false;
   rerunRequested = false;
   requestedChatId = null;
   historyRequiresReconcile = true;
+  memoryHistoryRequiresReconcile = false;
   historyRevision = 0;
   extractionCooldown;
   verifiedPrefix;
   registeredEvents = [];
   settingsRepository = new SettingsRepository();
   memoryRepository = new MemoryRepository();
-  register() {
+  vectorStore = new SillyTavernVectorStore();
+  register(options = {}) {
     if (this.registeredEvents.length > 0) {
-      return;
+      return true;
     }
     let context;
     try {
       context = getContext();
     } catch (error) {
-      logger.warn("SillyTavern\u4E0A\u4E0B\u6587\u5C1A\u672A\u5C31\u7EEA\uFF0C\u6682\u672A\u6CE8\u518C\u540E\u53F0\u5267\u60C5\u6574\u7406\u3002", error);
-      return;
+      if (!options.silent) {
+        logger.warn("SillyTavern\u4E0A\u4E0B\u6587\u5C1A\u672A\u5C31\u7EEA\uFF0C\u6682\u672A\u6CE8\u518C\u540E\u53F0\u5267\u60C5\u6574\u7406\u3002", error);
+      }
+      return false;
     }
     const eventSource = context.eventSource;
     const eventTypes = {
@@ -8713,8 +8983,10 @@ var BackgroundProcessingScheduler = class {
     };
     const eventName = eventTypes?.["MESSAGE_RECEIVED"];
     if (!eventSource || !eventName) {
-      logger.warn("\u5F53\u524DSillyTavern\u672A\u63D0\u4F9B\u56DE\u590D\u5B8C\u6210\u4E8B\u4EF6\uFF1B\u81EA\u52A8\u6574\u7406\u65E0\u6CD5\u8C03\u5EA6\uFF0C\u8BF7\u4F7F\u7528\u201C\u5904\u7406\u7A97\u53E3\u5916\u5386\u53F2\u201D\u3002");
-      return;
+      if (!options.silent) {
+        logger.warn("\u5F53\u524DSillyTavern\u672A\u63D0\u4F9B\u56DE\u590D\u5B8C\u6210\u4E8B\u4EF6\uFF1B\u81EA\u52A8\u6574\u7406\u65E0\u6CD5\u8C03\u5EA6\uFF0C\u8BF7\u4F7F\u7528\u201C\u5904\u7406\u7A97\u53E3\u5916\u5386\u53F2\u201D\u3002");
+      }
+      return false;
     }
     const handler = () => {
       storyEchoTaskCoordinator.releaseForegroundLease("assistant-message-received");
@@ -8724,6 +8996,7 @@ var BackgroundProcessingScheduler = class {
     this.registeredEvents.push({ eventName, eventSource, handler });
     const markHistoryDirty = (reason) => {
       this.historyRequiresReconcile = true;
+      this.memoryHistoryRequiresReconcile = true;
       this.verifiedPrefix = void 0;
       this.extractionCooldown = void 0;
       this.historyRevision += 1;
@@ -8755,7 +9028,10 @@ var BackgroundProcessingScheduler = class {
           isChatChange ? "chat-changed" : "message-swiped"
         );
         this.schedule();
-      } : () => markHistoryDirty(`\u804A\u5929\u5386\u53F2\u4E8B\u4EF6\uFF1A${eventKey}`);
+      } : () => {
+        markHistoryDirty(`\u804A\u5929\u5386\u53F2\u4E8B\u4EF6\uFF1A${eventKey}`);
+        this.schedule();
+      };
       eventSource.on(mutationEventName, mutationHandler);
       this.registeredEvents.push({
         eventName: mutationEventName,
@@ -8763,6 +9039,75 @@ var BackgroundProcessingScheduler = class {
         handler: mutationHandler
       });
       registeredNames.add(mutationEventName);
+    }
+    for (const eventKey of ["CHAT_DELETED", "GROUP_CHAT_DELETED"]) {
+      const deletionEventName = eventTypes?.[eventKey];
+      if (!deletionEventName || registeredNames.has(deletionEventName)) {
+        continue;
+      }
+      const deletionHandler = async (deletedChatId) => {
+        if (typeof deletedChatId !== "string" || !deletedChatId) {
+          return;
+        }
+        try {
+          if (this.requestedChatId === deletedChatId) {
+            storyEchoTaskCoordinator.cancelRunningBackground("\u540E\u53F0\u4EFB\u52A1\u6240\u5C5E\u804A\u5929\u5DF2\u5220\u9664");
+            storyEchoTaskCoordinator.releaseForegroundLease("chat-deleted");
+          }
+          const collectionId = vectorCollectionRegistry.queuePurge(deletedChatId);
+          if (!collectionId) {
+            return;
+          }
+          const independentSignal = new AbortController().signal;
+          const failures = await vectorCollectionRegistry.drainPending((pendingCollectionId) => this.vectorStore.purge(pendingCollectionId, {
+            signal: independentSignal,
+            timeoutMs: DELETED_CHAT_PURGE_TIMEOUT_MS
+          }));
+          for (const failure of failures) {
+            logger.warn(`\u5220\u9664\u804A\u5929\u540E\u6E05\u7406\u5411\u91CF\u96C6\u5408\u5931\u8D25\uFF0C\u5C06\u5728\u4E0B\u6B21\u540E\u53F0\u4EFB\u52A1\u91CD\u8BD5\uFF1A${failure.collectionId}`, failure.error);
+          }
+          if (failures.length > 0) {
+            this.schedule();
+          }
+        } catch (error) {
+          logger.warn(`\u5220\u9664\u804A\u5929\u540E\u767B\u8BB0\u5411\u91CF\u6E05\u7406\u5931\u8D25\uFF1A${deletedChatId}`, error);
+          this.schedule();
+        }
+      };
+      eventSource.on(deletionEventName, deletionHandler);
+      this.registeredEvents.push({
+        eventName: deletionEventName,
+        eventSource,
+        handler: deletionHandler
+      });
+      registeredNames.add(deletionEventName);
+    }
+    const renamedEventName = eventTypes?.["CHAT_RENAMED"];
+    if (renamedEventName && !registeredNames.has(renamedEventName)) {
+      const renamedHandler = async (value) => {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          return;
+        }
+        const event = value;
+        const oldOwnerChatId = event["oldFileName"];
+        const newOwnerChatId = event["newFileName"];
+        if (typeof oldOwnerChatId !== "string" || typeof newOwnerChatId !== "string" || !oldOwnerChatId || !newOwnerChatId) {
+          return;
+        }
+        try {
+          vectorCollectionRegistry.rename(oldOwnerChatId, newOwnerChatId);
+          await this.memoryRepository.adoptRenamedChat(oldOwnerChatId, newOwnerChatId);
+        } catch (error) {
+          logger.warn(`\u804A\u5929\u91CD\u547D\u540D\u540E\u8FC1\u79FBStoryEcho\u72B6\u6001\u5931\u8D25\uFF1A${oldOwnerChatId} \u2192 ${newOwnerChatId}`, error);
+        }
+      };
+      eventSource.on(renamedEventName, renamedHandler);
+      this.registeredEvents.push({
+        eventName: renamedEventName,
+        eventSource,
+        handler: renamedHandler
+      });
+      registeredNames.add(renamedEventName);
     }
     const releaseEvents = ["GENERATION_STOPPED", "GENERATION_ABORTED"];
     const releaseForeground = () => {
@@ -8782,9 +9127,15 @@ var BackgroundProcessingScheduler = class {
       registeredNames.add(releaseEventName);
     }
     logger.info("\u5DF2\u542F\u7528\u56DE\u590D\u540E\u7684\u540E\u53F0\u5267\u60C5\u6574\u7406\u3002");
+    this.stopped = false;
     this.schedule();
+    return true;
   }
   unregister() {
+    this.stopped = true;
+    this.rerunRequested = false;
+    storyEchoTaskCoordinator.cancelRunningBackground("StoryEcho\u6269\u5C55\u5DF2\u505C\u7528");
+    storyEchoTaskCoordinator.releaseForegroundLease("extension-disabled");
     if (this.timer !== void 0) {
       clearTimeout(this.timer);
       this.timer = void 0;
@@ -8795,6 +9146,7 @@ var BackgroundProcessingScheduler = class {
     }
     this.registeredEvents = [];
     this.historyRequiresReconcile = true;
+    this.memoryHistoryRequiresReconcile = false;
     this.verifiedPrefix = void 0;
     this.extractionCooldown = void 0;
     this.requestedChatId = null;
@@ -8809,6 +9161,9 @@ var BackgroundProcessingScheduler = class {
     };
   }
   schedule() {
+    if (this.stopped) {
+      return;
+    }
     if (this.timer !== void 0) {
       clearTimeout(this.timer);
     }
@@ -8818,6 +9173,9 @@ var BackgroundProcessingScheduler = class {
     }, BACKGROUND_DELAY_MS);
   }
   runNow() {
+    if (this.stopped) {
+      return Promise.resolve();
+    }
     this.requestedChatId = getCurrentChatId(getContext());
     this.rerunRequested = true;
     if (!this.operation) {
@@ -8826,7 +9184,7 @@ var BackgroundProcessingScheduler = class {
         () => this.drain()
       ).finally(() => {
         this.operation = void 0;
-        if (this.rerunRequested) {
+        if (this.rerunRequested && !this.stopped) {
           void this.runNow();
         }
       });
@@ -8834,10 +9192,16 @@ var BackgroundProcessingScheduler = class {
     return this.operation;
   }
   async drain() {
-    while (this.rerunRequested) {
+    while (this.rerunRequested && !this.stopped) {
       this.rerunRequested = false;
       const requestedChatId = this.requestedChatId;
       try {
+        const purgeFailures = await vectorCollectionRegistry.drainPending(
+          (collectionId) => this.vectorStore.purge(collectionId)
+        );
+        for (const failure of purgeFailures) {
+          logger.warn(`\u91CD\u8BD5\u6E05\u7406\u5DF2\u5220\u9664\u804A\u5929\u7684\u5411\u91CF\u96C6\u5408\u5931\u8D25\uFF1A${failure.collectionId}`, failure.error);
+        }
         if (!requestedChatId || getCurrentChatId(getContext()) !== requestedChatId) {
           logger.debug("\u540E\u53F0\u5267\u60C5\u6574\u7406\u6392\u961F\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u4E22\u5F03\u8FC7\u671F\u4EFB\u52A1\u3002");
           continue;
@@ -8845,8 +9209,10 @@ var BackgroundProcessingScheduler = class {
         await this.processCurrentChat();
       } catch (error) {
         if (isStoryEchoTaskCancelledError(error)) {
-          this.rerunRequested = true;
-          logger.info("\u5931\u6548\u7684\u540E\u53F0\u5267\u60C5\u6574\u7406\u5DF2\u53D6\u6D88\uFF0C\u5C06\u5728\u5F53\u524D\u89D2\u8272\u56DE\u590D\u7ED3\u675F\u540E\u91CD\u8BD5\u3002");
+          this.rerunRequested = !this.stopped;
+          if (!this.stopped) {
+            logger.info("\u5931\u6548\u7684\u540E\u53F0\u5267\u60C5\u6574\u7406\u5DF2\u53D6\u6D88\uFF0C\u5C06\u5728\u5F53\u524D\u89D2\u8272\u56DE\u590D\u7ED3\u675F\u540E\u91CD\u8BD5\u3002");
+          }
           return;
         }
         if (isBackgroundYieldForForegroundError(error)) {
@@ -8871,6 +9237,10 @@ var BackgroundProcessingScheduler = class {
     if (!settings.memory.enabled) {
       this.extractionCooldown = void 0;
       this.verifiedPrefix = void 0;
+      if (this.memoryHistoryRequiresReconcile) {
+        state = await extractionService.reconcileHistory(state) ?? state;
+        this.memoryHistoryRequiresReconcile = false;
+      }
       if (this.historyRequiresReconcile) {
         state = await stageSummaryService.reconcileHistory(state) ?? state;
         this.historyRequiresReconcile = false;
@@ -8897,6 +9267,7 @@ var BackgroundProcessingScheduler = class {
         return;
       }
       this.historyRequiresReconcile = false;
+      this.memoryHistoryRequiresReconcile = false;
       this.verifiedPrefix = {
         ownerChatId: state.ownerChatId,
         indexedThroughMessageId: state.indexedThroughMessageId,
@@ -9612,7 +9983,8 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
             searchText,
             topK,
             settings.recall.scoreThreshold,
-            vectorConfig
+            vectorConfig,
+            { timeoutMs: FOREGROUND_VECTOR_QUERY_TIMEOUT_MS }
           );
         } catch (error) {
           state.metrics.vectorQueryFailures += 1;
@@ -9885,20 +10257,9 @@ function buildDebugReport(state, settings, vectorCount = "unknown") {
 
 // src/llm/model-list.ts
 var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
-var MAX_RESPONSE_BYTES3 = 2 * 1024 * 1024;
+var MAX_RESPONSE_BYTES4 = 2 * 1024 * 1024;
 function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-async function readLimitedText2(response) {
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES3) {
-    throw new Error("\u6A21\u578B\u5217\u8868\u54CD\u5E94\u8FC7\u5927\u3002");
-  }
-  const text2 = await response.text();
-  if (new TextEncoder().encode(text2).byteLength > MAX_RESPONSE_BYTES3) {
-    throw new Error("\u6A21\u578B\u5217\u8868\u54CD\u5E94\u8FC7\u5927\u3002");
-  }
-  return text2;
 }
 function errorMessage(payload, response, apiKey) {
   let detail = "";
@@ -9962,7 +10323,11 @@ async function fetchCustomLlmModels(config, fetchImpl = fetch, requestHeaders = 
       }),
       signal: controller.signal
     });
-    const text2 = await readLimitedText2(response);
+    const text2 = await readResponseTextWithLimit(
+      response,
+      MAX_RESPONSE_BYTES4,
+      "\u6A21\u578B\u5217\u8868\u54CD\u5E94\u8FC7\u5927\u3002"
+    );
     let payload = null;
     try {
       payload = text2 ? JSON.parse(text2) : null;
@@ -9988,6 +10353,42 @@ async function fetchCustomLlmModels(config, fetchImpl = fetch, requestHeaders = 
     globalThis.clearTimeout(timeout);
   }
 }
+
+// src/ui/event-subscriptions.ts
+var EventSubscriptionScope = class {
+  cleanups = [];
+  disposed = false;
+  listen(target, eventName, handler) {
+    if (this.disposed) {
+      return;
+    }
+    target.addEventListener(eventName, handler);
+    this.cleanups.push(() => target.removeEventListener(eventName, handler));
+  }
+  subscribe(eventSource, eventName, handler) {
+    if (this.disposed) {
+      return;
+    }
+    eventSource.on(eventName, handler);
+    this.cleanups.push(() => {
+      const remove = eventSource.off ?? eventSource.removeListener;
+      remove?.call(eventSource, eventName, handler);
+    });
+  }
+  dispose() {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    for (const cleanup of this.cleanups.reverse()) {
+      try {
+        cleanup();
+      } catch {
+      }
+    }
+    this.cleanups = [];
+  }
+};
 
 // src/ui/notifications.ts
 function toastr() {
@@ -11320,6 +11721,7 @@ var PromptTokenStatsCard = class {
     this.renderBreakdown(panel, breakdown);
   }
   invalidate() {
+    this.renderSequence += 1;
     promptItemizationService.clearCache();
   }
   renderEmpty(panel, errorMessage2) {
@@ -12113,6 +12515,10 @@ var statusVectorRefreshRequested = false;
 var promptStatsRenderScheduled = false;
 var promptStatsRenderRunning = false;
 var promptStatsRenderAgain = false;
+var registeredPanel;
+var settingsPanelCleanup;
+var panelRegistrationPromise;
+var panelLifecycleGeneration = 0;
 function scheduleUiTask(operation) {
   if (typeof globalThis.requestAnimationFrame === "function") {
     globalThis.requestAnimationFrame(() => operation());
@@ -12128,6 +12534,9 @@ function scheduleUiIdleTask(operation) {
   globalThis.setTimeout(operation, 250);
 }
 function panelIsRendered(panel) {
+  if (panel !== registeredPanel) {
+    return false;
+  }
   const body = panel.querySelector(".story-echo-panel-body");
   return Boolean(body && isElementRendered(body));
 }
@@ -12145,6 +12554,9 @@ function requestStatusRefresh(panel, refreshVectorCount = false) {
   }
   statusRefreshScheduled = true;
   scheduleUiTask(() => {
+    if (panel !== registeredPanel) {
+      return;
+    }
     statusRefreshScheduled = false;
     if (!panelIsRendered(panel)) {
       return;
@@ -12153,6 +12565,9 @@ function requestStatusRefresh(panel, refreshVectorCount = false) {
     statusVectorRefreshRequested = false;
     statusRefreshRunning = true;
     void refreshStatus(panel, refreshVectors).finally(() => {
+      if (panel !== registeredPanel) {
+        return;
+      }
       statusRefreshRunning = false;
       if (statusRefreshAgain) {
         statusRefreshAgain = false;
@@ -12174,12 +12589,18 @@ function requestPromptStatsRender(panel) {
   }
   promptStatsRenderScheduled = true;
   scheduleUiIdleTask(() => {
+    if (panel !== registeredPanel) {
+      return;
+    }
     promptStatsRenderScheduled = false;
     if (!promptTokenStatsCard.canRender(panel)) {
       return;
     }
     promptStatsRenderRunning = true;
     void promptTokenStatsCard.render(panel).finally(() => {
+      if (panel !== registeredPanel) {
+        return;
+      }
       promptStatsRenderRunning = false;
       if (promptStatsRenderAgain) {
         promptStatsRenderAgain = false;
@@ -13041,6 +13462,15 @@ function bindSettings(panel) {
           throw new Error("\u7B49\u5F85\u5904\u7406\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
         }
         const settings = settingsRepository2.get();
+        let reconciledState = await memoryRepository2.getOrCreate();
+        if (reconciledState) {
+          reconciledState = await extractionService.reconcileHistory(reconciledState) ?? reconciledState;
+          reconciledState = await stageSummaryService.reconcileHistory(reconciledState) ?? reconciledState;
+          reconciledState = await storySkeletonService.reconcile(reconciledState) ?? reconciledState;
+          if (settings.memory.enabled && (reconciledState.pendingVectorHashes.length > 0 || reconciledState.pendingVectorDeleteHashes.length > 0 || !reconciledState.vectorFingerprint)) {
+            reconciledState = await extractionService.syncPendingVectors(reconciledState) ?? reconciledState;
+          }
+        }
         const chat = getContext().chat;
         const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
         if (!window || window.retainedStartIndex <= 0) {
@@ -13351,8 +13781,11 @@ async function refreshStatus(panel, refreshVectorCount = false) {
     if (memoryManagerOpen) memoryMetadataManager.render(panel, null);
   }
 }
-async function findSettingsHost() {
+async function findSettingsHost(generation) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (generation !== panelLifecycleGeneration) {
+      return null;
+    }
     const host = document.querySelector("#extensions_settings2, #extensions_settings");
     if (host) {
       return host;
@@ -13361,92 +13794,233 @@ async function findSettingsHost() {
   }
   return null;
 }
-async function registerSettingsPanel() {
-  if (document.getElementById(PANEL_ID)) {
+function resetPanelRefreshState() {
+  cachedVectorCollectionId = "";
+  cachedVectorCountText = "\u672A\u8BFB\u53D6";
+  cachedVectorRevision = "";
+  statusRefreshScheduled = false;
+  statusRefreshRunning = false;
+  statusRefreshAgain = false;
+  statusVectorRefreshRequested = false;
+  promptStatsRenderScheduled = false;
+  promptStatsRenderRunning = false;
+  promptStatsRenderAgain = false;
+  promptTokenStatsCard.invalidate();
+}
+function unregisterSettingsPanel() {
+  panelLifecycleGeneration += 1;
+  panelRegistrationPromise = void 0;
+  const cleanup = settingsPanelCleanup;
+  settingsPanelCleanup = void 0;
+  cleanup?.();
+  registeredPanel?.remove();
+  registeredPanel = void 0;
+  resetPanelRefreshState();
+}
+async function registerSettingsPanelOnce(generation) {
+  const host = await findSettingsHost(generation);
+  if (generation !== panelLifecycleGeneration) {
     return;
   }
-  const host = await findSettingsHost();
   if (!host) {
     logger.warn("\u627E\u4E0D\u5230SillyTavern\u6269\u5C55\u8BBE\u7F6E\u5BB9\u5668\u3002");
     return;
   }
+  document.getElementById(PANEL_ID)?.remove();
   const panel = panelTemplate();
   host.append(panel);
-  const settings = settingsRepository2.get();
-  syncForm(panel, settings);
-  bindSettings(panel);
-  stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
-  memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
-  globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
-    requestStatusRefresh(panel);
-  });
-  panel.querySelector(".inline-drawer-toggle")?.addEventListener("click", () => {
-    globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
-  });
-  for (const selector of [
-    "#story-echo-summary-settings",
-    "#story-echo-memory-manager",
-    "#story-echo-stats-diagnostics",
-    "#story-echo-inspection-diagnostics",
-    "#story-echo-traces-diagnostics"
-  ]) {
-    element4(panel, selector).addEventListener("toggle", (event) => {
-      if (event.currentTarget.open) {
-        requestStatusRefresh(panel);
-      }
-    });
-  }
-  element4(panel, "#story-echo-prompt-stats-card").addEventListener("toggle", (event) => {
-    if (event.currentTarget.open) {
-      requestPromptStatsRender(panel);
+  registeredPanel = panel;
+  const subscriptions = new EventSubscriptionScope();
+  const cleanup = () => {
+    subscriptions.dispose();
+    panel.remove();
+    if (registeredPanel === panel) {
+      registeredPanel = void 0;
     }
-  });
-  const context = getContext();
-  const chatRefreshEvents = new Set([
-    context.event_types?.["CHAT_CHANGED"],
-    context.event_types?.["CHAT_LOADED"]
-  ].filter((eventName) => Boolean(eventName)));
-  for (const eventName of chatRefreshEvents) {
-    context.eventSource?.on(eventName, () => {
-      promptTokenStatsCard.invalidate();
+  };
+  settingsPanelCleanup = cleanup;
+  try {
+    const settings = settingsRepository2.get();
+    syncForm(panel, settings);
+    bindSettings(panel);
+    stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
+    memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
+    subscriptions.listen(globalThis, DIAGNOSTICS_UPDATED_EVENT, () => {
+      requestStatusRefresh(panel);
+    });
+    panel.querySelector(".inline-drawer-toggle")?.addEventListener("click", () => {
       globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
     });
-  }
-  const promptRefreshEvents = new Set([
-    context.event_types?.["MESSAGE_RECEIVED"],
-    context.event_types?.["MESSAGE_SWIPED"],
-    context.event_types?.["MESSAGE_DELETED"],
-    context.event_types?.["MESSAGE_SWIPE_DELETED"],
-    context.event_types?.["GENERATION_STOPPED"],
-    context.event_types?.["GENERATION_ENDED"],
-    context.event_types?.["ITEMIZED_PROMPTS_LOADED"],
-    context.event_types?.["ITEMIZED_PROMPTS_SAVED"],
-    context.event_types?.["ITEMIZED_PROMPTS_DELETED"]
-  ].filter((eventName) => Boolean(eventName)));
-  for (const eventName of promptRefreshEvents) {
-    context.eventSource?.on(eventName, () => {
-      requestPromptStatsRender(panel);
+    for (const selector of [
+      "#story-echo-summary-settings",
+      "#story-echo-memory-manager",
+      "#story-echo-stats-diagnostics",
+      "#story-echo-inspection-diagnostics",
+      "#story-echo-traces-diagnostics"
+    ]) {
+      element4(panel, selector).addEventListener("toggle", (event) => {
+        if (event.currentTarget.open) {
+          requestStatusRefresh(panel);
+        }
+      });
+    }
+    element4(panel, "#story-echo-prompt-stats-card").addEventListener("toggle", (event) => {
+      if (event.currentTarget.open) {
+        requestPromptStatsRender(panel);
+      }
     });
+    const context = getContext();
+    const eventSource = context.eventSource;
+    const chatRefreshEvents = new Set([
+      context.event_types?.["CHAT_CHANGED"] ?? context.eventTypes?.["CHAT_CHANGED"],
+      context.event_types?.["CHAT_LOADED"] ?? context.eventTypes?.["CHAT_LOADED"]
+    ].filter((eventName) => Boolean(eventName)));
+    for (const eventName of chatRefreshEvents) {
+      if (!eventSource) {
+        break;
+      }
+      subscriptions.subscribe(eventSource, eventName, () => {
+        promptTokenStatsCard.invalidate();
+        globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
+      });
+    }
+    const promptRefreshEvents = new Set([
+      context.event_types?.["MESSAGE_RECEIVED"] ?? context.eventTypes?.["MESSAGE_RECEIVED"],
+      context.event_types?.["MESSAGE_SWIPED"] ?? context.eventTypes?.["MESSAGE_SWIPED"],
+      context.event_types?.["MESSAGE_DELETED"] ?? context.eventTypes?.["MESSAGE_DELETED"],
+      context.event_types?.["MESSAGE_SWIPE_DELETED"] ?? context.eventTypes?.["MESSAGE_SWIPE_DELETED"],
+      context.event_types?.["GENERATION_STOPPED"] ?? context.eventTypes?.["GENERATION_STOPPED"],
+      context.event_types?.["GENERATION_ENDED"] ?? context.eventTypes?.["GENERATION_ENDED"],
+      context.event_types?.["ITEMIZED_PROMPTS_LOADED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_LOADED"],
+      context.event_types?.["ITEMIZED_PROMPTS_SAVED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_SAVED"],
+      context.event_types?.["ITEMIZED_PROMPTS_DELETED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_DELETED"]
+    ].filter((eventName) => Boolean(eventName)));
+    for (const eventName of promptRefreshEvents) {
+      if (!eventSource) {
+        break;
+      }
+      subscriptions.subscribe(eventSource, eventName, () => {
+        requestPromptStatsRender(panel);
+      });
+    }
+    requestVisiblePanelRefresh(panel, true);
+  } catch (error) {
+    if (settingsPanelCleanup === cleanup) {
+      settingsPanelCleanup = void 0;
+    }
+    cleanup();
+    resetPanelRefreshState();
+    throw error;
   }
-  requestVisiblePanelRefresh(panel, true);
+}
+function registerSettingsPanel() {
+  if (registeredPanel?.isConnected) {
+    return Promise.resolve();
+  }
+  if (registeredPanel) {
+    unregisterSettingsPanel();
+  }
+  if (panelRegistrationPromise) {
+    return panelRegistrationPromise;
+  }
+  const generation = panelLifecycleGeneration;
+  let trackedOperation;
+  trackedOperation = registerSettingsPanelOnce(generation).finally(() => {
+    if (panelRegistrationPromise === trackedOperation) {
+      panelRegistrationPromise = void 0;
+    }
+  });
+  panelRegistrationPromise = trackedOperation;
+  return trackedOperation;
 }
 
 // src/index.ts
-globalThis.storyEchoGenerateInterceptor = storyEchoGenerateInterceptor;
-var activationPromise;
-function onActivate() {
-  if (activationPromise) {
-    return activationPromise;
+var SCHEDULER_REGISTRATION_RETRY_DELAY_MS = 250;
+var SCHEDULER_REGISTRATION_MAX_ATTEMPTS = 40;
+var activationLogged = false;
+var active = false;
+var activationGeneration = 0;
+var schedulerRegistrationPromise;
+function waitForSchedulerRetry() {
+  return new Promise((resolve) => {
+    globalThis.setTimeout(resolve, SCHEDULER_REGISTRATION_RETRY_DELAY_MS);
+  });
+}
+function attemptSchedulerRegistration(silent = false) {
+  try {
+    return silent ? backgroundProcessingScheduler.register({ silent: true }) : backgroundProcessingScheduler.register();
+  } catch (error) {
+    backgroundProcessingScheduler.unregister();
+    if (!silent) {
+      logger.warn("\u6CE8\u518C\u540E\u53F0\u5267\u60C5\u6574\u7406\u4E8B\u4EF6\u5931\u8D25\uFF0C\u5C06\u81EA\u52A8\u91CD\u8BD5\u3002", error);
+    }
+    return false;
   }
-  logger.info("\u6269\u5C55\u5DF2\u52A0\u8F7D\u3002");
-  backgroundProcessingScheduler.register();
-  activationPromise = registerSettingsPanel().catch((error) => {
+}
+async function retrySchedulerRegistration(generation) {
+  for (let attempt = 0; attempt < SCHEDULER_REGISTRATION_MAX_ATTEMPTS; attempt += 1) {
+    await waitForSchedulerRetry();
+    if (!active || generation !== activationGeneration) {
+      return;
+    }
+    if (attemptSchedulerRegistration(true)) {
+      return;
+    }
+  }
+  if (active && generation === activationGeneration) {
+    logger.warn("SillyTavern\u4E0A\u4E0B\u6587\u957F\u65F6\u95F4\u672A\u5C31\u7EEA\uFF1B\u540E\u53F0\u5267\u60C5\u6574\u7406\u5C06\u5728\u6269\u5C55\u4E0B\u6B21\u6FC0\u6D3B\u65F6\u91CD\u65B0\u6CE8\u518C\u3002");
+  }
+}
+function ensureSchedulerRegistered() {
+  if (!active) {
+    return Promise.resolve();
+  }
+  if (attemptSchedulerRegistration()) {
+    return Promise.resolve();
+  }
+  if (!schedulerRegistrationPromise) {
+    let trackedOperation;
+    trackedOperation = retrySchedulerRegistration(activationGeneration).finally(() => {
+      if (schedulerRegistrationPromise === trackedOperation) {
+        schedulerRegistrationPromise = void 0;
+      }
+    });
+    schedulerRegistrationPromise = trackedOperation;
+  }
+  return schedulerRegistrationPromise;
+}
+function onActivate() {
+  if (!active) {
+    active = true;
+    activationGeneration += 1;
+  }
+  globalThis.storyEchoGenerateInterceptor = storyEchoGenerateInterceptor;
+  if (!activationLogged) {
+    activationLogged = true;
+    logger.info("\u6269\u5C55\u5DF2\u52A0\u8F7D\u3002");
+  }
+  void ensureSchedulerRegistered();
+  return registerSettingsPanel().catch((error) => {
     logger.error("\u521D\u59CB\u5316\u8BBE\u7F6E\u9762\u677F\u5931\u8D25\u3002", error);
   });
-  return activationPromise;
+}
+function onDisable() {
+  active = false;
+  activationGeneration += 1;
+  schedulerRegistrationPromise = void 0;
+  backgroundProcessingScheduler.unregister();
+  unregisterSettingsPanel();
+  if (globalThis.storyEchoGenerateInterceptor === storyEchoGenerateInterceptor) {
+    globalThis.storyEchoGenerateInterceptor = void 0;
+  }
+}
+function onEnable() {
+  return onActivate();
 }
 void onActivate();
 export {
-  onActivate
+  onActivate,
+  onDisable,
+  onEnable
 };
 //# sourceMappingURL=index.js.map

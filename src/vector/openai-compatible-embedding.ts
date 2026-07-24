@@ -1,4 +1,5 @@
 import { logger } from '../core/logger';
+import { readResponseTextWithLimit } from '../http/response';
 import { getRequestHeaders } from '../platform/sillytavern';
 import {
   embeddingErrorMessage,
@@ -11,6 +12,9 @@ import type { EmbeddingClient, EmbeddingRequest, RequestHeadersProvider } from '
 import { resolveEmbeddingRequestUrl } from './url';
 
 export type { EmbeddingClient, EmbeddingRequest } from './embedding-client';
+
+const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+const RESPONSE_TOO_LARGE_MESSAGE = 'Embedding接口响应过大。';
 
 interface EmbeddingResponseItem {
   index?: unknown;
@@ -117,18 +121,18 @@ export class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
         }
         throw error;
       }
-      const declaredLength = Number(response.headers.get('content-length'));
-      if (Number.isFinite(declaredLength) && declaredLength > 32 * 1024 * 1024) {
-        throw new Error('Embedding接口响应过大。');
-      }
       let text: string;
       try {
-        text = await response.text();
+        text = await readResponseTextWithLimit(
+          response,
+          MAX_RESPONSE_BYTES,
+          RESPONSE_TOO_LARGE_MESSAGE,
+        );
       } catch (error) {
+        if (error instanceof Error && error.message === RESPONSE_TOO_LARGE_MESSAGE) {
+          throw error;
+        }
         throw new Error(`读取Embedding代理响应失败：${safeEmbeddingFailureDetail(error, apiKey)}`);
-      }
-      if (new TextEncoder().encode(text).byteLength > 32 * 1024 * 1024) {
-        throw new Error('Embedding接口响应过大。');
       }
       let payload: unknown = null;
       try {

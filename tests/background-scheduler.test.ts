@@ -13,6 +13,7 @@ import {
 import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { stageSummaryService } from '../src/summary/service';
+import { vectorCollectionRegistry } from '../src/vector/collection-registry';
 import { chatState } from './fixtures';
 
 afterEach(() => {
@@ -414,14 +415,59 @@ describe('backgroundTargetMessageId', () => {
         return state;
       });
     const scheduler = new BackgroundProcessingScheduler();
+    const schedule = vi.spyOn(scheduler, 'schedule').mockImplementation(() => undefined);
     scheduler.register();
+    schedule.mockClear();
 
     await scheduler.runNow();
     handlers.get('message-deleted')?.();
+    expect(schedule).toHaveBeenCalledOnce();
     await scheduler.runNow();
     scheduler.unregister();
 
     expect(reconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('purges a registered StoryEcho vector collection when its chat is deleted', async () => {
+    const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+    const handlers = new Map<string, (...args: unknown[]) => void | Promise<void>>();
+    const context = {
+      chat: [],
+      chatId: 'current-chat',
+      extensionSettings: { [MODULE_ID]: settings },
+      chatMetadata: {},
+      event_types: {
+        MESSAGE_RECEIVED: 'message-received',
+        CHAT_DELETED: 'chat-deleted',
+      },
+      eventSource: {
+        on: vi.fn((event: string, handler: (...args: unknown[]) => void | Promise<void>) => {
+          handlers.set(event, handler);
+        }),
+        off: vi.fn(),
+      },
+      saveSettingsDebounced: vi.fn(),
+      saveMetadata: vi.fn(async () => undefined),
+      generateRaw: vi.fn(async () => ''),
+      getCurrentChatId: () => 'current-chat',
+      getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+    };
+    vi.stubGlobal('SillyTavern', { getContext: () => context });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    vectorCollectionRegistry.remember('deleted-chat', 'story_echo_deleted-chat_v1');
+    const scheduler = new BackgroundProcessingScheduler();
+    vi.spyOn(scheduler, 'schedule').mockImplementation(() => undefined);
+    scheduler.register();
+
+    await handlers.get('chat-deleted')?.('deleted-chat');
+    scheduler.unregister();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      collectionId: 'story_echo_deleted-chat_v1',
+    });
+    expect(vectorCollectionRegistry.pendingCount()).toBe(0);
   });
 
   it('keeps a stopped reply on the current branch and only dirties history after a branch change', async () => {

@@ -40,6 +40,7 @@ import { resolveVectorConfig } from '../vector/config';
 import { resolveEmbeddingClient } from '../vector/embedding-providers';
 import { SillyTavernVectorStore } from '../vector/sillytavern-vector-store';
 import { normalizeEmbeddingsUrl, normalizeVolcengineMultimodalEmbeddingsUrl } from '../vector/url';
+import { EventSubscriptionScope } from './event-subscriptions';
 import { MemoryMetadataManager, memoryManagerTemplate } from './memory-manager';
 import { notify } from './notifications';
 import { promptStatsCardTemplate, promptTokenStatsCard } from './prompt-stats-card';
@@ -88,6 +89,10 @@ let statusVectorRefreshRequested = false;
 let promptStatsRenderScheduled = false;
 let promptStatsRenderRunning = false;
 let promptStatsRenderAgain = false;
+let registeredPanel: HTMLElement | undefined;
+let settingsPanelCleanup: (() => void) | undefined;
+let panelRegistrationPromise: Promise<void> | undefined;
+let panelLifecycleGeneration = 0;
 
 function scheduleUiTask(operation: () => void): void {
   if (typeof globalThis.requestAnimationFrame === 'function') {
@@ -108,6 +113,9 @@ function scheduleUiIdleTask(operation: () => void): void {
 }
 
 function panelIsRendered(panel: HTMLElement): boolean {
+  if (panel !== registeredPanel) {
+    return false;
+  }
   const body = panel.querySelector<HTMLElement>('.story-echo-panel-body');
   return Boolean(body && isElementRendered(body));
 }
@@ -126,6 +134,9 @@ function requestStatusRefresh(panel: HTMLElement, refreshVectorCount = false): v
   }
   statusRefreshScheduled = true;
   scheduleUiTask(() => {
+    if (panel !== registeredPanel) {
+      return;
+    }
     statusRefreshScheduled = false;
     if (!panelIsRendered(panel)) {
       return;
@@ -134,6 +145,9 @@ function requestStatusRefresh(panel: HTMLElement, refreshVectorCount = false): v
     statusVectorRefreshRequested = false;
     statusRefreshRunning = true;
     void refreshStatus(panel, refreshVectors).finally(() => {
+      if (panel !== registeredPanel) {
+        return;
+      }
       statusRefreshRunning = false;
       if (statusRefreshAgain) {
         statusRefreshAgain = false;
@@ -156,12 +170,18 @@ function requestPromptStatsRender(panel: HTMLElement): void {
   }
   promptStatsRenderScheduled = true;
   scheduleUiIdleTask(() => {
+    if (panel !== registeredPanel) {
+      return;
+    }
     promptStatsRenderScheduled = false;
     if (!promptTokenStatsCard.canRender(panel)) {
       return;
     }
     promptStatsRenderRunning = true;
     void promptTokenStatsCard.render(panel).finally(() => {
+      if (panel !== registeredPanel) {
+        return;
+      }
       promptStatsRenderRunning = false;
       if (promptStatsRenderAgain) {
         promptStatsRenderAgain = false;
@@ -1092,6 +1112,23 @@ function bindSettings(panel: HTMLElement): void {
           throw new Error('等待处理期间聊天已切换，已取消任务。');
         }
         const settings = settingsRepository.get();
+        let reconciledState = await memoryRepository.getOrCreate();
+        if (reconciledState) {
+          reconciledState = await extractionService.reconcileHistory(reconciledState) ?? reconciledState;
+          reconciledState = await stageSummaryService.reconcileHistory(reconciledState) ?? reconciledState;
+          reconciledState = await storySkeletonService.reconcile(reconciledState) ?? reconciledState;
+          if (
+            settings.memory.enabled
+            && (
+              reconciledState.pendingVectorHashes.length > 0
+              || reconciledState.pendingVectorDeleteHashes.length > 0
+              || !reconciledState.vectorFingerprint
+            )
+          ) {
+            reconciledState = await extractionService.syncPendingVectors(reconciledState)
+              ?? reconciledState;
+          }
+        }
         const chat = getContext().chat;
         const window = selectRecentWindow(chat, settings.recentWindow.size, settings.recentWindow.unit);
         if (!window || window.retainedStartIndex <= 0) {
@@ -1446,8 +1483,11 @@ async function refreshStatus(panel: HTMLElement, refreshVectorCount = false): Pr
   }
 }
 
-async function findSettingsHost(): Promise<HTMLElement | null> {
+async function findSettingsHost(generation: number): Promise<HTMLElement | null> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (generation !== panelLifecycleGeneration) {
+      return null;
+    }
     const host = document.querySelector<HTMLElement>('#extensions_settings2, #extensions_settings');
     if (host) {
       return host;
@@ -1457,75 +1497,151 @@ async function findSettingsHost(): Promise<HTMLElement | null> {
   return null;
 }
 
-export async function registerSettingsPanel(): Promise<void> {
-  if (document.getElementById(PANEL_ID)) {
+function resetPanelRefreshState(): void {
+  cachedVectorCollectionId = '';
+  cachedVectorCountText = '未读取';
+  cachedVectorRevision = '';
+  statusRefreshScheduled = false;
+  statusRefreshRunning = false;
+  statusRefreshAgain = false;
+  statusVectorRefreshRequested = false;
+  promptStatsRenderScheduled = false;
+  promptStatsRenderRunning = false;
+  promptStatsRenderAgain = false;
+  promptTokenStatsCard.invalidate();
+}
+
+export function unregisterSettingsPanel(): void {
+  panelLifecycleGeneration += 1;
+  panelRegistrationPromise = undefined;
+  const cleanup = settingsPanelCleanup;
+  settingsPanelCleanup = undefined;
+  cleanup?.();
+  registeredPanel?.remove();
+  registeredPanel = undefined;
+  resetPanelRefreshState();
+}
+
+async function registerSettingsPanelOnce(generation: number): Promise<void> {
+  const host = await findSettingsHost(generation);
+  if (generation !== panelLifecycleGeneration) {
     return;
   }
-  const host = await findSettingsHost();
   if (!host) {
     logger.warn('找不到SillyTavern扩展设置容器。');
     return;
   }
 
+  // A stale panel can survive a development hot reload, but listeners owned by
+  // this module are always cleaned through unregisterSettingsPanel().
+  document.getElementById(PANEL_ID)?.remove();
   const panel = panelTemplate();
   host.append(panel);
-  const settings = settingsRepository.get();
-  syncForm(panel, settings);
-  bindSettings(panel);
-  stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
-  memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
-  globalThis.addEventListener(DIAGNOSTICS_UPDATED_EVENT, () => {
-    requestStatusRefresh(panel);
-  });
-  panel.querySelector<HTMLElement>('.inline-drawer-toggle')?.addEventListener('click', () => {
-    // SillyTavern toggles the drawer after the click handlers have run. Defer
-    // the visibility check until the updated display state is observable.
-    globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
-  });
-  for (const selector of [
-    '#story-echo-summary-settings',
-    '#story-echo-memory-manager',
-    '#story-echo-stats-diagnostics',
-    '#story-echo-inspection-diagnostics',
-    '#story-echo-traces-diagnostics',
-  ]) {
-    element<HTMLDetailsElement>(panel, selector).addEventListener('toggle', (event) => {
-      if ((event.currentTarget as HTMLDetailsElement).open) {
-        requestStatusRefresh(panel);
-      }
-    });
-  }
-  element<HTMLDetailsElement>(panel, '#story-echo-prompt-stats-card').addEventListener('toggle', (event) => {
-    if ((event.currentTarget as HTMLDetailsElement).open) {
-      requestPromptStatsRender(panel);
+  registeredPanel = panel;
+  const subscriptions = new EventSubscriptionScope();
+  const cleanup = (): void => {
+    subscriptions.dispose();
+    panel.remove();
+    if (registeredPanel === panel) {
+      registeredPanel = undefined;
     }
-  });
-  const context = getContext();
-  const chatRefreshEvents = new Set([
-    context.event_types?.['CHAT_CHANGED'],
-    context.event_types?.['CHAT_LOADED'],
-  ].filter((eventName): eventName is string => Boolean(eventName)));
-  for (const eventName of chatRefreshEvents) {
-    context.eventSource?.on(eventName, () => {
-      promptTokenStatsCard.invalidate();
+  };
+  settingsPanelCleanup = cleanup;
+
+  try {
+    const settings = settingsRepository.get();
+    syncForm(panel, settings);
+    bindSettings(panel);
+    stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
+    memoryMetadataManager.bind(panel, async () => refreshStatus(panel, true));
+    subscriptions.listen(globalThis, DIAGNOSTICS_UPDATED_EVENT, () => {
+      requestStatusRefresh(panel);
+    });
+    panel.querySelector<HTMLElement>('.inline-drawer-toggle')?.addEventListener('click', () => {
+      // SillyTavern toggles the drawer after the click handlers have run. Defer
+      // the visibility check until the updated display state is observable.
       globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
     });
-  }
-  const promptRefreshEvents = new Set([
-    context.event_types?.['MESSAGE_RECEIVED'],
-    context.event_types?.['MESSAGE_SWIPED'],
-    context.event_types?.['MESSAGE_DELETED'],
-    context.event_types?.['MESSAGE_SWIPE_DELETED'],
-    context.event_types?.['GENERATION_STOPPED'],
-    context.event_types?.['GENERATION_ENDED'],
-    context.event_types?.['ITEMIZED_PROMPTS_LOADED'],
-    context.event_types?.['ITEMIZED_PROMPTS_SAVED'],
-    context.event_types?.['ITEMIZED_PROMPTS_DELETED'],
-  ].filter((eventName): eventName is string => Boolean(eventName)));
-  for (const eventName of promptRefreshEvents) {
-    context.eventSource?.on(eventName, () => {
-      requestPromptStatsRender(panel);
+    for (const selector of [
+      '#story-echo-summary-settings',
+      '#story-echo-memory-manager',
+      '#story-echo-stats-diagnostics',
+      '#story-echo-inspection-diagnostics',
+      '#story-echo-traces-diagnostics',
+    ]) {
+      element<HTMLDetailsElement>(panel, selector).addEventListener('toggle', (event) => {
+        if ((event.currentTarget as HTMLDetailsElement).open) {
+          requestStatusRefresh(panel);
+        }
+      });
+    }
+    element<HTMLDetailsElement>(panel, '#story-echo-prompt-stats-card').addEventListener('toggle', (event) => {
+      if ((event.currentTarget as HTMLDetailsElement).open) {
+        requestPromptStatsRender(panel);
+      }
     });
+    const context = getContext();
+    const eventSource = context.eventSource;
+    const chatRefreshEvents = new Set([
+      context.event_types?.['CHAT_CHANGED'] ?? context.eventTypes?.['CHAT_CHANGED'],
+      context.event_types?.['CHAT_LOADED'] ?? context.eventTypes?.['CHAT_LOADED'],
+    ].filter((eventName): eventName is string => Boolean(eventName)));
+    for (const eventName of chatRefreshEvents) {
+      if (!eventSource) {
+        break;
+      }
+      subscriptions.subscribe(eventSource, eventName, () => {
+        promptTokenStatsCard.invalidate();
+        globalThis.setTimeout(() => requestVisiblePanelRefresh(panel, true), 0);
+      });
+    }
+    const promptRefreshEvents = new Set([
+      context.event_types?.['MESSAGE_RECEIVED'] ?? context.eventTypes?.['MESSAGE_RECEIVED'],
+      context.event_types?.['MESSAGE_SWIPED'] ?? context.eventTypes?.['MESSAGE_SWIPED'],
+      context.event_types?.['MESSAGE_DELETED'] ?? context.eventTypes?.['MESSAGE_DELETED'],
+      context.event_types?.['MESSAGE_SWIPE_DELETED'] ?? context.eventTypes?.['MESSAGE_SWIPE_DELETED'],
+      context.event_types?.['GENERATION_STOPPED'] ?? context.eventTypes?.['GENERATION_STOPPED'],
+      context.event_types?.['GENERATION_ENDED'] ?? context.eventTypes?.['GENERATION_ENDED'],
+      context.event_types?.['ITEMIZED_PROMPTS_LOADED'] ?? context.eventTypes?.['ITEMIZED_PROMPTS_LOADED'],
+      context.event_types?.['ITEMIZED_PROMPTS_SAVED'] ?? context.eventTypes?.['ITEMIZED_PROMPTS_SAVED'],
+      context.event_types?.['ITEMIZED_PROMPTS_DELETED'] ?? context.eventTypes?.['ITEMIZED_PROMPTS_DELETED'],
+    ].filter((eventName): eventName is string => Boolean(eventName)));
+    for (const eventName of promptRefreshEvents) {
+      if (!eventSource) {
+        break;
+      }
+      subscriptions.subscribe(eventSource, eventName, () => {
+        requestPromptStatsRender(panel);
+      });
+    }
+    requestVisiblePanelRefresh(panel, true);
+  } catch (error) {
+    if (settingsPanelCleanup === cleanup) {
+      settingsPanelCleanup = undefined;
+    }
+    cleanup();
+    resetPanelRefreshState();
+    throw error;
   }
-  requestVisiblePanelRefresh(panel, true);
+}
+
+export function registerSettingsPanel(): Promise<void> {
+  if (registeredPanel?.isConnected) {
+    return Promise.resolve();
+  }
+  if (registeredPanel) {
+    unregisterSettingsPanel();
+  }
+  if (panelRegistrationPromise) {
+    return panelRegistrationPromise;
+  }
+  const generation = panelLifecycleGeneration;
+  let trackedOperation: Promise<void>;
+  trackedOperation = registerSettingsPanelOnce(generation).finally(() => {
+    if (panelRegistrationPromise === trackedOperation) {
+      panelRegistrationPromise = undefined;
+    }
+  });
+  panelRegistrationPromise = trackedOperation;
+  return trackedOperation;
 }

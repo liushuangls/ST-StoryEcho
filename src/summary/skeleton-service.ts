@@ -26,7 +26,6 @@ import {
   pendingArchivedStageSummaryEntries,
   skeletonSourceBatches,
   skeletonSourceEntryCharacters,
-  storySkeletonIsUsable,
   storySkeletonSourceHash,
   storySkeletonUpdateDue,
 } from './skeleton-state';

@@ -26,16 +26,36 @@ export interface VectorRequestConfig {
   };
 }
 
+export interface VectorRequestOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 export interface VectorStoreAdapter {
-  insert(collectionId: string, items: VectorItem[], config: VectorRequestConfig): Promise<void>;
+  insert(
+    collectionId: string,
+    items: VectorItem[],
+    config: VectorRequestConfig,
+    options?: VectorRequestOptions,
+  ): Promise<void>;
   query(
     collectionId: string,
     searchText: string,
     topK: number,
     threshold: number,
     config: VectorRequestConfig,
+    options?: VectorRequestOptions,
   ): Promise<VectorQueryResult[]>;
-  list(collectionId: string, config: VectorRequestConfig): Promise<number[]>;
-  delete(collectionId: string, hashes: number[], config: VectorRequestConfig): Promise<void>;
-  purge(collectionId: string): Promise<void>;
+  list(
+    collectionId: string,
+    config: VectorRequestConfig,
+    options?: VectorRequestOptions,
+  ): Promise<number[]>;
+  delete(
+    collectionId: string,
+    hashes: number[],
+    config: VectorRequestConfig,
+    options?: VectorRequestOptions,
+  ): Promise<void>;
+  purge(collectionId: string, options?: VectorRequestOptions): Promise<void>;
 }

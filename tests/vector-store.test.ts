@@ -44,6 +44,7 @@ describe('SillyTavernVectorStore precomputed embeddings', () => {
     expect(embeddingClient.embed).toHaveBeenCalledWith({
       ...precomputed.precomputed,
       texts: ['记忆一', '记忆二'],
+      signal: expect.any(AbortSignal),
     });
     const [, init] = fetchMock.mock.calls[0] ?? [];
     const body = JSON.parse(String(init?.body));
@@ -112,5 +113,51 @@ describe('SillyTavernVectorStore precomputed embeddings', () => {
     const store = new SillyTavernVectorStore();
 
     await expect(store.purge('collection')).resolves.toBeUndefined();
+  });
+
+  it('bounds a stalled Vector Storage request even when fetch ignores abort', async () => {
+    installSillyTavernContext();
+    const fetchMock = vi.fn<typeof fetch>(() => new Promise<Response>(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
+    const store = new SillyTavernVectorStore();
+
+    await expect(store.query(
+      'collection',
+      '当前查询',
+      5,
+      0.25,
+      { source: 'transformers' },
+      { timeoutMs: 10 },
+    )).rejects.toThrow('Vector Storage查询超时（10ms）');
+
+    const [, init] = fetchMock.mock.calls[0] ?? [];
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.signal?.aborted).toBe(true);
+  });
+
+  it('propagates caller cancellation through embedding and Vector Storage work', async () => {
+    installSillyTavernContext();
+    const controller = new AbortController();
+    const reason = new Error('audit cancellation');
+    const embed = vi.fn<EmbeddingClient['embed']>(
+      ({ signal }) => new Promise<number[][]>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }),
+    );
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>());
+    const store = new SillyTavernVectorStore(() => ({ embed }));
+    const query = store.query(
+      'collection',
+      '当前查询',
+      5,
+      0.25,
+      precomputed,
+      { signal: controller.signal, timeoutMs: 1_000 },
+    );
+
+    controller.abort(reason);
+
+    await expect(query).rejects.toBe(reason);
+    expect(embed.mock.calls[0]?.[0].signal?.aborted).toBe(true);
   });
 });

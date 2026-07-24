@@ -1,4 +1,5 @@
 import { logger } from '../core/logger';
+import { readResponseTextWithLimit } from '../http/response';
 import { getRequestHeaders } from '../platform/sillytavern';
 import {
   embeddingErrorMessage,
@@ -12,6 +13,7 @@ import { resolveEmbeddingRequestUrl } from './url';
 
 const DEFAULT_CONCURRENCY = 4;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+const RESPONSE_TOO_LARGE_MESSAGE = '火山方舟Embedding接口响应过大。';
 
 function parseVolcengineVector(payload: unknown): number[] {
   const record = isRecord(payload) ? payload : {};
@@ -89,18 +91,18 @@ export class VolcengineMultimodalEmbeddingClient implements EmbeddingClient {
         throw error;
       }
 
-      const declaredLength = Number(response.headers.get('content-length'));
-      if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
-        throw new Error('火山方舟Embedding接口响应过大。');
-      }
       let responseText: string;
       try {
-        responseText = await response.text();
+        responseText = await readResponseTextWithLimit(
+          response,
+          MAX_RESPONSE_BYTES,
+          RESPONSE_TOO_LARGE_MESSAGE,
+        );
       } catch (error) {
+        if (error instanceof Error && error.message === RESPONSE_TOO_LARGE_MESSAGE) {
+          throw error;
+        }
         throw new Error(`读取火山方舟Embedding代理响应失败：${safeEmbeddingFailureDetail(error, apiKey)}`);
-      }
-      if (new TextEncoder().encode(responseText).byteLength > MAX_RESPONSE_BYTES) {
-        throw new Error('火山方舟Embedding接口响应过大。');
       }
       let payload: unknown = null;
       try {
