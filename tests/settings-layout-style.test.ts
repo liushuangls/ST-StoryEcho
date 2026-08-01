@@ -13,6 +13,16 @@ function rule(selector: string): string {
 }
 
 describe('settings panel action layout', () => {
+  it('keeps the host drawer stable while derived context is expanded', () => {
+    const panelRule = rule(
+      '#story-echo-settings .story-echo-panel-body.story-echo-summary-layout-lock {',
+    );
+
+    expect(panelRule).toContain('height: var(--story-echo-summary-layout-height);');
+    expect(panelRule).toContain('overflow-y: auto;');
+    expect(panelRule).toContain('overscroll-behavior-y: contain;');
+  });
+
   it('keeps the model connection button horizontal and full width', () => {
     const buttonRule = rule('#story-echo-settings .story-echo-model-action {');
 

@@ -51,15 +51,22 @@ describe('context-only settings panel contract', () => {
     expect(source).toContain('${promptStatsCardTemplate()}');
   });
 
-  it('keeps window and world-book settings collapsed by default', () => {
+  it('keeps window, world-book and model settings collapsed by default', () => {
     expect(source).toContain(
       '<details id="story-echo-context-settings" class="story-echo-section story-echo-collapsible">',
     );
     expect(source).toContain(
       '<details id="story-echo-reference-settings" class="story-echo-section story-echo-collapsible">',
     );
+    expect(source).toContain(
+      '<details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible">',
+    );
+    expect(source).not.toContain(
+      '<details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible" open>',
+    );
     expect(source).toContain('窗口与总结设置');
     expect(source).toContain('世界书参考');
+    expect(source).toContain('阶段总结与骨架模型');
   });
 
   it('places derived context management immediately after model settings', () => {
@@ -91,5 +98,17 @@ describe('context-only settings panel contract', () => {
       expect(source).toContain(`['${eventName}']`);
     }
     expect(source).toContain('promptTokenStatsCard.render(panel)');
+  });
+
+  it('refreshes prompt stats after the host drawer becomes visible again', () => {
+    expect(source).toContain('function observePanelVisibility(');
+    expect(source).toContain('observeElementVisibility(body, () => requestRefresh(panel))');
+    expect(source).toContain('visibilityObserver?.disconnect()');
+  });
+
+  it('locks the panel height before derived context expands', () => {
+    expect(source).toContain('function bindSummaryLayoutLock(');
+    expect(source).toContain("subscriptions.listen(summary, 'click'");
+    expect(source).toContain("'--story-echo-summary-layout-height'");
   });
 });

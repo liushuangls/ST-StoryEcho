@@ -488,7 +488,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.2";
+var EXTENSION_VERSION = "0.21.3";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -4648,6 +4648,18 @@ function isElementRendered(element4) {
   }
   return Array.from(element4.getClientRects()).some((rectangle) => rectangle.width > 0 && rectangle.height > 0);
 }
+function observeElementVisibility(element4, onVisible) {
+  if (typeof globalThis.IntersectionObserver !== "function") {
+    return void 0;
+  }
+  const observer = new globalThis.IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.target === element4 && entry.isIntersecting)) {
+      onVisible();
+    }
+  });
+  observer.observe(element4);
+  return observer;
+}
 
 // src/ui/prompt-stats-card.ts
 var CATEGORY_PRESENTATION = {
@@ -5631,6 +5643,53 @@ function requestRefresh(panel) {
     });
   }, 0);
 }
+function observePanelVisibility(panel) {
+  const body = panel.querySelector(".story-echo-panel-body");
+  if (!body) {
+    return void 0;
+  }
+  return observeElementVisibility(body, () => requestRefresh(panel));
+}
+function unlockSummaryLayout(panelBody) {
+  panelBody.classList.remove("story-echo-summary-layout-lock");
+  panelBody.style.removeProperty("--story-echo-summary-layout-height");
+}
+function lockSummaryLayout(panelBody, details, summary) {
+  const expandedContentHeight = details.open ? Math.max(0, details.getBoundingClientRect().height - summary.getBoundingClientRect().height) : 0;
+  const collapsedPanelHeight = Math.ceil(
+    panelBody.getBoundingClientRect().height - expandedContentHeight
+  );
+  if (collapsedPanelHeight <= 0) {
+    return;
+  }
+  panelBody.style.setProperty("--story-echo-summary-layout-height", `${collapsedPanelHeight}px`);
+  panelBody.classList.add("story-echo-summary-layout-lock");
+}
+function bindSummaryLayoutLock(panel, subscriptions) {
+  const panelBody = element3(panel, ".story-echo-panel-body");
+  const details = element3(panel, "#story-echo-summary-settings");
+  const summary = element3(details, ":scope > summary");
+  subscriptions.listen(summary, "click", () => {
+    if (details.open) {
+      return;
+    }
+    lockSummaryLayout(panelBody, details, summary);
+    globalThis.setTimeout(() => {
+      if (!details.open) {
+        unlockSummaryLayout(panelBody);
+      }
+    }, 0);
+  });
+  subscriptions.listen(details, "toggle", () => {
+    if (details.open) {
+      if (!panelBody.classList.contains("story-echo-summary-layout-lock")) {
+        lockSummaryLayout(panelBody, details, summary);
+      }
+      return;
+    }
+    unlockSummaryLayout(panelBody);
+  });
+}
 function panelTemplate() {
   const panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -5724,7 +5783,7 @@ function panelTemplate() {
           </div>
         </details>
 
-        <details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible" open>
+        <details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-brain" aria-hidden="true"></i>
@@ -6235,7 +6294,9 @@ async function registerSettingsPanelOnce(generation) {
   host.append(panel);
   registeredPanel = panel;
   const subscriptions = new EventSubscriptionScope();
+  let visibilityObserver;
   const cleanup = () => {
+    visibilityObserver?.disconnect();
     subscriptions.dispose();
     panel.remove();
     if (registeredPanel === panel) {
@@ -6247,6 +6308,7 @@ async function registerSettingsPanelOnce(generation) {
     syncForm(panel, settingsRepository2.get());
     bindSettings(panel);
     stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
+    bindSummaryLayoutLock(panel, subscriptions);
     subscriptions.listen(globalThis, DIAGNOSTICS_UPDATED_EVENT, () => requestRefresh(panel));
     panel.querySelector(".inline-drawer-toggle")?.addEventListener("click", () => {
       globalThis.setTimeout(() => requestRefresh(panel), 0);
@@ -6294,11 +6356,11 @@ async function registerSettingsPanelOnce(generation) {
       }
       for (const eventName of promptRefreshEvents) {
         subscriptions.subscribe(eventSource, eventName, () => {
-          promptTokenStatsCard.invalidate();
           globalThis.setTimeout(() => requestRefresh(panel), 0);
         });
       }
     }
+    visibilityObserver = observePanelVisibility(panel);
     requestRefresh(panel);
   } catch (error) {
     if (settingsPanelCleanup === cleanup) {

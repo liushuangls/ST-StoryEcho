@@ -27,3 +27,19 @@ export function isElementRendered(element: HTMLElement): boolean {
     rectangle.width > 0 && rectangle.height > 0
   ));
 }
+
+export function observeElementVisibility(
+  element: HTMLElement,
+  onVisible: () => void,
+): IntersectionObserver | undefined {
+  if (typeof globalThis.IntersectionObserver !== 'function') {
+    return undefined;
+  }
+  const observer = new globalThis.IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.target === element && entry.isIntersecting)) {
+      onVisible();
+    }
+  });
+  observer.observe(element);
+  return observer;
+}

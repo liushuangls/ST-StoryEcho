@@ -8,6 +8,12 @@
   padding: 0.35rem 0.15rem 0.75rem;
 }
 
+#story-echo-settings .story-echo-panel-body.story-echo-summary-layout-lock {
+  height: var(--story-echo-summary-layout-height);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+
 #story-echo-settings [hidden] {
   display: none !important;
 }

@@ -27,7 +27,7 @@ import {
   StageSummaryMetadataManager,
   stageSummaryManagerTemplate,
 } from './summary-manager';
-import { isElementRendered } from './visibility';
+import { isElementRendered, observeElementVisibility } from './visibility';
 
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
@@ -104,6 +104,69 @@ function requestRefresh(panel: HTMLElement): void {
       }
     });
   }, 0);
+}
+
+function observePanelVisibility(panel: HTMLElement): IntersectionObserver | undefined {
+  const body = panel.querySelector<HTMLElement>('.story-echo-panel-body');
+  if (!body) {
+    return undefined;
+  }
+  return observeElementVisibility(body, () => requestRefresh(panel));
+}
+
+function unlockSummaryLayout(panelBody: HTMLElement): void {
+  panelBody.classList.remove('story-echo-summary-layout-lock');
+  panelBody.style.removeProperty('--story-echo-summary-layout-height');
+}
+
+function lockSummaryLayout(
+  panelBody: HTMLElement,
+  details: HTMLDetailsElement,
+  summary: HTMLElement,
+): void {
+  const expandedContentHeight = details.open
+    ? Math.max(0, details.getBoundingClientRect().height - summary.getBoundingClientRect().height)
+    : 0;
+  const collapsedPanelHeight = Math.ceil(
+    panelBody.getBoundingClientRect().height - expandedContentHeight,
+  );
+  if (collapsedPanelHeight <= 0) {
+    return;
+  }
+  panelBody.style.setProperty('--story-echo-summary-layout-height', `${collapsedPanelHeight}px`);
+  panelBody.classList.add('story-echo-summary-layout-lock');
+}
+
+function bindSummaryLayoutLock(
+  panel: HTMLElement,
+  subscriptions: EventSubscriptionScope,
+): void {
+  const panelBody = element<HTMLElement>(panel, '.story-echo-panel-body');
+  const details = element<HTMLDetailsElement>(panel, '#story-echo-summary-settings');
+  const summary = element<HTMLElement>(details, ':scope > summary');
+
+  subscriptions.listen(summary, 'click', () => {
+    if (details.open) {
+      return;
+    }
+    // Capture the collapsed height before the native <details> click expands
+    // its content, so SillyTavern's two-column drawer is not reflowed.
+    lockSummaryLayout(panelBody, details, summary);
+    globalThis.setTimeout(() => {
+      if (!details.open) {
+        unlockSummaryLayout(panelBody);
+      }
+    }, 0);
+  });
+  subscriptions.listen(details, 'toggle', () => {
+    if (details.open) {
+      if (!panelBody.classList.contains('story-echo-summary-layout-lock')) {
+        lockSummaryLayout(panelBody, details, summary);
+      }
+      return;
+    }
+    unlockSummaryLayout(panelBody);
+  });
 }
 
 function panelTemplate(): HTMLElement {
@@ -199,7 +262,7 @@ function panelTemplate(): HTMLElement {
           </div>
         </details>
 
-        <details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible" open>
+        <details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-brain" aria-hidden="true"></i>
@@ -767,7 +830,9 @@ async function registerSettingsPanelOnce(generation: number): Promise<void> {
   host.append(panel);
   registeredPanel = panel;
   const subscriptions = new EventSubscriptionScope();
+  let visibilityObserver: IntersectionObserver | undefined;
   const cleanup = (): void => {
+    visibilityObserver?.disconnect();
     subscriptions.dispose();
     panel.remove();
     if (registeredPanel === panel) {
@@ -780,6 +845,7 @@ async function registerSettingsPanelOnce(generation: number): Promise<void> {
     syncForm(panel, settingsRepository.get());
     bindSettings(panel);
     stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
+    bindSummaryLayoutLock(panel, subscriptions);
     subscriptions.listen(globalThis, DIAGNOSTICS_UPDATED_EVENT, () => requestRefresh(panel));
     panel.querySelector<HTMLElement>('.inline-drawer-toggle')?.addEventListener('click', () => {
       globalThis.setTimeout(() => requestRefresh(panel), 0);
@@ -828,11 +894,11 @@ async function registerSettingsPanelOnce(generation: number): Promise<void> {
       }
       for (const eventName of promptRefreshEvents) {
         subscriptions.subscribe(eventSource, eventName, () => {
-          promptTokenStatsCard.invalidate();
           globalThis.setTimeout(() => requestRefresh(panel), 0);
         });
       }
     }
+    visibilityObserver = observePanelVisibility(panel);
     requestRefresh(panel);
   } catch (error) {
     if (settingsPanelCleanup === cleanup) {
