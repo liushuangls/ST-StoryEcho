@@ -24,6 +24,12 @@ const CONTROLS = [
 ];
 
 describe('context-only settings panel contract', () => {
+  it('uses a context-focused display name', () => {
+    expect(source).toContain("import { DISPLAY_NAME } from '../core/constants';");
+    expect(source).toContain('<b>${DISPLAY_NAME}</b>');
+    expect(source).not.toContain('StoryEcho · 剧情回响');
+  });
+
   it('exposes exactly one product feature switch', () => {
     expect(source).toContain('启用 StoryEcho 上下文管理');
     expect(source).not.toContain('启用剧情记忆与召回');
@@ -43,6 +49,19 @@ describe('context-only settings panel contract', () => {
     expect(source).toContain('处理窗口外历史');
     expect(source).toContain('${stageSummaryManagerTemplate()}');
     expect(source).toContain('${promptStatsCardTemplate()}');
+  });
+
+  it('places derived context management immediately after model settings', () => {
+    const modelEnd = source.indexOf('</details>', source.indexOf('id="story-echo-llm-settings"'));
+    const summaryStart = source.indexOf(
+      '<details id="story-echo-summary-settings"',
+      modelEnd,
+    );
+    const nextSection = source.slice(modelEnd + '</details>'.length).trimStart();
+
+    expect(modelEnd).toBeGreaterThanOrEqual(0);
+    expect(summaryStart).toBeGreaterThan(modelEnd);
+    expect(nextSection).toMatch(/^<details id="story-echo-summary-settings"/);
   });
 
   it('refreshes diagnostics after relevant chat and prompt events', () => {

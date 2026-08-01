@@ -485,10 +485,10 @@ var storyEchoTaskCoordinator = new StoryEchoTaskCoordinator();
 
 // src/core/constants.ts
 var MODULE_ID = "story_echo";
-var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
+var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.0";
+var EXTENSION_VERSION = "0.21.1";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -5638,7 +5638,7 @@ function panelTemplate() {
   panel.innerHTML = `
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD</b>
+        <b>${DISPLAY_NAME}</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
       <div class="inline-drawer-content story-echo-panel-body">
@@ -5750,24 +5750,11 @@ function panelTemplate() {
                 <span>\u5931\u8D25\u65F6\u56DE\u9000\u4E3B\u8FDE\u63A5</span>
               </label>
             </div>
-            <button id="story-echo-test-llm" class="menu_button" type="button">
+            <button id="story-echo-test-llm" class="menu_button story-echo-model-action" type="button">
               <i class="fa-solid fa-plug-circle-check" aria-hidden="true"></i><span>\u6D4B\u8BD5\u6A21\u578B\u8FDE\u63A5</span>
             </button>
           </div>
         </details>
-
-        <section class="story-echo-section story-echo-actions">
-          <button id="story-echo-process-history" class="menu_button story-echo-action-primary" type="button">
-            <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>\u5904\u7406\u7A97\u53E3\u5916\u5386\u53F2</span>
-          </button>
-          <label class="story-echo-check-row">
-            <input id="story-echo-debug" type="checkbox">
-            <span>\u5F00\u542F\u8C03\u8BD5\u8BB0\u5F55</span>
-          </label>
-          <p id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u72B6\u6001\u2026</p>
-        </section>
-
-        ${promptStatsCardTemplate()}
 
         <details id="story-echo-summary-settings" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
@@ -5782,6 +5769,19 @@ function panelTemplate() {
           </summary>
           <div class="story-echo-section-body">${stageSummaryManagerTemplate()}</div>
         </details>
+
+        <section class="story-echo-section story-echo-actions">
+          <button id="story-echo-process-history" class="menu_button story-echo-action-primary" type="button">
+            <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>\u5904\u7406\u7A97\u53E3\u5916\u5386\u53F2</span>
+          </button>
+          <label class="story-echo-check-row">
+            <input id="story-echo-debug" type="checkbox">
+            <span>\u5F00\u542F\u8C03\u8BD5\u8BB0\u5F55</span>
+          </label>
+          <p id="story-echo-status" class="story-echo-status">\u6B63\u5728\u8BFB\u53D6\u72B6\u6001\u2026</p>
+        </section>
+
+        ${promptStatsCardTemplate()}
 
         <details id="story-echo-stats-diagnostics" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">

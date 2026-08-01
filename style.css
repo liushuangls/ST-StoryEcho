@@ -177,6 +177,27 @@
   padding: 0.8rem;
 }
 
+#story-echo-settings .story-echo-model-action {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 2.65rem;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  line-height: 1.25;
+  text-align: center;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-model-action i {
+  flex: 0 0 auto;
+}
+
 #story-echo-settings .story-echo-field {
   display: flex;
   flex-direction: column;

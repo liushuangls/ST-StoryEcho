@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { EXTENSION_VERSION } from '../src/core/constants';
+import { DISPLAY_NAME, EXTENSION_VERSION } from '../src/core/constants';
 
 interface ExtensionManifest {
+  display_name: string;
   version: string;
   js: string;
   css: string;
@@ -19,6 +20,7 @@ describe('extension manifest', () => {
     const jsAsset = manifest.js.replace(/\?.*$/, '');
     const cssAsset = manifest.css.replace(/\?.*$/, '');
 
+    expect(manifest.display_name).toBe(DISPLAY_NAME);
     expect(manifest.version).toBe(EXTENSION_VERSION);
     expect(packageJson.version).toBe(EXTENSION_VERSION);
     expect(manifest.js.split('?')[1]).toBe(expectedVersionQuery);

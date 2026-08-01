@@ -1,4 +1,5 @@
 import { backgroundTargetMessageId } from '../background/scheduler';
+import { DISPLAY_NAME } from '../core/constants';
 import { logger } from '../core/logger';
 import type { LlmProviderId, StoryEchoChatState, StoryEchoSettings, WindowUnit } from '../core/types';
 import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
@@ -112,7 +113,7 @@ function panelTemplate(): HTMLElement {
   panel.innerHTML = `
     <div class="inline-drawer">
       <div class="inline-drawer-toggle inline-drawer-header">
-        <b>StoryEcho · 剧情回响</b>
+        <b>${DISPLAY_NAME}</b>
         <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
       </div>
       <div class="inline-drawer-content story-echo-panel-body">
@@ -224,24 +225,11 @@ function panelTemplate(): HTMLElement {
                 <span>失败时回退主连接</span>
               </label>
             </div>
-            <button id="story-echo-test-llm" class="menu_button" type="button">
+            <button id="story-echo-test-llm" class="menu_button story-echo-model-action" type="button">
               <i class="fa-solid fa-plug-circle-check" aria-hidden="true"></i><span>测试模型连接</span>
             </button>
           </div>
         </details>
-
-        <section class="story-echo-section story-echo-actions">
-          <button id="story-echo-process-history" class="menu_button story-echo-action-primary" type="button">
-            <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>处理窗口外历史</span>
-          </button>
-          <label class="story-echo-check-row">
-            <input id="story-echo-debug" type="checkbox">
-            <span>开启调试记录</span>
-          </label>
-          <p id="story-echo-status" class="story-echo-status">正在读取状态…</p>
-        </section>
-
-        ${promptStatsCardTemplate()}
 
         <details id="story-echo-summary-settings" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
@@ -256,6 +244,19 @@ function panelTemplate(): HTMLElement {
           </summary>
           <div class="story-echo-section-body">${stageSummaryManagerTemplate()}</div>
         </details>
+
+        <section class="story-echo-section story-echo-actions">
+          <button id="story-echo-process-history" class="menu_button story-echo-action-primary" type="button">
+            <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>处理窗口外历史</span>
+          </button>
+          <label class="story-echo-check-row">
+            <input id="story-echo-debug" type="checkbox">
+            <span>开启调试记录</span>
+          </label>
+          <p id="story-echo-status" class="story-echo-status">正在读取状态…</p>
+        </section>
+
+        ${promptStatsCardTemplate()}
 
         <details id="story-echo-stats-diagnostics" class="story-echo-section story-echo-collapsible">
           <summary class="story-echo-section-summary">
