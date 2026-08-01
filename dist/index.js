@@ -488,7 +488,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u56DE\u54CD";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.20.23";
+var EXTENSION_VERSION = "0.21.0";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
