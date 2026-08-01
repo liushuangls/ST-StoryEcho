@@ -32,15 +32,38 @@
   min-width: 0;
 }
 
-#story-echo-settings #story-echo-custom-llm,
-#story-echo-settings .story-echo-diagnostics-actions {
+#story-echo-settings #story-echo-custom-llm {
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
 }
 
 #story-echo-settings .story-echo-diagnostics-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
   margin-top: 0.8rem;
+}
+
+#story-echo-settings .story-echo-diagnostics-actions .menu_button {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 2.65rem;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  line-height: 1.25;
+  text-align: center;
+  white-space: nowrap;
+}
+
+#story-echo-settings .story-echo-diagnostics-actions .menu_button i {
+  flex: 0 0 auto;
 }
 
 #story-echo-settings .story-echo-debug-output {
@@ -1040,6 +1063,10 @@
 
 @media (max-width: 420px) {
   #story-echo-settings .story-echo-actions {
+    grid-template-columns: 1fr;
+  }
+
+  #story-echo-settings .story-echo-diagnostics-actions {
     grid-template-columns: 1fr;
   }
 
