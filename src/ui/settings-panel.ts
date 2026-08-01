@@ -128,52 +128,76 @@ function panelTemplate(): HTMLElement {
           </span>
         </div>
 
-        <section class="story-echo-section story-echo-settings-grid">
-          <label class="story-echo-field">
-            <span>最近原文窗口</span>
-            <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>窗口单位</span>
-            <select id="story-echo-window-unit" class="text_pole">
-              <option value="turns">轮</option>
-              <option value="messages">条消息</option>
-            </select>
-          </label>
-          <label class="story-echo-field">
-            <span>每条阶段总结覆盖</span>
-            <input id="story-echo-summary-batch" class="text_pole" type="number" min="1" max="100" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>随请求保留总结数</span>
-            <input id="story-echo-summary-window" class="text_pole" type="number" min="1" max="100" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>阶段总结输出上限</span>
-            <input id="story-echo-summary-tokens" class="text_pole" type="number" min="128" max="8192" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>全局骨架输出上限</span>
-            <input id="story-echo-skeleton-tokens" class="text_pole" type="number" min="512" max="10000" step="1">
-          </label>
-        </section>
-
-        <section class="story-echo-section">
-          <div class="story-echo-switch-row">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">总结时参考世界书</span>
-              <p class="story-echo-hint">读取蓝灯常驻条目，以及由当前总结批次命中的绿灯条目。</p>
-            </div>
-            <span class="story-echo-toggle">
-              <input id="story-echo-world-info-reference" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-world-info-reference" aria-label="总结时参考世界书"></label>
+        <details id="story-echo-context-settings" class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">窗口与总结设置</span>
+                <span class="story-echo-section-summary-description">最近原文、阶段总结窗口与输出预算</span>
+              </span>
             </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-section-body story-echo-settings-grid">
+            <label class="story-echo-field">
+              <span>最近原文窗口</span>
+              <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>窗口单位</span>
+              <select id="story-echo-window-unit" class="text_pole">
+                <option value="turns">轮</option>
+                <option value="messages">条消息</option>
+              </select>
+            </label>
+            <label class="story-echo-field">
+              <span>每条阶段总结覆盖</span>
+              <input id="story-echo-summary-batch" class="text_pole" type="number" min="1" max="100" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>随请求保留总结数</span>
+              <input id="story-echo-summary-window" class="text_pole" type="number" min="1" max="100" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>阶段总结输出上限</span>
+              <input id="story-echo-summary-tokens" class="text_pole" type="number" min="128" max="8192" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>全局骨架输出上限</span>
+              <input id="story-echo-skeleton-tokens" class="text_pole" type="number" min="512" max="10000" step="1">
+            </label>
           </div>
-          <label class="story-echo-field">
-            <span>每批最多匹配绿灯条目</span>
-            <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
-          </label>
-        </section>
+        </details>
+
+        <details id="story-echo-reference-settings" class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-book-atlas" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">世界书参考</span>
+                <span class="story-echo-section-summary-description">为阶段总结与全局骨架补充设定</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-section-body story-echo-reference-settings-body">
+            <div class="story-echo-switch-row">
+              <div class="story-echo-switch-copy">
+                <span class="story-echo-switch-title">总结时参考世界书</span>
+                <p class="story-echo-hint">读取蓝灯常驻条目，以及由当前总结批次命中的绿灯条目。</p>
+              </div>
+              <span class="story-echo-toggle">
+                <input id="story-echo-world-info-reference" class="story-echo-toggle-input" type="checkbox">
+                <label class="story-echo-toggle-label" for="story-echo-world-info-reference" aria-label="总结时参考世界书"></label>
+              </span>
+            </div>
+            <label class="story-echo-field">
+              <span>每批最多匹配绿灯条目</span>
+              <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
+            </label>
+          </div>
+        </details>
 
         <details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible" open>
           <summary class="story-echo-section-summary">
@@ -780,17 +804,29 @@ async function registerSettingsPanelOnce(generation: number): Promise<void> {
 
     const context = getContext();
     const eventSource = context.eventSource;
-    const refreshEvents = new Set([
+    const chatRefreshEvents = new Set([
       context.event_types?.['CHAT_CHANGED'] ?? context.eventTypes?.['CHAT_CHANGED'],
       context.event_types?.['CHAT_LOADED'] ?? context.eventTypes?.['CHAT_LOADED'],
+    ].filter((eventName): eventName is string => Boolean(eventName)));
+    const promptRefreshEvents = new Set([
       context.event_types?.['MESSAGE_RECEIVED'] ?? context.eventTypes?.['MESSAGE_RECEIVED'],
       context.event_types?.['MESSAGE_SWIPED'] ?? context.eventTypes?.['MESSAGE_SWIPED'],
       context.event_types?.['MESSAGE_DELETED'] ?? context.eventTypes?.['MESSAGE_DELETED'],
+      context.event_types?.['MESSAGE_SWIPE_DELETED'] ?? context.eventTypes?.['MESSAGE_SWIPE_DELETED'],
+      context.event_types?.['GENERATION_STOPPED'] ?? context.eventTypes?.['GENERATION_STOPPED'],
       context.event_types?.['GENERATION_ENDED'] ?? context.eventTypes?.['GENERATION_ENDED'],
       context.event_types?.['ITEMIZED_PROMPTS_LOADED'] ?? context.eventTypes?.['ITEMIZED_PROMPTS_LOADED'],
+      context.event_types?.['ITEMIZED_PROMPTS_SAVED'] ?? context.eventTypes?.['ITEMIZED_PROMPTS_SAVED'],
+      context.event_types?.['ITEMIZED_PROMPTS_DELETED'] ?? context.eventTypes?.['ITEMIZED_PROMPTS_DELETED'],
     ].filter((eventName): eventName is string => Boolean(eventName)));
     if (eventSource) {
-      for (const eventName of refreshEvents) {
+      for (const eventName of chatRefreshEvents) {
+        subscriptions.subscribe(eventSource, eventName, () => {
+          promptTokenStatsCard.invalidate();
+          globalThis.setTimeout(() => requestRefresh(panel), 0);
+        });
+      }
+      for (const eventName of promptRefreshEvents) {
         subscriptions.subscribe(eventSource, eventName, () => {
           promptTokenStatsCard.invalidate();
           globalThis.setTimeout(() => requestRefresh(panel), 0);

@@ -488,7 +488,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.1";
+var EXTENSION_VERSION = "0.21.2";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -5653,52 +5653,76 @@ function panelTemplate() {
           </span>
         </div>
 
-        <section class="story-echo-section story-echo-settings-grid">
-          <label class="story-echo-field">
-            <span>\u6700\u8FD1\u539F\u6587\u7A97\u53E3</span>
-            <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>\u7A97\u53E3\u5355\u4F4D</span>
-            <select id="story-echo-window-unit" class="text_pole">
-              <option value="turns">\u8F6E</option>
-              <option value="messages">\u6761\u6D88\u606F</option>
-            </select>
-          </label>
-          <label class="story-echo-field">
-            <span>\u6BCF\u6761\u9636\u6BB5\u603B\u7ED3\u8986\u76D6</span>
-            <input id="story-echo-summary-batch" class="text_pole" type="number" min="1" max="100" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>\u968F\u8BF7\u6C42\u4FDD\u7559\u603B\u7ED3\u6570</span>
-            <input id="story-echo-summary-window" class="text_pole" type="number" min="1" max="100" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>\u9636\u6BB5\u603B\u7ED3\u8F93\u51FA\u4E0A\u9650</span>
-            <input id="story-echo-summary-tokens" class="text_pole" type="number" min="128" max="8192" step="1">
-          </label>
-          <label class="story-echo-field">
-            <span>\u5168\u5C40\u9AA8\u67B6\u8F93\u51FA\u4E0A\u9650</span>
-            <input id="story-echo-skeleton-tokens" class="text_pole" type="number" min="512" max="10000" step="1">
-          </label>
-        </section>
-
-        <section class="story-echo-section">
-          <div class="story-echo-switch-row">
-            <div class="story-echo-switch-copy">
-              <span class="story-echo-switch-title">\u603B\u7ED3\u65F6\u53C2\u8003\u4E16\u754C\u4E66</span>
-              <p class="story-echo-hint">\u8BFB\u53D6\u84DD\u706F\u5E38\u9A7B\u6761\u76EE\uFF0C\u4EE5\u53CA\u7531\u5F53\u524D\u603B\u7ED3\u6279\u6B21\u547D\u4E2D\u7684\u7EFF\u706F\u6761\u76EE\u3002</p>
-            </div>
-            <span class="story-echo-toggle">
-              <input id="story-echo-world-info-reference" class="story-echo-toggle-input" type="checkbox">
-              <label class="story-echo-toggle-label" for="story-echo-world-info-reference" aria-label="\u603B\u7ED3\u65F6\u53C2\u8003\u4E16\u754C\u4E66"></label>
+        <details id="story-echo-context-settings" class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-sliders" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">\u7A97\u53E3\u4E0E\u603B\u7ED3\u8BBE\u7F6E</span>
+                <span class="story-echo-section-summary-description">\u6700\u8FD1\u539F\u6587\u3001\u9636\u6BB5\u603B\u7ED3\u7A97\u53E3\u4E0E\u8F93\u51FA\u9884\u7B97</span>
+              </span>
             </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-section-body story-echo-settings-grid">
+            <label class="story-echo-field">
+              <span>\u6700\u8FD1\u539F\u6587\u7A97\u53E3</span>
+              <input id="story-echo-window-size" class="text_pole" type="number" min="0" max="1000" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>\u7A97\u53E3\u5355\u4F4D</span>
+              <select id="story-echo-window-unit" class="text_pole">
+                <option value="turns">\u8F6E</option>
+                <option value="messages">\u6761\u6D88\u606F</option>
+              </select>
+            </label>
+            <label class="story-echo-field">
+              <span>\u6BCF\u6761\u9636\u6BB5\u603B\u7ED3\u8986\u76D6</span>
+              <input id="story-echo-summary-batch" class="text_pole" type="number" min="1" max="100" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>\u968F\u8BF7\u6C42\u4FDD\u7559\u603B\u7ED3\u6570</span>
+              <input id="story-echo-summary-window" class="text_pole" type="number" min="1" max="100" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>\u9636\u6BB5\u603B\u7ED3\u8F93\u51FA\u4E0A\u9650</span>
+              <input id="story-echo-summary-tokens" class="text_pole" type="number" min="128" max="8192" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>\u5168\u5C40\u9AA8\u67B6\u8F93\u51FA\u4E0A\u9650</span>
+              <input id="story-echo-skeleton-tokens" class="text_pole" type="number" min="512" max="10000" step="1">
+            </label>
           </div>
-          <label class="story-echo-field">
-            <span>\u6BCF\u6279\u6700\u591A\u5339\u914D\u7EFF\u706F\u6761\u76EE</span>
-            <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
-          </label>
-        </section>
+        </details>
+
+        <details id="story-echo-reference-settings" class="story-echo-section story-echo-collapsible">
+          <summary class="story-echo-section-summary">
+            <span class="story-echo-section-summary-main">
+              <i class="fa-solid fa-book-atlas" aria-hidden="true"></i>
+              <span class="story-echo-section-summary-copy">
+                <span class="story-echo-section-summary-title">\u4E16\u754C\u4E66\u53C2\u8003</span>
+                <span class="story-echo-section-summary-description">\u4E3A\u9636\u6BB5\u603B\u7ED3\u4E0E\u5168\u5C40\u9AA8\u67B6\u8865\u5145\u8BBE\u5B9A</span>
+              </span>
+            </span>
+            <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
+          </summary>
+          <div class="story-echo-section-body story-echo-reference-settings-body">
+            <div class="story-echo-switch-row">
+              <div class="story-echo-switch-copy">
+                <span class="story-echo-switch-title">\u603B\u7ED3\u65F6\u53C2\u8003\u4E16\u754C\u4E66</span>
+                <p class="story-echo-hint">\u8BFB\u53D6\u84DD\u706F\u5E38\u9A7B\u6761\u76EE\uFF0C\u4EE5\u53CA\u7531\u5F53\u524D\u603B\u7ED3\u6279\u6B21\u547D\u4E2D\u7684\u7EFF\u706F\u6761\u76EE\u3002</p>
+              </div>
+              <span class="story-echo-toggle">
+                <input id="story-echo-world-info-reference" class="story-echo-toggle-input" type="checkbox">
+                <label class="story-echo-toggle-label" for="story-echo-world-info-reference" aria-label="\u603B\u7ED3\u65F6\u53C2\u8003\u4E16\u754C\u4E66"></label>
+              </span>
+            </div>
+            <label class="story-echo-field">
+              <span>\u6BCF\u6279\u6700\u591A\u5339\u914D\u7EFF\u706F\u6761\u76EE</span>
+              <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
+            </label>
+          </div>
+        </details>
 
         <details id="story-echo-llm-settings" class="story-echo-section story-echo-collapsible" open>
           <summary class="story-echo-section-summary">
@@ -6246,17 +6270,29 @@ async function registerSettingsPanelOnce(generation) {
     });
     const context = getContext();
     const eventSource = context.eventSource;
-    const refreshEvents = new Set([
+    const chatRefreshEvents = new Set([
       context.event_types?.["CHAT_CHANGED"] ?? context.eventTypes?.["CHAT_CHANGED"],
-      context.event_types?.["CHAT_LOADED"] ?? context.eventTypes?.["CHAT_LOADED"],
+      context.event_types?.["CHAT_LOADED"] ?? context.eventTypes?.["CHAT_LOADED"]
+    ].filter((eventName) => Boolean(eventName)));
+    const promptRefreshEvents = new Set([
       context.event_types?.["MESSAGE_RECEIVED"] ?? context.eventTypes?.["MESSAGE_RECEIVED"],
       context.event_types?.["MESSAGE_SWIPED"] ?? context.eventTypes?.["MESSAGE_SWIPED"],
       context.event_types?.["MESSAGE_DELETED"] ?? context.eventTypes?.["MESSAGE_DELETED"],
+      context.event_types?.["MESSAGE_SWIPE_DELETED"] ?? context.eventTypes?.["MESSAGE_SWIPE_DELETED"],
+      context.event_types?.["GENERATION_STOPPED"] ?? context.eventTypes?.["GENERATION_STOPPED"],
       context.event_types?.["GENERATION_ENDED"] ?? context.eventTypes?.["GENERATION_ENDED"],
-      context.event_types?.["ITEMIZED_PROMPTS_LOADED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_LOADED"]
+      context.event_types?.["ITEMIZED_PROMPTS_LOADED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_LOADED"],
+      context.event_types?.["ITEMIZED_PROMPTS_SAVED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_SAVED"],
+      context.event_types?.["ITEMIZED_PROMPTS_DELETED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_DELETED"]
     ].filter((eventName) => Boolean(eventName)));
     if (eventSource) {
-      for (const eventName of refreshEvents) {
+      for (const eventName of chatRefreshEvents) {
+        subscriptions.subscribe(eventSource, eventName, () => {
+          promptTokenStatsCard.invalidate();
+          globalThis.setTimeout(() => requestRefresh(panel), 0);
+        });
+      }
+      for (const eventName of promptRefreshEvents) {
         subscriptions.subscribe(eventSource, eventName, () => {
           promptTokenStatsCard.invalidate();
           globalThis.setTimeout(() => requestRefresh(panel), 0);

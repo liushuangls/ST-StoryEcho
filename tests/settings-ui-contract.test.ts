@@ -51,6 +51,17 @@ describe('context-only settings panel contract', () => {
     expect(source).toContain('${promptStatsCardTemplate()}');
   });
 
+  it('keeps window and world-book settings collapsed by default', () => {
+    expect(source).toContain(
+      '<details id="story-echo-context-settings" class="story-echo-section story-echo-collapsible">',
+    );
+    expect(source).toContain(
+      '<details id="story-echo-reference-settings" class="story-echo-section story-echo-collapsible">',
+    );
+    expect(source).toContain('窗口与总结设置');
+    expect(source).toContain('世界书参考');
+  });
+
   it('places derived context management immediately after model settings', () => {
     const modelEnd = source.indexOf('</details>', source.indexOf('id="story-echo-llm-settings"'));
     const summaryStart = source.indexOf(
@@ -70,8 +81,12 @@ describe('context-only settings panel contract', () => {
       'MESSAGE_RECEIVED',
       'MESSAGE_SWIPED',
       'MESSAGE_DELETED',
+      'MESSAGE_SWIPE_DELETED',
+      'GENERATION_STOPPED',
       'GENERATION_ENDED',
       'ITEMIZED_PROMPTS_LOADED',
+      'ITEMIZED_PROMPTS_SAVED',
+      'ITEMIZED_PROMPTS_DELETED',
     ]) {
       expect(source).toContain(`['${eventName}']`);
     }

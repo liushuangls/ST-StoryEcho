@@ -144,4 +144,25 @@ describe('latest SillyTavern prompt itemization', () => {
     const service = new PromptItemizationService(async () => ({ itemizedPrompts: [] }));
     await expect(service.latest(context())).resolves.toBeNull();
   });
+
+  it('recovers when prompt details are saved after an earlier empty read', async () => {
+    const itemizedPrompts: Array<Record<string, unknown>> = [];
+    const service = new PromptItemizationService(async () => ({ itemizedPrompts }));
+    const tavernContext = context();
+
+    await expect(service.latest(tavernContext)).resolves.toBeNull();
+
+    itemizedPrompts.push({
+      mesId: 4,
+      main_api: 'openai',
+      rawPrompt: [{ role: 'user', content: 'continue' }],
+      oaiConversationTokens: 20,
+      oaiTotalTokens: 20,
+    });
+    service.clearCache();
+
+    const result = await service.latest(tavernContext);
+    expect(result?.messageId).toBe(4);
+    expect(result?.totalTokens).toBe(20);
+  });
 });
