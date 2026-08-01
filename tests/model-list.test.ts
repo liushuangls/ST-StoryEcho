@@ -20,6 +20,18 @@ describe('custom LLM model list', () => {
     })).toEqual(['a-model', 'm-model', 'z-model']);
   });
 
+  it('accepts direct arrays and discards malformed or oversized model names', () => {
+    expect(parseCustomModelList([
+      ' direct-model ',
+      null,
+      { id: 42 },
+      { name: 'named-model' },
+      { model: 'x'.repeat(201) },
+    ])).toEqual(['direct-model', 'named-model']);
+    expect(parseCustomModelList(null)).toEqual([]);
+    expect(parseCustomModelList({ models: 'not-an-array' })).toEqual([]);
+  });
+
   it('asks the SillyTavern backend to fetch models with the custom credentials', async () => {
     const fetchMock = vi.fn<typeof fetch>(function (this: unknown) {
       expect(this).toBe(globalThis);
@@ -79,5 +91,51 @@ describe('custom LLM model list', () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain('[REDACTED]');
     expect((error as Error).message).not.toContain('llm-secret');
+  });
+
+  it('rejects unsafe API keys before contacting the backend', async () => {
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    const fetchMock = vi.fn<typeof fetch>();
+
+    config.apiKey = 'x'.repeat(16_385);
+    await expect(fetchCustomLlmModels(config, fetchMock, async () => ({})))
+      .rejects.toThrow('API Key过长');
+    config.apiKey = 'line-one\nline-two';
+    await expect(fetchCustomLlmModels(config, fetchMock, async () => ({})))
+      .rejects.toThrow('不能包含换行符');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects successful responses that are invalid JSON or contain no models', async () => {
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    const invalidJson = vi.fn<typeof fetch>()
+      .mockResolvedValue(new Response('not-json', { status: 200 }));
+    const empty = vi.fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+
+    await expect(fetchCustomLlmModels(config, invalidJson, async () => ({})))
+      .rejects.toThrow('非JSON');
+    await expect(fetchCustomLlmModels(config, empty, async () => ({})))
+      .rejects.toThrow('没有可用模型');
+  });
+
+  it('reports flat backend error shapes without exposing raw response bodies', async () => {
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    const errorString = vi.fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({ error: 'denied' }), { status: 403 }));
+    const message = vi.fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify({ message: 'unavailable' }), { status: 503 }));
+    const invalidJson = vi.fn<typeof fetch>()
+      .mockResolvedValue(new Response('<html>failure</html>', { status: 502 }));
+
+    await expect(fetchCustomLlmModels(config, errorString, async () => ({})))
+      .rejects.toThrow('denied');
+    await expect(fetchCustomLlmModels(config, message, async () => ({})))
+      .rejects.toThrow('unavailable');
+    await expect(fetchCustomLlmModels(config, invalidJson, async () => ({})))
+      .rejects.toThrow('HTTP 502');
   });
 });

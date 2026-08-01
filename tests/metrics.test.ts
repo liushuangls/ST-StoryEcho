@@ -4,23 +4,24 @@ import {
   recordDebugTrace,
   resetDiagnostics,
 } from '../src/debug/metrics';
-import { chatState, memory } from './fixtures';
+import { chatState } from './fixtures';
 
 describe('diagnostics metrics', () => {
-  it('normalizes partial legacy metrics', () => {
-    const metrics = normalizeMetrics({ extractionChunks: 3, actions: { CREATE: 2 } });
-    expect(metrics.extractionChunks).toBe(3);
-    expect(metrics.actions.CREATE).toBe(2);
-    expect(metrics.actions.SUPERSEDE).toBe(0);
-    expect(metrics.vectorSyncFailures).toBe(0);
-    expect(metrics.queryRewriteRequests).toBe(0);
-    expect(metrics.queryRewriteFailures).toBe(0);
-    expect(metrics.referenceContextBuilds).toBe(0);
-    expect(metrics.referenceContextTokens).toBe(0);
+  it('normalizes the retained counters from partial legacy data', () => {
+    const metrics = normalizeMetrics({
+      summaryUpdates: 3,
+      generationsTrimmed: 2,
+      extractionChunks: 99,
+    });
+    expect(metrics.summaryUpdates).toBe(3);
+    expect(metrics.generationsTrimmed).toBe(2);
+    expect(metrics.skeletonUpdates).toBe(0);
+    expect(metrics).not.toHaveProperty('extractionChunks');
   });
 
-  it('keeps only the most recent 50 debug traces', () => {
+  it('keeps only the most recent 50 debug traces and honors the switch', () => {
     const state = chatState();
+    recordDebugTrace(state, false, 'summary', 'ignored');
     for (let index = 0; index < 55; index += 1) {
       recordDebugTrace(state, true, 'interceptor', `trace-${index}`);
     }
@@ -29,14 +30,21 @@ describe('diagnostics metrics', () => {
     expect(state.debugTraces.at(-1)?.message).toBe('trace-54');
   });
 
-  it('resets diagnostics without deleting story memories', () => {
-    const state = chatState([memory()]);
-    state.metrics.actions.CREATE = 5;
-    recordDebugTrace(state, true, 'extraction', 'trace');
+  it('resets diagnostics without deleting summaries or the skeleton', () => {
+    const state = chatState();
+    state.stageSummary.entries.push({
+      text: '阶段总结',
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 1,
+      sourceHash: 'hash',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    state.metrics.summaryUpdates = 5;
+    recordDebugTrace(state, true, 'summary', 'trace');
     resetDiagnostics(state);
 
-    expect(state.memories).toHaveLength(1);
-    expect(state.metrics.actions.CREATE).toBe(0);
+    expect(state.stageSummary.entries).toHaveLength(1);
+    expect(state.metrics.summaryUpdates).toBe(0);
     expect(state.debugTraces).toEqual([]);
   });
 });

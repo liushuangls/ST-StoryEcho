@@ -23,104 +23,46 @@ function mergeKnown<T>(defaults: T, stored: unknown): T {
   }
 
   const source = isRecord(stored) ? stored : {};
-  const result: Record<string, unknown> = {};
-
-  for (const [key, defaultValue] of Object.entries(defaults)) {
-    result[key] = mergeKnown(defaultValue, source[key]);
-  }
-
-  return result as T;
+  return Object.fromEntries(Object.entries(defaults).map(([key, defaultValue]) => [
+    key,
+    mergeKnown(defaultValue, source[key]),
+  ])) as T;
 }
 
-function migrateLegacyVolcengineEmbedding(settings: StoryEchoSettings, stored: unknown): void {
-  const storedRoot = isRecord(stored) ? stored : {};
-  const storedVector = isRecord(storedRoot['vector']) ? storedRoot['vector'] : {};
-  if (isRecord(storedVector['volcengine'])) {
-    return;
-  }
-  const custom = isRecord(storedVector['custom']) ? storedVector['custom'] : {};
-  const baseUrl = typeof custom['baseUrl'] === 'string' ? custom['baseUrl'].trim() : '';
-  try {
-    if (!baseUrl || new URL(baseUrl).hostname !== 'ark.cn-beijing.volces.com') {
-      return;
+/**
+ * 0.20.x stored the world-book policy under extraction.reference because it
+ * was shared with the removed memory extractor. Preserve only the settings
+ * that still affect stage summaries and the global skeleton.
+ */
+function migrateContextSettings(settings: StoryEchoSettings, stored: unknown): void {
+  const root = isRecord(stored) ? stored : {};
+  const storedSummary = isRecord(root['summary']) ? root['summary'] : {};
+  if (!isRecord(storedSummary['reference'])) {
+    const extraction = isRecord(root['extraction']) ? root['extraction'] : {};
+    const reference = isRecord(extraction['reference']) ? extraction['reference'] : {};
+    if (typeof reference['mode'] === 'string') {
+      settings.summary.reference.enabled = reference['mode'] === 'character-world-info';
     }
-  } catch {
-    return;
+    if (typeof reference['maxWorldInfoEntries'] === 'number') {
+      settings.summary.reference.maxWorldInfoEntries = reference['maxWorldInfoEntries'];
+    }
   }
 
-  settings.vector.volcengine.baseUrl = baseUrl;
-  if (typeof custom['apiKey'] === 'string') {
-    settings.vector.volcengine.apiKey = custom['apiKey'];
-  }
-  if (typeof custom['timeoutMs'] === 'number' && Number.isFinite(custom['timeoutMs'])) {
-    settings.vector.volcengine.timeoutMs = custom['timeoutMs'];
-  }
-  settings.vector.volcengine.allowInsecureHttp = custom['allowInsecureHttp'] === true;
-  const model = typeof custom['model'] === 'string' ? custom['model'].trim() : '';
-  if (model.includes('embedding-vision') || model.startsWith('ep-m-')) {
-    settings.vector.volcengine.model = model;
-  }
-}
-
-function migratePerformanceDefaults(settings: StoryEchoSettings, stored: unknown): void {
-  const storedRoot = isRecord(stored) ? stored : {};
-  const storedVersion = Number(storedRoot['version']);
-  if (!Number.isFinite(storedVersion) || storedVersion < 2) {
-    settings.extraction.targetTurnsPerChunk = DEFAULT_SETTINGS.extraction.targetTurnsPerChunk;
-  }
-  const storedRecall = isRecord(storedRoot['recall']) ? storedRoot['recall'] : {};
-  if (
-    (!Number.isFinite(storedVersion) || storedVersion < 5) &&
-    Number(storedRecall['maxEvents']) === 5
-  ) {
-    settings.recall.maxEvents = DEFAULT_SETTINGS.recall.maxEvents;
-  }
-  const storedLlm = isRecord(storedRoot['llm']) ? storedRoot['llm'] : {};
-  const storedCustomLlm = isRecord(storedLlm['custom']) ? storedLlm['custom'] : {};
+  const storedVersion = Number(root['version']);
+  const storedLlm = isRecord(root['llm']) ? root['llm'] : {};
+  const storedCustom = isRecord(storedLlm['custom']) ? storedLlm['custom'] : {};
   if (
     (!Number.isFinite(storedVersion) || storedVersion < 9) &&
-    Number(storedCustomLlm['timeoutMs']) === 60_000
+    Number(storedCustom['timeoutMs']) === 60_000
   ) {
-    // Existing installs persisted the old default like an explicit setting.
-    // Move only that exact default forward; preserve any timeout the user
-    // deliberately chose.
     settings.llm.custom.timeoutMs = DEFAULT_SETTINGS.llm.custom.timeoutMs;
   }
   settings.version = DEFAULT_SETTINGS.version;
 }
 
-function migrateFeatureLayers(settings: StoryEchoSettings, stored: unknown): void {
-  const storedRoot = isRecord(stored) ? stored : {};
-  const hasStoredSettings = Object.keys(storedRoot).length > 0;
-  const storedMemory = isRecord(storedRoot['memory']) ? storedRoot['memory'] : {};
-  if (hasStoredSettings && typeof storedMemory['enabled'] !== 'boolean') {
-    const storedExtraction = isRecord(storedRoot['extraction']) ? storedRoot['extraction'] : {};
-    const storedRecall = isRecord(storedRoot['recall']) ? storedRoot['recall'] : {};
-    const extractionWasEnabled = storedExtraction['automatic'] !== false;
-    const recallWasEnabled = (
-      (typeof storedRecall['maxEvents'] !== 'number' || storedRecall['maxEvents'] > 0) &&
-      (typeof storedRecall['maxTokens'] !== 'number' || storedRecall['maxTokens'] > 0)
-    );
-    settings.memory.enabled = extractionWasEnabled || recallWasEnabled;
-  }
-
-  // Since 0.17 the product exposes only the master switch and the memory
-  // switch. Keep these legacy fields synchronized so old diagnostics and
-  // downgraded installs see the closest equivalent behavior.
-  settings.summary.enabled = true;
-  settings.summary.automatic = true;
-  settings.extraction.automatic = settings.memory.enabled;
-}
-
 function boundedInteger(value: number, minimum: number, maximum: number, fallback: number): number {
   return Number.isFinite(value)
     ? Math.min(maximum, Math.max(minimum, Math.floor(value)))
-    : fallback;
-}
-
-function boundedNumber(value: number, minimum: number, maximum: number, fallback: number): number {
-  return Number.isFinite(value)
-    ? Math.min(maximum, Math.max(minimum, value))
     : fallback;
 }
 
@@ -131,7 +73,7 @@ function normalizeSettings(settings: StoryEchoSettings): void {
     1_000,
     DEFAULT_SETTINGS.recentWindow.size,
   );
-  if (!['turns', 'messages'].includes(settings.recentWindow.unit)) {
+  if (settings.recentWindow.unit !== 'turns' && settings.recentWindow.unit !== 'messages') {
     settings.recentWindow.unit = DEFAULT_SETTINGS.recentWindow.unit;
   }
   settings.summary.targetTurnsPerUpdate = boundedInteger(
@@ -158,49 +100,13 @@ function normalizeSettings(settings: StoryEchoSettings): void {
     10_000,
     DEFAULT_SETTINGS.summary.skeletonMaxTokens,
   );
-  settings.recall.maxEvents = boundedInteger(
-    settings.recall.maxEvents,
-    0,
-    50,
-    DEFAULT_SETTINGS.recall.maxEvents,
-  );
-  settings.recall.maxTokens = boundedInteger(
-    settings.recall.maxTokens,
-    0,
-    32_000,
-    DEFAULT_SETTINGS.recall.maxTokens,
-  );
-  settings.recall.scoreThreshold = boundedNumber(
-    settings.recall.scoreThreshold,
-    0,
-    1,
-    DEFAULT_SETTINGS.recall.scoreThreshold,
-  );
-  if (!['llm', 'local'].includes(settings.recall.queryMode)) {
-    settings.recall.queryMode = DEFAULT_SETTINGS.recall.queryMode;
-  }
-  settings.extraction.targetTurnsPerChunk = boundedInteger(
-    settings.extraction.targetTurnsPerChunk,
-    1,
-    20,
-    DEFAULT_SETTINGS.extraction.targetTurnsPerChunk,
-  );
-  if (!['off', 'character', 'character-world-info'].includes(settings.extraction.reference.mode)) {
-    settings.extraction.reference.mode = DEFAULT_SETTINGS.extraction.reference.mode;
-  }
-  settings.extraction.reference.maxTokens = boundedInteger(
-    settings.extraction.reference.maxTokens,
-    256,
-    16_000,
-    DEFAULT_SETTINGS.extraction.reference.maxTokens,
-  );
-  settings.extraction.reference.maxWorldInfoEntries = boundedInteger(
-    settings.extraction.reference.maxWorldInfoEntries,
+  settings.summary.reference.maxWorldInfoEntries = boundedInteger(
+    settings.summary.reference.maxWorldInfoEntries,
     0,
     20,
-    DEFAULT_SETTINGS.extraction.reference.maxWorldInfoEntries,
+    DEFAULT_SETTINGS.summary.reference.maxWorldInfoEntries,
   );
-  if (!['main', 'openai-compatible'].includes(settings.llm.provider)) {
+  if (settings.llm.provider !== 'main' && settings.llm.provider !== 'openai-compatible') {
     settings.llm.provider = DEFAULT_SETTINGS.llm.provider;
   }
   settings.llm.custom.baseUrl = settings.llm.custom.baseUrl.trim();
@@ -211,23 +117,6 @@ function normalizeSettings(settings: StoryEchoSettings): void {
     300_000,
     DEFAULT_SETTINGS.llm.custom.timeoutMs,
   );
-  for (const [embedding, defaults] of [
-    [settings.vector.custom, DEFAULT_SETTINGS.vector.custom],
-    [settings.vector.volcengine, DEFAULT_SETTINGS.vector.volcengine],
-  ] as const) {
-    embedding.baseUrl = embedding.baseUrl.trim();
-    embedding.model = embedding.model.trim();
-    embedding.timeoutMs = boundedInteger(
-      embedding.timeoutMs,
-      1_000,
-      300_000,
-      defaults.timeoutMs,
-    );
-  }
-  settings.vector.model = settings.vector.model.trim();
-  if (!settings.vector.source.trim()) {
-    settings.vector.source = DEFAULT_SETTINGS.vector.source;
-  }
 }
 
 export class SettingsRepository {
@@ -235,10 +124,10 @@ export class SettingsRepository {
     const context = getContext();
     const stored = context.extensionSettings[MODULE_ID];
     const settings = mergeKnown(cloneDefaults(), stored);
-    migrateLegacyVolcengineEmbedding(settings, stored);
-    migratePerformanceDefaults(settings, stored);
-    migrateFeatureLayers(settings, stored);
+    migrateContextSettings(settings, stored);
     normalizeSettings(settings);
+    // Replacing the object intentionally removes obsolete memory, recall and
+    // embedding settings (including unused embedding credentials).
     context.extensionSettings[MODULE_ID] = settings;
     return settings;
   }
@@ -246,7 +135,6 @@ export class SettingsRepository {
   update(mutator: (settings: StoryEchoSettings) => void): StoryEchoSettings {
     const settings = this.get();
     mutator(settings);
-    migrateFeatureLayers(settings, settings);
     normalizeSettings(settings);
     getContext().saveSettingsDebounced();
     return settings;

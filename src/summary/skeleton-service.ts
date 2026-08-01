@@ -8,10 +8,10 @@ import type {
 } from '../core/types';
 import { recordDebugTrace } from '../debug/metrics';
 import { completeWithConfiguredProvider } from '../llm/complete';
-import { MemoryRepository } from '../memory/repository';
 import { getCurrentChatId } from '../platform/sillytavern';
 import { buildStorySkeletonWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
+import { StoryStateRepository } from '../state/repository';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { SUMMARY_LLM_TIMEOUT_MS } from './constants';
 import {
@@ -188,13 +188,13 @@ function assertChatOwner(state: StoryEchoChatState): void {
 export class StorySkeletonService {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly settingsRepository = new SettingsRepository();
-  private readonly memoryRepository = new MemoryRepository();
+  private readonly stateRepository = new StoryStateRepository();
   private readonly revisionCache = new StorySkeletonRevisionCache();
 
   async reconcile(
     state?: StoryEchoChatState,
   ): Promise<StoryEchoChatState | null> {
-    const current = state ?? await this.memoryRepository.getOrCreate();
+    const current = state ?? await this.stateRepository.getOrCreate();
     if (!current || !current.storySkeleton.text.trim()) {
       return current;
     }
@@ -242,7 +242,7 @@ export class StorySkeletonService {
         skeletonMaxTokens: settings.summary.skeletonMaxTokens,
       },
     );
-    await this.memoryRepository.save(current);
+    await this.stateRepository.save(current);
     this.revisionCache.remember(current, settings.summary.skeletonMaxTokens);
     return current;
   }
@@ -308,7 +308,7 @@ export class StorySkeletonService {
     try {
       const reference = await buildStorySkeletonWorldInfoReferenceContext(
         referenceMessages,
-        settings.extraction.reference,
+        settings.summary.reference,
       );
       recordDebugTrace(state, settings.debug, 'summary', '全局剧情骨架世界书背景已构建。', {
         sourceRange: `${first.sourceStartMessageId}-${last.sourceEndMessageId}`,
@@ -343,7 +343,7 @@ export class StorySkeletonService {
     sourceSnapshot: readonly StageSummaryEntry[],
     skeletonSnapshot: StorySkeleton,
   ): StoryEchoChatState {
-    const live = this.memoryRepository.getExisting();
+    const live = this.stateRepository.getExisting();
     if (!live || live.ownerChatId !== state.ownerChatId) {
       throw new Error('全局剧情骨架生成期间聊天发生切换，已丢弃本次结果。');
     }
@@ -364,7 +364,7 @@ export class StorySkeletonService {
     sourceSnapshot: readonly StageSummaryEntry[],
     coveredThroughMessageId: number,
   ): StoryEchoChatState {
-    const live = this.memoryRepository.getExisting();
+    const live = this.stateRepository.getExisting();
     if (!live || live.ownerChatId !== state.ownerChatId) {
       throw new Error('全局剧情骨架生成期间聊天发生切换，已丢弃本次结果。');
     }
@@ -465,7 +465,7 @@ export class StorySkeletonService {
       llmCallsPerBatch: 1,
       mode: options.rebuild ? 'full-rebuild' : staleAtStart ? 'stale-rebuild' : 'initial-build',
     });
-    await this.memoryRepository.save(live);
+    await this.stateRepository.save(live);
     this.revisionCache.remember(live, settings.summary.skeletonMaxTokens);
     return {
       state: live,
@@ -552,7 +552,7 @@ export class StorySkeletonService {
         llmCallsPerBatch: 1,
         mode: 'incremental-update',
       });
-      await this.memoryRepository.save(state);
+      await this.stateRepository.save(state);
       this.revisionCache.remember(state, settings.summary.skeletonMaxTokens);
       updatedChunks += 1;
       const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
@@ -575,7 +575,7 @@ export class StorySkeletonService {
       throw new Error('等待全局剧情骨架任务期间聊天发生切换，已取消任务。');
     }
     const settings = this.settingsRepository.get();
-    let state = await this.memoryRepository.getOrCreate();
+    let state = await this.stateRepository.getOrCreate();
     if (!state) {
       return { state, updatedChunks: 0, pendingEntries: 0 };
     }
@@ -603,7 +603,7 @@ export class StorySkeletonService {
       });
       try {
         assertChatOwner(state);
-        await this.memoryRepository.save(state);
+        await this.stateRepository.save(state);
       } catch (saveError) {
         logger.warn('保存全局剧情骨架失败统计时聊天已切换或元数据不可用。', saveError);
       }

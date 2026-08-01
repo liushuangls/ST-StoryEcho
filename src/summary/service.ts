@@ -9,20 +9,19 @@ import type {
 } from '../core/types';
 import { storyContent } from '../content/story-content';
 import { recordDebugTrace } from '../debug/metrics';
-import { countCompletedTurns, planNextChunk } from '../extraction/chunk-planner';
+import { countCompletedTurns, planNextChunk } from '../history/chunk-planner';
 import { SourceRevisionCache } from '../history/source-revision-cache';
+import { firstStoryPhaseBoundary } from '../history/story-phase';
 import { completeWithConfiguredProvider } from '../llm/complete';
-import { MemoryRepository } from '../memory/repository';
 import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
 import { estimateTokens } from '../prompt/render';
 import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
-import { firstStoryPhaseBoundary } from '../retrieval/story-phase';
 import { SettingsRepository } from '../settings/repository';
+import { StoryStateRepository } from '../state/repository';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { SUMMARY_LLM_TIMEOUT_MS } from './constants';
 import {
   boundedPreviousStageSummary,
-  buildStageSummaryGrounding,
   buildStageSummaryPrompt,
   STAGE_SUMMARY_SYSTEM_PROMPT,
 } from './prompts';
@@ -58,7 +57,6 @@ interface GeneratedStageSummaryEntry {
   durationMs: number;
   sourceMessageCount: number;
   personaLabelSanitized: boolean;
-  authoritativeFactCharacters: number;
   previousSummaryCharacters: number;
 }
 
@@ -102,7 +100,7 @@ export function normalizeSummary(
   const withoutWrapper = withoutFence
     .replace(/^<story_echo_summary>\s*/i, '')
     .replace(/\s*<\/story_echo_summary>$/i, '')
-    .replace(/<\/?story_echo_(?:summary|recall)>/gi, '')
+    .replace(/<\/?story_echo_summary>/gi, '')
     .trim();
   if (!withoutWrapper) {
     throw new Error('阶段总结模型返回了空内容。');
@@ -171,18 +169,13 @@ function latestActiveSummaryText(entries: readonly StageSummaryEntry[]): string 
 export class StageSummaryService {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly settingsRepository = new SettingsRepository();
-  private readonly memoryRepository = new MemoryRepository();
+  private readonly stateRepository = new StoryStateRepository();
   private readonly sourceRevisionCache = new SourceRevisionCache();
 
-  /**
-   * Validate summary entries independently from the structured-memory index.
-   * This is required by the LLM-only mode, where indexedThroughMessageId is
-   * intentionally left untouched because extraction and vectors are disabled.
-   */
   async reconcileHistory(
     state?: StoryEchoChatState,
   ): Promise<StoryEchoChatState | null> {
-    const current = state ?? await this.memoryRepository.getOrCreate();
+    const current = state ?? await this.stateRepository.getOrCreate();
     if (!current || current.stageSummary.entries.length === 0) {
       return current;
     }
@@ -228,7 +221,7 @@ export class StageSummaryService {
       if (initializedHashes > 0) {
         const latest = current.stageSummary.entries.at(-1)!;
         current.stageSummary.coveredThroughHash = latest.sourceHash;
-        await this.memoryRepository.save(current);
+        await this.stateRepository.save(current);
       }
       this.sourceRevisionCache.remember(
         current.ownerChatId,
@@ -253,7 +246,7 @@ export class StageSummaryService {
       removedEntries,
       coveredThroughMessageId: current.stageSummary.coveredThroughMessageId,
     });
-    await this.memoryRepository.save(current);
+    await this.stateRepository.save(current);
     this.sourceRevisionCache.remember(
       current.ownerChatId,
       summarySourceSignature(entries),
@@ -409,18 +402,11 @@ export class StageSummaryService {
     const startedAt = performance.now();
     const snapshotHash = await sha256(sourcePayload(chunk.snapshot, chunk.startMessageId));
     const identity = summaryIdentity(context);
-    const authoritativeFacts = settings.memory.enabled
-      ? buildStageSummaryGrounding(
-          state.memories,
-          chunk.startMessageId,
-          chunk.endMessageId,
-        )
-      : '';
     let worldBackground = '';
     try {
       const reference = await buildSummaryWorldInfoReferenceContext(
         chunk.snapshot,
-        settings.extraction.reference,
+        settings.summary.reference,
         context,
       );
       worldBackground = reference.text;
@@ -447,7 +433,6 @@ export class StageSummaryService {
       chunk.snapshot,
       chunk.startMessageId,
       identity,
-      authoritativeFacts,
       worldBackground,
       boundedPrevious,
       settings.summary.maxTokens,
@@ -506,7 +491,6 @@ export class StageSummaryService {
       durationMs: Math.round(performance.now() - startedAt),
       sourceMessageCount: chunk.snapshot.length,
       personaLabelSanitized: text !== withoutPersonaSanitization,
-      authoritativeFactCharacters: authoritativeFacts.length,
       previousSummaryCharacters: Array.from(boundedPrevious).length,
     };
   }
@@ -521,17 +505,13 @@ export class StageSummaryService {
     }
     const context = getContext();
     const settings = this.settingsRepository.get();
-    let state = await this.memoryRepository.getOrCreate();
+    let state = await this.stateRepository.getOrCreate();
     if (!state) {
       return { state, updatedChunks: 0 };
     }
     assertChatOwner(state);
-    const memoryCoverageLimit = settings.memory.enabled
-      ? state.indexedThroughMessageId
-      : Math.floor(targetEndMessageId);
     const maximumEnd = Math.min(
       Math.floor(targetEndMessageId),
-      memoryCoverageLimit,
       context.chat.length - 1,
     );
     if (maximumEnd < 0) {
@@ -584,7 +564,6 @@ export class StageSummaryService {
           summaryCharacters: generated.entry.text.length,
           rebuiltEntries: rebuiltEntries.length,
           personaLabelSanitized: generated.personaLabelSanitized,
-          authoritativeFactCharacters: generated.authoritativeFactCharacters,
           previousSummaryCharacters: generated.previousSummaryCharacters,
         });
         onProgress?.({
@@ -598,7 +577,7 @@ export class StageSummaryService {
       if (rebuiltEntries.length === 0) {
         return { state, updatedChunks: 0 };
       }
-      const live = this.memoryRepository.getExisting();
+      const live = this.stateRepository.getExisting();
       if (!live || live.ownerChatId !== state.ownerChatId) {
         throw new Error('阶段总结重建期间聊天发生切换，已丢弃本次结果。');
       }
@@ -641,7 +620,7 @@ export class StageSummaryService {
         priorEntries: sourceSnapshot.length,
         skeletonMarkedStale: Boolean(live.storySkeleton.stale),
       });
-      await this.memoryRepository.save(live);
+      await this.stateRepository.save(live);
       state = live;
       return { state, updatedChunks: rebuiltEntries.length };
     } catch (error) {
@@ -657,7 +636,7 @@ export class StageSummaryService {
       });
       try {
         assertChatOwner(state);
-        await this.memoryRepository.save(state);
+        await this.stateRepository.save(state);
       } catch (saveError) {
         logger.warn('保存阶段总结重建失败统计时聊天已切换或元数据不可用。', saveError);
       }
@@ -675,21 +654,14 @@ export class StageSummaryService {
     }
     const context = getContext();
     const settings = this.settingsRepository.get();
-    let state = await this.memoryRepository.getOrCreate();
+    let state = await this.stateRepository.getOrCreate();
     if (!state) {
       return { state, updatedChunks: 0 };
     }
     assertChatOwner(state);
 
-    // Full memory mode waits for structured extraction so the summary can use
-    // its authoritative correction ledger. LLM-only mode owns an independent
-    // source hash and can advance without touching the extraction cursor.
-    const memoryCoverageLimit = settings.memory.enabled
-      ? state.indexedThroughMessageId
-      : Math.floor(targetEndMessageId);
     const maximumEnd = Math.min(
       Math.floor(targetEndMessageId),
-      memoryCoverageLimit,
       context.chat.length - 1,
     );
     let start = state.stageSummary.coveredThroughMessageId + 1;
@@ -718,7 +690,7 @@ export class StageSummaryService {
           chunk,
           latestActiveSummaryText(entriesBeforeRequest),
         );
-        const live = this.memoryRepository.getExisting();
+        const live = this.stateRepository.getExisting();
         if (!live || live.ownerChatId !== state.ownerChatId) {
           throw new Error('阶段总结生成期间聊天发生切换，已丢弃本次结果。');
         }
@@ -743,10 +715,9 @@ export class StageSummaryService {
           summaryCharacters: generated.entry.text.length,
           summaryEntries: state.stageSummary.entries.length,
           personaLabelSanitized: generated.personaLabelSanitized,
-          authoritativeFactCharacters: generated.authoritativeFactCharacters,
           previousSummaryCharacters: generated.previousSummaryCharacters,
         });
-        await this.memoryRepository.save(state);
+        await this.stateRepository.save(state);
         updatedChunks += 1;
         options.onProgress?.({
           startMessageId: chunk.startMessageId,
@@ -767,7 +738,7 @@ export class StageSummaryService {
       });
       try {
         assertChatOwner(state);
-        await this.memoryRepository.save(state);
+        await this.stateRepository.save(state);
       } catch (saveError) {
         logger.warn('保存阶段总结失败统计时聊天已切换或元数据不可用。', saveError);
       }

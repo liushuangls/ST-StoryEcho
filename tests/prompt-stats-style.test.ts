@@ -28,15 +28,14 @@ describe('latest prompt token card layout', () => {
     expect(totalRule).not.toContain('text-overflow: ellipsis;');
   });
 
-  it('keeps StoryEcho values, metadata and category names fully readable', () => {
+  it('keeps StoryEcho values and category names fully readable', () => {
     const valueRule = rule('#story-echo-settings .story-echo-token-story-stat > strong {');
-    const detailRule = rule('#story-echo-settings .story-echo-token-story-stat > small {');
     const categoryRule = rule('#story-echo-settings .story-echo-token-row-label > span:last-child {');
     const headingMetadataRule = rule(
       '#story-echo-settings .story-echo-token-story-heading > span,',
     );
 
-    for (const wrappedRule of [valueRule, detailRule, categoryRule, headingMetadataRule]) {
+    for (const wrappedRule of [valueRule, categoryRule, headingMetadataRule]) {
       expect(wrappedRule).toContain('overflow-wrap: anywhere;');
       expect(wrappedRule).toContain('white-space: normal;');
       expect(wrappedRule).not.toContain('text-overflow: ellipsis;');
@@ -47,9 +46,7 @@ describe('latest prompt token card layout', () => {
     expect(stylesheet).toContain('@container story-echo-prompt-stats (max-width: 46rem)');
     expect(stylesheet).toContain('@container story-echo-prompt-stats (max-width: 32rem)');
     expect(stylesheet).toContain('@container story-echo-prompt-stats (max-width: 17rem)');
-    expect(stylesheet).toContain(
-      '#story-echo-settings .story-echo-token-story-stat:last-child {\n    grid-column: 1 / -1;',
-    );
+    expect(stylesheet).toContain('grid-template-columns: repeat(2, minmax(0, 1fr));');
     expect(stylesheet).toContain(
       '#story-echo-settings .story-echo-token-rows {\n    grid-template-columns: 1fr;',
     );

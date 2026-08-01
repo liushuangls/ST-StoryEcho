@@ -1,20 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { allocateVectorHash, sha256, stableNumericHash } from '../src/core/hash';
+import { sha256 } from '../src/core/hash';
 
 afterEach(() => {
   vi.unstubAllGlobals();
-});
-
-describe('stableNumericHash', () => {
-  it('is deterministic', () => {
-    expect(stableNumericHash('memory-1')).toBe(stableNumericHash('memory-1'));
-  });
-
-  it('allocates a salted hash when the first value is occupied', () => {
-    const initial = stableNumericHash('memory-1');
-    const allocated = allocateVectorHash('memory-1', new Set([initial]));
-    expect(allocated).not.toBe(initial);
-  });
 });
 
 describe('sha256', () => {

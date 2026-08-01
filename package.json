@@ -3,7 +3,7 @@
   "version": "0.20.23",
   "private": true,
   "type": "module",
-  "description": "Sliding-window context and story-memory recall for SillyTavern.",
+  "description": "Sliding-window story context management for SillyTavern.",
   "scripts": {
     "build": "esbuild src/index.ts --bundle --format=esm --target=es2022 --outfile=dist/index.js --sourcemap",
     "dev": "npm run build -- --watch",

@@ -9,8 +9,6 @@ export type PromptTokenCategoryId =
   | 'examples'
   | 'recent-context'
   | 'story-echo-summary'
-  | 'story-echo-state'
-  | 'story-echo-recall'
   | 'other-prompts'
   | 'unclassified';
 
@@ -24,9 +22,6 @@ export interface StoryEchoPromptTokenDetail {
   /** Raw retained chat after StoryEcho trimming. Null means ST did not expose a separable chat bucket. */
   contextTokens: number | null;
   summaryTokens: number;
-  metadataTokens: number;
-  currentStateTokens: number;
-  recallTokens: number;
 }
 
 export interface LatestPromptTokenBreakdown {
@@ -71,8 +66,6 @@ const CATEGORY_ORDER: readonly PromptTokenCategoryId[] = [
   'examples',
   'recent-context',
   'story-echo-summary',
-  'story-echo-state',
-  'story-echo-recall',
   'other-prompts',
   'unclassified',
 ];
@@ -260,8 +253,6 @@ async function buildBreakdown(
   const skeletonText = taggedBlocks(rawText, 'story_echo_skeleton');
   const stageSummaryText = taggedBlocks(rawText, 'story_echo_summary');
   const summaryText = [skeletonText, stageSummaryText].filter(Boolean).join('\n');
-  const stateText = taggedBlocks(rawText, 'story_echo_current_state');
-  const recallText = taggedBlocks(rawText, 'story_echo_recall');
   const characterText = [
     stringValue(record['charDescription']),
     stringValue(record['charPersonality']),
@@ -274,8 +265,6 @@ async function buildBreakdown(
   const anchorsWithoutKnown = removeExactBlocks(anchorsText, [
     skeletonText,
     stageSummaryText,
-    stateText,
-    recallText,
     ...(worldInfoText && anchorsText.includes(worldInfoText) ? [worldInfoText] : []),
   ]);
   const instructionText = [
@@ -289,8 +278,6 @@ async function buildBreakdown(
   const counted = await Promise.all([
     count(rawText),
     count(summaryText),
-    count(stateText),
-    count(recallText),
     count(characterText),
     count(worldInfoText),
     count(examplesText),
@@ -302,8 +289,6 @@ async function buildBreakdown(
   const [
     raw,
     summary,
-    state,
-    recall,
     character,
     worldInfo,
     examples,
@@ -311,8 +296,8 @@ async function buildBreakdown(
     instruction,
     story,
     chat,
-  ] = counted as [CountedText, CountedText, CountedText, CountedText, CountedText, CountedText,
-    CountedText, CountedText, CountedText, CountedText, CountedText];
+  ] = counted as [CountedText, CountedText, CountedText, CountedText, CountedText,
+    CountedText, CountedText, CountedText, CountedText];
   const counterEstimated = counted.some((value) => value.estimated);
   const mainApi = stringValue(record['main_api']);
   const storedTotal = finiteTokens(record['oaiTotalTokens']);
@@ -355,13 +340,9 @@ async function buildBreakdown(
 
     const conversationParts = proportionalAllocation([
       { id: 'story-echo-summary', tokens: summary.tokens },
-      { id: 'story-echo-state', tokens: state.tokens },
-      { id: 'story-echo-recall', tokens: recall.tokens },
       { id: 'other-prompts', tokens: otherAnchors.tokens },
     ] as const, conversationTokens);
     const summaryTokens = conversationParts.get('story-echo-summary') ?? 0;
-    const stateTokens = conversationParts.get('story-echo-state') ?? 0;
-    const recallTokens = conversationParts.get('story-echo-recall') ?? 0;
     const conversationOtherTokens = conversationParts.get('other-prompts') ?? 0;
     const recentContextTokens = Math.max(0, conversationTokens - allocationTotal(conversationParts));
     const categories = categoryList({
@@ -371,8 +352,6 @@ async function buildBreakdown(
       examples: exampleTokens,
       'recent-context': recentContextTokens,
       'story-echo-summary': summaryTokens,
-      'story-echo-state': stateTokens,
-      'story-echo-recall': recallTokens,
       'other-prompts': otherPromptTokens + conversationOtherTokens,
     }, total);
     return {
@@ -382,9 +361,6 @@ async function buildBreakdown(
       storyEcho: {
         contextTokens: recentContextTokens,
         summaryTokens,
-        metadataTokens: stateTokens + recallTokens,
-        currentStateTokens: stateTokens,
-        recallTokens,
       },
       ...metadata,
       detailed: true,
@@ -412,13 +388,9 @@ async function buildBreakdown(
     ] as const, storyBudget);
     const chatParts = proportionalAllocation([
       { id: 'story-echo-summary', tokens: summary.tokens },
-      { id: 'story-echo-state', tokens: state.tokens },
-      { id: 'story-echo-recall', tokens: recall.tokens },
       { id: 'other-prompts', tokens: otherAnchors.tokens },
     ] as const, chatBudget);
     const summaryTokens = chatParts.get('story-echo-summary') ?? 0;
-    const stateTokens = chatParts.get('story-echo-state') ?? 0;
-    const recallTokens = chatParts.get('story-echo-recall') ?? 0;
     const recentContextTokens = Math.max(0, chatBudget - allocationTotal(chatParts));
     const unclassified = Math.max(
       0,
@@ -431,8 +403,6 @@ async function buildBreakdown(
       examples: examplesBudget,
       'recent-context': recentContextTokens,
       'story-echo-summary': summaryTokens,
-      'story-echo-state': stateTokens,
-      'story-echo-recall': recallTokens,
       'other-prompts': chatParts.get('other-prompts') ?? 0,
       unclassified,
     }, total);
@@ -443,9 +413,6 @@ async function buildBreakdown(
       storyEcho: {
         contextTokens: recentContextTokens,
         summaryTokens,
-        metadataTokens: stateTokens + recallTokens,
-        currentStateTokens: stateTokens,
-        recallTokens,
       },
       ...metadata,
       detailed: true,
@@ -459,13 +426,9 @@ async function buildBreakdown(
     { id: 'world-info', tokens: worldInfo.tokens },
     { id: 'examples', tokens: examples.tokens },
     { id: 'story-echo-summary', tokens: summary.tokens },
-    { id: 'story-echo-state', tokens: state.tokens },
-    { id: 'story-echo-recall', tokens: recall.tokens },
     { id: 'other-prompts', tokens: otherAnchors.tokens },
   ] as const, total);
   const summaryTokens = fallbackParts.get('story-echo-summary') ?? 0;
-  const stateTokens = fallbackParts.get('story-echo-state') ?? 0;
-  const recallTokens = fallbackParts.get('story-echo-recall') ?? 0;
   const unclassified = Math.max(0, total - allocationTotal(fallbackParts));
   return {
     messageId,
@@ -476,17 +439,12 @@ async function buildBreakdown(
       'world-info': fallbackParts.get('world-info') ?? 0,
       examples: fallbackParts.get('examples') ?? 0,
       'story-echo-summary': summaryTokens,
-      'story-echo-state': stateTokens,
-      'story-echo-recall': recallTokens,
       'other-prompts': fallbackParts.get('other-prompts') ?? 0,
       unclassified,
     }, total),
     storyEcho: {
       contextTokens: null,
       summaryTokens,
-      metadataTokens: stateTokens + recallTokens,
-      currentStateTokens: stateTokens,
-      recallTokens,
     },
     ...metadata,
     detailed: false,

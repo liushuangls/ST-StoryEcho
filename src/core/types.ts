@@ -1,78 +1,24 @@
 export type WindowUnit = 'turns' | 'messages';
 export type LlmProviderId = 'main' | 'openai-compatible';
-export type RetrievalQueryMode = 'llm' | 'local';
-export type ExtractionReferenceMode = 'off' | 'character' | 'character-world-info';
-export type VectorSourceMode = 'inherit' | 'openai-compatible' | 'volcengine-multimodal';
-export type MemoryType =
-  | 'event'
-  | 'state_change'
-  | 'relationship_change'
-  | 'commitment'
-  | 'revelation'
-  | 'clue'
-  | 'conflict';
-export type TruthStatus = 'confirmed' | 'claimed' | 'inferred' | 'uncertain';
-export type MemoryStatus = 'active' | 'resolved' | 'superseded' | 'invalid';
-export type EvidenceRole = 'user' | 'assistant' | 'mixed' | 'unknown';
-export type ConsolidationOperation =
-  | 'CREATE'
-  | 'MERGE'
-  | 'UPDATE'
-  | 'RESOLVE'
-  | 'SUPERSEDE'
-  | 'IGNORE';
-export type DebugStage =
-  | 'summary'
-  | 'extraction'
-  | 'consolidation'
-  | 'vector'
-  | 'retrieval'
-  | 'interceptor'
-  | 'error';
-
-export interface ExternalEmbeddingSettings {
-  baseUrl: string;
-  model: string;
-  apiKey: string;
-  timeoutMs: number;
-  allowInsecureHttp: boolean;
-}
 
 export interface StoryEchoSettings {
-  version: 9;
+  version: 10;
   enabled: boolean;
-  memory: {
-    enabled: boolean;
-  };
   debug: boolean;
   recentWindow: {
     size: number;
     unit: WindowUnit;
   };
   summary: {
-    /** @deprecated Kept only to migrate pre-0.17 settings. Summaries follow the master switch. */
-    enabled: boolean;
-    /** @deprecated Kept only to migrate pre-0.17 settings. Summary maintenance is automatic. */
-    automatic: boolean;
     targetTurnsPerUpdate: number;
     windowSize: number;
     maxTokens: number;
     /** Maximum output and stored size of the always-on global story skeleton. */
     skeletonMaxTokens: number;
-  };
-  recall: {
-    maxEvents: number;
-    maxTokens: number;
-    scoreThreshold: number;
-    queryMode: RetrievalQueryMode;
-  };
-  extraction: {
-    /** @deprecated Kept only to migrate pre-0.17 settings. Extraction follows memory.enabled. */
-    automatic: boolean;
-    targetTurnsPerChunk: number;
     reference: {
-      mode: ExtractionReferenceMode;
-      maxTokens: number;
+      /** Add blue-light and batch-matched green-light world-book entries. */
+      enabled: boolean;
+      /** Maximum number of green-light entries matched by one source batch. */
       maxWorldInfoEntries: number;
     };
   };
@@ -85,72 +31,8 @@ export interface StoryEchoSettings {
       timeoutMs: number;
       allowInsecureHttp: boolean;
       fallbackToMain: boolean;
-      strictJsonSchema: boolean;
     };
   };
-  vector: {
-    source: VectorSourceMode | string;
-    model: string;
-    custom: ExternalEmbeddingSettings;
-    volcengine: ExternalEmbeddingSettings;
-  };
-}
-
-export interface StoryMemorySource {
-  startMessageId: number;
-  endMessageId: number;
-  sourceHash: string;
-}
-
-export interface StoryMemory {
-  id: string;
-  /** Stable identity for a continuing state slot, especially commitments. */
-  logicalKey: string;
-  type: MemoryType;
-  source: StoryMemorySource;
-  /** Exact chat floors cited by the extraction model as evidence. */
-  sourceMessageIds: number[];
-  /** Which chat role directly supports this memory. Explicit User facts win conflicts. */
-  evidenceRole: EvidenceRole;
-  sourceHistory: StoryMemorySource[];
-  scene: {
-    location?: string;
-    time?: string;
-    participants: string[];
-  };
-  event: string;
-  cause?: string;
-  consequence?: string;
-  entities: string[];
-  aliases: string[];
-  stateChanges: Array<{
-    entity: string;
-    attribute: string;
-    before?: string;
-    after: string;
-  }>;
-  unresolvedThreads: string[];
-  knownBy: string[];
-  truthStatus: TruthStatus;
-  importance: number;
-  status: MemoryStatus;
-  retrievalText: string;
-  injectionText: string;
-  vectorHash: number;
-  retrievalHash: string;
-  pinned: boolean;
-  excluded: boolean;
-  manuallyEdited: boolean;
-  supersedesMemoryIds: string[];
-  replacedByMemoryId?: string;
-  lastOperation: ConsolidationOperation;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface PendingRange {
-  startMessageId: number;
-  endMessageId: number;
 }
 
 export interface StageSummaryEntry {
@@ -187,16 +69,11 @@ export interface InspectionRecord {
   retainedStartIndex: number;
   retainedEndIndex: number;
   removedMessageCount: number;
-  query: string;
-  candidateMemoryIds: string[];
-  selectedMemoryIds: string[];
-  estimatedRecallTokens: number;
   estimatedRemovedTokens: number;
   estimatedInjectedTokens: number;
   estimatedNetSavedTokens: number;
   estimatedSummaryTokens: number;
   summaryCoveredThroughMessageId: number;
-  vectorResultCount: number;
   durationMs: number;
   warnings: string[];
 }
@@ -207,44 +84,20 @@ export interface StoryEchoMetrics {
   summaryMessagesCovered: number;
   skeletonUpdates: number;
   skeletonFailures: number;
-  extractionChunks: number;
-  extractionFailures: number;
-  candidatesExtracted: number;
-  referenceContextBuilds: number;
-  referenceContextPartialFailures: number;
-  referenceContextTokens: number;
-  referenceWorldInfoEntries: number;
-  consolidationCalls: number;
-  consolidationFailures: number;
-  actions: Record<ConsolidationOperation, number>;
-  vectorQueries: number;
-  vectorQueryFailures: number;
-  vectorSyncFailures: number;
-  vectorItemsInserted: number;
-  vectorItemsDeleted: number;
-  vectorRebuilds: number;
-  queryRewriteRequests: number;
-  queryRewriteFailures: number;
-  queryRewriteCacheHits: number;
   generationAttempts: number;
   generationsTrimmed: number;
   generationsDeferred: number;
   messagesRemoved: number;
-  memoriesInjected: number;
   estimatedRemovedTokens: number;
   estimatedInjectedTokens: number;
-  totalExtractionMs: number;
   totalSummaryMs: number;
   totalSkeletonMs: number;
-  totalConsolidationMs: number;
-  totalRetrievalMs: number;
-  totalQueryRewriteMs: number;
-  lastExtractionAt?: string;
   lastSummaryAt?: string;
   lastSkeletonAt?: string;
   lastGenerationAt?: string;
 }
 
+export type DebugStage = 'summary' | 'interceptor' | 'error';
 export type DebugDetails = Record<string, string | number | boolean | null>;
 
 export interface StoryEchoDebugTrace {
@@ -256,13 +109,9 @@ export interface StoryEchoDebugTrace {
 }
 
 export interface StoryEchoChatState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   chatUuid: string;
   ownerChatId: string;
-  vectorCollectionId: string;
-  indexedThroughMessageId: number;
-  indexedThroughHash: string;
-  indexedPrefixHash: string;
   stageSummary: {
     entries: StageSummaryEntry[];
     coveredThroughMessageId: number;
@@ -270,11 +119,6 @@ export interface StoryEchoChatState {
     updatedAt?: string;
   };
   storySkeleton: StorySkeleton;
-  memories: StoryMemory[];
-  pendingRanges: PendingRange[];
-  pendingVectorHashes: number[];
-  pendingVectorDeleteHashes: number[];
-  vectorFingerprint: string;
   metrics: StoryEchoMetrics;
   debugTraces: StoryEchoDebugTrace[];
   lastInspection?: InspectionRecord;
@@ -292,21 +136,14 @@ export interface TavernChatMessage {
 export interface LlmRequest {
   system: string;
   prompt: string;
-  jsonSchema?: Record<string, unknown>;
-  jsonExample?: unknown;
-  structuredOutput?: LlmStructuredOutputMode;
   maxTokens?: number;
   /** Optional per-request deadline. Providers keep their normal default when omitted. */
   timeoutMs?: number;
   signal?: AbortSignal;
 }
 
-export type LlmStructuredOutputMode = 'json-object' | 'json-schema' | 'text';
-
 export interface LlmProvider {
   readonly id: LlmProviderId;
-  supportsStructuredOutput(mode: LlmStructuredOutputMode): boolean;
-  structuredOutputOrder(): readonly LlmStructuredOutputMode[];
   complete(request: LlmRequest): Promise<string>;
   testConnection(): Promise<void>;
 }

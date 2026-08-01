@@ -47,7 +47,7 @@ export function isBackgroundYieldForForegroundError(
 }
 
 /**
- * Serializes all StoryEcho work that can call an LLM or mutate chat memory.
+ * Serializes all StoryEcho work that can call an LLM or mutate derived chat context.
  * A foreground prompt-preparation task keeps a lease after the interceptor
  * returns so queued background work cannot start during the actual role-play
  * generation that follows.

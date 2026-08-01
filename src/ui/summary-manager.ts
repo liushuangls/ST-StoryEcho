@@ -1,6 +1,4 @@
 import type { StageSummaryEntry, StoryEchoChatState } from '../core/types';
-import { extractionService } from '../extraction/service';
-import { MemoryRepository } from '../memory/repository';
 import {
   getContext,
   getCurrentChatId,
@@ -9,10 +7,11 @@ import {
 import { selectRecentWindow } from '../prompt/window';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
+import { StoryStateRepository } from '../state/repository';
 import { stageSummaryService } from '../summary/service';
 import { storySkeletonService } from '../summary/skeleton-service';
 import { storySkeletonIsUsable } from '../summary/skeleton-state';
-import { paginateItems } from './memory-manager';
+import { paginateItems } from './pagination';
 import { notify } from './notifications';
 
 export const SUMMARY_PAGE_SIZE = 10;
@@ -254,7 +253,7 @@ export class StageSummaryMetadataManager {
   private skeletonActivityStatus = '';
   private readonly settingsRepository = new SettingsRepository();
 
-  constructor(private readonly repository: MemoryRepository) {}
+  constructor(private readonly repository: StoryStateRepository) {}
 
   bind(panel: HTMLElement, onChanged: () => Promise<void>): void {
     const editor = element<HTMLElement>(panel, '#story-echo-summary-editor');
@@ -464,9 +463,6 @@ export class StageSummaryMetadataManager {
             );
             if (targetEndMessageId < 0) {
               throw new Error('当前聊天还没有可用于重建阶段总结的窗口外历史。');
-            }
-            if (settings.memory.enabled) {
-              await extractionService.processThrough(targetEndMessageId);
             }
             this.setSkeletonActivityStatus(
               panel,

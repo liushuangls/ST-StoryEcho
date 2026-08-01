@@ -1,14 +1,3 @@
-export function stableNumericHash(value: string): number {
-  let hash = 0x811c9dc5;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-
-  return hash >>> 0;
-}
-
 const SHA256_CONSTANTS = Uint32Array.from([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
   0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -59,28 +48,30 @@ function sha256Fallback(bytes: Uint8Array): Uint8Array {
       schedule[index] = view.getUint32(offset + index * 4);
     }
     for (let index = 16; index < 64; index += 1) {
-      const previous15 = schedule[index - 15] ?? 0;
-      const previous2 = schedule[index - 2] ?? 0;
+      const previous15 = schedule[index - 15]!;
+      const previous2 = schedule[index - 2]!;
       const sigma0 = rotateRight(previous15, 7) ^ rotateRight(previous15, 18) ^ (previous15 >>> 3);
       const sigma1 = rotateRight(previous2, 17) ^ rotateRight(previous2, 19) ^ (previous2 >>> 10);
       schedule[index] = (
-        (schedule[index - 16] ?? 0) + sigma0 + (schedule[index - 7] ?? 0) + sigma1
+        schedule[index - 16]! + sigma0 + schedule[index - 7]! + sigma1
       ) >>> 0;
     }
 
-    let a = state[0] ?? 0;
-    let b = state[1] ?? 0;
-    let c = state[2] ?? 0;
-    let d = state[3] ?? 0;
-    let e = state[4] ?? 0;
-    let f = state[5] ?? 0;
-    let g = state[6] ?? 0;
-    let h = state[7] ?? 0;
+    let a = state[0]!;
+    let b = state[1]!;
+    let c = state[2]!;
+    let d = state[3]!;
+    let e = state[4]!;
+    let f = state[5]!;
+    let g = state[6]!;
+    let h = state[7]!;
 
     for (let index = 0; index < 64; index += 1) {
       const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
       const choice = (e & f) ^ (~e & g);
-      const temporary1 = (h + sum1 + choice + (SHA256_CONSTANTS[index] ?? 0) + (schedule[index] ?? 0)) >>> 0;
+      const temporary1 = (
+        h + sum1 + choice + SHA256_CONSTANTS[index]! + schedule[index]!
+      ) >>> 0;
       const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
       const majority = (a & b) ^ (a & c) ^ (b & c);
       const temporary2 = (sum0 + majority) >>> 0;
@@ -95,20 +86,20 @@ function sha256Fallback(bytes: Uint8Array): Uint8Array {
       a = (temporary1 + temporary2) >>> 0;
     }
 
-    state[0] = ((state[0] ?? 0) + a) >>> 0;
-    state[1] = ((state[1] ?? 0) + b) >>> 0;
-    state[2] = ((state[2] ?? 0) + c) >>> 0;
-    state[3] = ((state[3] ?? 0) + d) >>> 0;
-    state[4] = ((state[4] ?? 0) + e) >>> 0;
-    state[5] = ((state[5] ?? 0) + f) >>> 0;
-    state[6] = ((state[6] ?? 0) + g) >>> 0;
-    state[7] = ((state[7] ?? 0) + h) >>> 0;
+    state[0] = (state[0]! + a) >>> 0;
+    state[1] = (state[1]! + b) >>> 0;
+    state[2] = (state[2]! + c) >>> 0;
+    state[3] = (state[3]! + d) >>> 0;
+    state[4] = (state[4]! + e) >>> 0;
+    state[5] = (state[5]! + f) >>> 0;
+    state[6] = (state[6]! + g) >>> 0;
+    state[7] = (state[7]! + h) >>> 0;
   }
 
   const digest = new Uint8Array(32);
   const digestView = new DataView(digest.buffer);
   for (let index = 0; index < state.length; index += 1) {
-    digestView.setUint32(index * 4, state[index] ?? 0);
+    digestView.setUint32(index * 4, state[index]!);
   }
   return digest;
 }
@@ -120,16 +111,4 @@ export async function sha256(value: string): Promise<string> {
     ? new Uint8Array(await subtle.digest('SHA-256', bytes))
     : sha256Fallback(bytes);
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-export function allocateVectorHash(seed: string, occupied: ReadonlySet<number>): number {
-  let salt = 0;
-
-  while (true) {
-    const candidate = stableNumericHash(salt === 0 ? seed : `${seed}:${salt}`);
-    if (!occupied.has(candidate)) {
-      return candidate;
-    }
-    salt += 1;
-  }
 }

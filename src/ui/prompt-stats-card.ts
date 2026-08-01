@@ -14,8 +14,6 @@ const CATEGORY_PRESENTATION: Record<PromptTokenCategoryId, { label: string; clas
   examples: { label: '示例对话', className: 'examples' },
   'recent-context': { label: '最近原文上下文', className: 'recent-context' },
   'story-echo-summary': { label: 'StoryEcho 骨架与阶段总结', className: 'story-echo-summary' },
-  'story-echo-state': { label: 'StoryEcho 当前状态校正', className: 'story-echo-state' },
-  'story-echo-recall': { label: 'StoryEcho 动态召回', className: 'story-echo-recall' },
   'other-prompts': { label: '其他提示与扩展注入', className: 'other-prompts' },
   unclassified: { label: '未分类与消息开销', className: 'unclassified' },
 };
@@ -43,7 +41,7 @@ export function promptStatsCardTemplate(): string {
         <div id="story-echo-prompt-stats-content" hidden>
           <div class="story-echo-token-story-heading">
             <strong>StoryEcho 本轮发送</strong>
-            <span>最近原文、全局骨架、阶段总结与剧情元数据</span>
+            <span>最近原文、全局骨架与阶段总结</span>
           </div>
           <div class="story-echo-token-story-grid">
             <div class="story-echo-token-story-stat">
@@ -53,11 +51,6 @@ export function promptStatsCardTemplate(): string {
             <div class="story-echo-token-story-stat">
               <span>骨架与阶段总结</span>
               <strong id="story-echo-token-summary">—</strong>
-            </div>
-            <div class="story-echo-token-story-stat">
-              <span>元数据注入</span>
-              <strong id="story-echo-token-metadata">—</strong>
-              <small id="story-echo-token-metadata-detail"></small>
             </div>
           </div>
 
@@ -197,10 +190,6 @@ export class PromptTokenStatsCard {
       formatTokens(breakdown.storyEcho.contextTokens);
     element<HTMLElement>(panel, '#story-echo-token-summary').textContent =
       formatTokens(breakdown.storyEcho.summaryTokens);
-    element<HTMLElement>(panel, '#story-echo-token-metadata').textContent =
-      formatTokens(breakdown.storyEcho.metadataTokens);
-    element<HTMLElement>(panel, '#story-echo-token-metadata-detail').textContent =
-      `状态校正 ${breakdown.storyEcho.currentStateTokens.toLocaleString()} · 动态召回 ${breakdown.storyEcho.recallTokens.toLocaleString()}`;
     element<HTMLElement>(panel, '#story-echo-prompt-stats-meta').textContent = connectionText(breakdown);
 
     const bar = element<HTMLElement>(panel, '#story-echo-token-bar');

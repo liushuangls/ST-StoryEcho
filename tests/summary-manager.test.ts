@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { StageSummaryEntry } from '../src/core/types';
-import { paginateItems } from '../src/ui/memory-manager';
+import { paginateItems } from '../src/ui/pagination';
 import {
   SUMMARY_PAGE_SIZE,
   stageSummaryDeliveryStatus,
@@ -84,6 +84,17 @@ describe('stage summary manager pagination and template', () => {
     expect(first.items).toHaveLength(10);
     expect(first.totalPages).toBe(3);
     expect(last.items).toHaveLength(3);
+  });
+
+  it('normalizes invalid pagination input to safe defaults', () => {
+    const page = paginateItems([1, 2, 3], Number.NaN, 0);
+
+    expect(page).toMatchObject({
+      items: [1, 2, 3],
+      page: 1,
+      pageSize: 10,
+      totalPages: 1,
+    });
   });
 
   it('renders an editable but non-deletable skeleton plus safe stage-summary controls', () => {

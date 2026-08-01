@@ -1,585 +1,193 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MODULE_ID } from '../src/core/constants';
-import type { StoryEchoSettings, TavernChatMessage } from '../src/core/types';
-import { MemoryRepository } from '../src/memory/repository';
-import { storyEchoGenerateInterceptor } from '../src/prompt/interceptor';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { StoryEchoChatState, StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
+import { chatState } from './fixtures';
+
+const mocks = vi.hoisted(() => ({
+  getOrCreate: vi.fn(),
+  save: vi.fn(),
+  reconcileSummary: vi.fn(),
+  reconcileSkeleton: vi.fn(),
+}));
+
+vi.mock('../src/state/repository', () => ({
+  StoryStateRepository: class {
+    getOrCreate = mocks.getOrCreate;
+    save = mocks.save;
+  },
+}));
+vi.mock('../src/summary/service', () => ({
+  stageSummaryService: { reconcileHistory: mocks.reconcileSummary },
+}));
+vi.mock('../src/summary/skeleton-service', () => ({
+  storySkeletonService: { reconcile: mocks.reconcileSkeleton },
+}));
+
+import { storyEchoGenerateInterceptor } from '../src/prompt/interceptor';
+import {
+  markInternalGenerationRequest,
+  withInternalGeneration,
+} from '../src/llm/internal-generation';
 import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
-import { stageSummaryService } from '../src/summary/service';
-import { storySkeletonSourceHash } from '../src/summary/skeleton-state';
-import { resolveVectorConfig, vectorConfigFingerprint } from '../src/vector/config';
-import { chatState, memory } from './fixtures';
 
-function sectionedSummary(value: string): string {
+function sourceChat(): TavernChatMessage[] {
+  return [
+    { is_user: true, mes: 'u0' },
+    { is_user: false, mes: 'a0' },
+    { is_user: true, mes: 'u1' },
+    { is_user: false, mes: 'a1' },
+    { is_user: true, mes: 'u2' },
+    { is_user: false, mes: 'a2' },
+    { is_user: true, mes: '继续。' },
+  ];
+}
+
+function settings(enabled = true): StoryEchoSettings {
+  const value = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
+  value.enabled = enabled;
+  value.recentWindow = { size: 1, unit: 'turns' };
+  value.summary.windowSize = 2;
   return value;
 }
 
-function storySkeleton(value: string): string {
-  return value;
+function install(
+  state: StoryEchoChatState,
+  currentSettings = settings(),
+  chat = sourceChat(),
+): TavernChatMessage[] {
+  const context = {
+    chat,
+    chatId: 'chat-id',
+    extensionSettings: { story_echo: currentSettings },
+    chatMetadata: {},
+    saveSettingsDebounced: vi.fn(),
+    saveMetadata: vi.fn(async () => undefined),
+    generateRaw: vi.fn(async () => ''),
+  };
+  vi.stubGlobal('SillyTavern', { getContext: () => context });
+  mocks.getOrCreate.mockResolvedValue(state);
+  mocks.reconcileSummary.mockImplementation(async (value: StoryEchoChatState) => value);
+  mocks.reconcileSkeleton.mockImplementation(async (value: StoryEchoChatState) => value);
+  mocks.save.mockResolvedValue(undefined);
+  return chat;
 }
+
+function summary(
+  text: string,
+  start: number,
+  end: number,
+): StoryEchoChatState['stageSummary']['entries'][number] {
+  return {
+    text,
+    sourceStartMessageId: start,
+    sourceEndMessageId: end,
+    sourceHash: `hash-${start}-${end}`,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 afterEach(() => {
   storyEchoTaskCoordinator.resetForTests();
   vi.unstubAllGlobals();
 });
 
-const sourceChat: TavernChatMessage[] = [
-  { is_user: false, mes: 'greeting' },
-  { is_user: true, mes: '银色钥匙交给林雨保管。' },
-  { is_user: false, mes: '林雨收好了银色钥匙。' },
-  { is_user: true, mes: '我们去院中喝水。' },
-  { is_user: false, mes: '院中很安静。' },
-  { is_user: true, mes: '银色钥匙现在由谁保管？' },
-];
-
-async function installContext(options: {
-  settings?: Partial<StoryEchoSettings>;
-  withMemory?: boolean;
-  summaryCoveredThrough?: number;
-}) {
-  const settings = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
-  settings.enabled = true;
-  settings.memory.enabled = Boolean(options.withMemory);
-  settings.debug = true;
-  settings.recentWindow = { size: 1, unit: 'turns' };
-  settings.recall.queryMode = 'local';
-  settings.recall.maxEvents = options.withMemory ? 1 : 0;
-  Object.assign(settings, options.settings ?? {});
-
-  const state = chatState(options.withMemory ? [memory()] : []);
-  state.ownerChatId = 'chat-id';
-  state.indexedThroughMessageId = 2;
-  state.stageSummary = {
-    entries: options.summaryCoveredThrough === undefined || options.summaryCoveredThrough < 0
-      ? []
-      : [{
-          text: sectionedSummary('较早时，林雨开始保管银色钥匙。'),
-          sourceStartMessageId: 0,
-          sourceEndMessageId: options.summaryCoveredThrough,
-          sourceHash: '',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        }],
-    coveredThroughMessageId: options.summaryCoveredThrough ?? 2,
-    coveredThroughHash: options.summaryCoveredThrough === undefined || options.summaryCoveredThrough < 0
-      ? ''
-      : '',
-  };
-  const context = {
-    chat: structuredClone(sourceChat),
-    chatId: 'chat-id',
-    extensionSettings: {
-      story_echo: settings,
-      vectors: { source: 'transformers' },
-    },
-    chatMetadata: { [MODULE_ID]: state },
-    saveSettingsDebounced: vi.fn(),
-    saveMetadata: vi.fn(async () => undefined),
-    generateRaw: vi.fn(async () => ''),
-    getCurrentChatId: () => 'chat-id',
-    getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
-  };
-  vi.stubGlobal('SillyTavern', { getContext: () => context });
-  state.vectorFingerprint = await vectorConfigFingerprint(resolveVectorConfig(settings));
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
-    metadata: options.withMemory
-      ? [{ hash: 123, text: '银色钥匙由林雨保管', index: 2 }]
-      : [],
-  }), { status: 200 })));
-  return { context, settings, state };
-}
-
-describe('StoryEcho request ordering', () => {
-  it('omits free-form summaries during fact verification and keeps recall before the unchanged User', async () => {
-    const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
-    const promptChat = structuredClone(sourceChat);
-    const currentInput = promptChat.at(-1)!;
-    const originalText = currentInput.mes;
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(promptChat.map((message) => message.extra?.['story_echo_injection_kind'] ?? message.mes))
-      .toEqual([
-        '我们去院中喝水。',
-        '院中很安静。',
-        'recall',
-        '银色钥匙现在由谁保管？',
-      ]);
-    const recall = promptChat[2]!;
-    expect(recall).toMatchObject({
-      is_system: true,
-      extra: { type: 'narrator', story_echo_injection_kind: 'recall' },
-    });
-    expect(recall.mes).toContain('<story_echo_recall>');
-    expect(promptChat.at(-1)).toBe(currentInput);
-    expect(currentInput.mes).toBe(originalText);
-
-    // Only the request copy is changed. Persistent chat and JSONL-bound data
-    // never receive StoryEcho's injected messages.
-    expect(context.chat).toEqual(sourceChat);
+describe('StoryEcho generation interceptor', () => {
+  it('does nothing while the only feature switch is disabled', async () => {
+    const state = chatState();
+    const original = install(state, settings(false));
+    const request = structuredClone(original);
+    await storyEchoGenerateInterceptor(request, 8_192, vi.fn(), 'normal');
+    expect(request).toEqual(original);
+    expect(mocks.getOrCreate).not.toHaveBeenCalled();
   });
 
-  it('places evolved current-state corrections before recent raw during fact verification', async () => {
-    const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
-    const stored = context.chatMetadata[MODULE_ID];
-    const current = stored.memories[0]!;
-    current.sourceHistory = [
-      { startMessageId: 0, endMessageId: 0, sourceHash: 'older-state' },
-      current.source,
-    ];
-    const promptChat = structuredClone(sourceChat);
+  it('ignores unsupported and internal generations', async () => {
+    const state = chatState();
+    const original = install(state);
+    await storyEchoGenerateInterceptor(structuredClone(original), 8_192, vi.fn(), 'quiet');
+    expect(mocks.getOrCreate).not.toHaveBeenCalled();
 
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(promptChat.map((message) => message.extra?.['story_echo_injection_kind'] ?? message.mes))
-      .toEqual([
-        'state',
-        '我们去院中喝水。',
-        '院中很安静。',
-        'recall',
-        '银色钥匙现在由谁保管？',
-      ]);
-    expect(promptChat[0]?.mes).toContain('<story_echo_current_state>');
-    expect(context.chat).toEqual(sourceChat);
+    const marked = markInternalGenerationRequest('system', 'prompt');
+    await withInternalGeneration(marked, () => storyEchoGenerateInterceptor([
+      { is_user: false, is_system: true, mes: marked.systemPrompt },
+      { is_user: true, mes: marked.prompt },
+    ], 8_192, vi.fn(), 'normal'));
+    expect(mocks.getOrCreate).not.toHaveBeenCalled();
   });
 
-  it('skips query rewrite and recall injection when the recall limit is zero', async () => {
-    const { context, settings } = await installContext({
-      withMemory: true,
-      summaryCoveredThrough: 2,
-    });
-    settings.recall.maxEvents = 0;
-    settings.recall.queryMode = 'llm';
-    const promptChat = structuredClone(sourceChat);
+  it('never removes source history beyond verified summary coverage', async () => {
+    const state = chatState();
+    state.stageSummary = {
+      entries: [summary('第一阶段', 0, 1)],
+      coveredThroughMessageId: 1,
+      coveredThroughHash: 'hash-0-1',
+    };
+    const original = install(state);
+    const request = structuredClone(original);
 
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+    await storyEchoGenerateInterceptor(request, 8_192, vi.fn(), 'normal');
 
-    expect(context.generateRaw).not.toHaveBeenCalled();
-    expect(promptChat.some(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'recall',
-    )).toBe(false);
+    expect(request.some((message) => message.mes === 'u1')).toBe(true);
+    expect(request.some((message) => message.mes === 'a1')).toBe(true);
+    expect(request.some((message) => message.mes.includes('<story_echo_summary>'))).toBe(true);
+    expect(request.some((message) => message.mes.includes('story_echo_recall'))).toBe(false);
+    expect(state.lastInspection?.summaryCoveredThroughMessageId).toBe(1);
+    expect(mocks.save).toHaveBeenCalledWith(state);
   });
 
-  it('preserves existing memories but performs no retrieval work in summary-only mode', async () => {
-    const { context, settings, state } = await installContext({
-      withMemory: true,
-      summaryCoveredThrough: 2,
-    });
-    settings.memory.enabled = false;
-    state.pendingVectorHashes = [123];
-    const promptChat = structuredClone(sourceChat);
-    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
-    const fetchMock = vi.mocked(globalThis.fetch);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(context.generateRaw).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(context.chatMetadata[MODULE_ID].memories).toHaveLength(1);
-    expect(context.chatMetadata[MODULE_ID].pendingVectorHashes).toEqual([123]);
-    expect(promptChat.some(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
-    )).toBe(true);
-    expect(promptChat.some(
-      (message) => ['recall', 'state'].includes(String(message.extra?.['story_echo_injection_kind'])),
-    )).toBe(false);
-  });
-
-  it('keeps every unsummarized message when the summary cursor is behind', async () => {
-    const { context } = await installContext({ withMemory: false, summaryCoveredThrough: -1 });
-    const promptChat = structuredClone(sourceChat);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(promptChat).toEqual(sourceChat);
-    const stored = context.chatMetadata[MODULE_ID];
-    expect(stored.lastInspection?.removedMessageCount).toBe(0);
-    expect(stored.metrics.generationsDeferred).toBe(1);
-  });
-
-  it('keeps raw history and skips extraction until the configured batch has accumulated', async () => {
-    const { context, settings, state } = await installContext({
-      withMemory: false,
-      summaryCoveredThrough: -1,
-    });
-    settings.memory.enabled = true;
-    settings.extraction.targetTurnsPerChunk = 5;
-    state.indexedThroughMessageId = -1;
-    state.indexedThroughHash = '';
-    state.indexedPrefixHash = '';
-    const promptChat = structuredClone(sourceChat);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(context.generateRaw).not.toHaveBeenCalled();
-    expect(context.chatMetadata[MODULE_ID].indexedThroughMessageId).toBe(-1);
-    expect(promptChat).toEqual(sourceChat);
-  });
-
-  it('never runs a full eligible extraction or summary batch in foreground prompt preparation', async () => {
-    const { context, settings, state } = await installContext({
-      withMemory: false,
-      summaryCoveredThrough: -1,
-    });
-    settings.memory.enabled = true;
-    settings.extraction.targetTurnsPerChunk = 1;
-    settings.summary.targetTurnsPerUpdate = 1;
-    state.indexedThroughMessageId = -1;
-    state.indexedThroughHash = '';
-    state.indexedPrefixHash = '';
-    const promptChat = structuredClone(sourceChat);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(context.generateRaw).not.toHaveBeenCalled();
-    expect(context.chatMetadata[MODULE_ID].indexedThroughMessageId).toBe(-1);
-    expect(context.chatMetadata[MODULE_ID].stageSummary.coveredThroughMessageId).toBe(-1);
-    expect(promptChat).toEqual(sourceChat);
-  });
-
-  it('trims only the covered prefix and keeps unsummarized raw beyond the minimum window', async () => {
-    const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 0 });
-    const promptChat = structuredClone(sourceChat);
-    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(promptChat.map((message) => message.extra?.['story_echo_injection_kind'] ?? message.mes))
-      .toEqual([
-        'summary',
-        '银色钥匙交给林雨保管。',
-        '林雨收好了银色钥匙。',
-        '我们去院中喝水。',
-        '院中很安静。',
-        '我们继续在院中交谈。',
-      ]);
-    const stored = context.chatMetadata[MODULE_ID];
-    expect(stored.lastInspection?.removedMessageCount).toBe(1);
-    expect(stored.metrics.generationsTrimmed).toBe(1);
-  });
-
-  it('keeps archived summaries in the request until a global skeleton exists', async () => {
-    const { context, settings } = await installContext({
-      withMemory: false,
-      summaryCoveredThrough: 2,
-    });
-    settings.summary.windowSize = 2;
-    const stored = context.chatMetadata[MODULE_ID];
-    stored.stageSummary = {
+  it('injects a usable skeleton and recent summaries before retained raw messages', async () => {
+    const state = chatState();
+    state.stageSummary = {
       entries: [
-        {
-          text: sectionedSummary('第一阶段'),
-          sourceStartMessageId: 0,
-          sourceEndMessageId: 0,
-          sourceHash: '',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        },
-        {
-          text: sectionedSummary('第二阶段'),
-          sourceStartMessageId: 1,
-          sourceEndMessageId: 1,
-          sourceHash: '',
-          updatedAt: '2026-01-02T00:00:00.000Z',
-        },
-        {
-          text: sectionedSummary('第三阶段'),
-          sourceStartMessageId: 2,
-          sourceEndMessageId: 2,
-          sourceHash: '',
-          updatedAt: '2026-01-03T00:00:00.000Z',
-        },
+        summary('阶段一', 0, 1),
+        summary('阶段二', 2, 3),
+        summary('阶段三', 4, 5),
       ],
-      coveredThroughMessageId: 2,
-      coveredThroughHash: '',
-      updatedAt: '2026-01-03T00:00:00.000Z',
+      coveredThroughMessageId: 5,
+      coveredThroughHash: 'hash-4-5',
     };
-    const promptChat = structuredClone(sourceChat);
-    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    const summaries = promptChat.filter(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
-    );
-    expect(summaries).toHaveLength(3);
-    expect(summaries[0]?.mes).toContain('第一阶段');
-    expect(summaries[1]?.mes).toContain('第二阶段');
-    expect(summaries[2]?.mes).toContain('第三阶段');
-  });
-
-  it('injects the global skeleton before only the latest S stage summaries', async () => {
-    const { context, settings } = await installContext({
-      withMemory: false,
-      summaryCoveredThrough: 2,
-    });
-    settings.summary.windowSize = 2;
-    const stored = context.chatMetadata[MODULE_ID];
-    stored.stageSummary = {
-      entries: [
-        {
-          text: sectionedSummary('第一阶段'),
-          sourceStartMessageId: 0,
-          sourceEndMessageId: 0,
-          sourceHash: '',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        },
-        {
-          text: sectionedSummary('第二阶段'),
-          sourceStartMessageId: 1,
-          sourceEndMessageId: 1,
-          sourceHash: '',
-          updatedAt: '2026-01-02T00:00:00.000Z',
-        },
-        {
-          text: sectionedSummary('第三阶段'),
-          sourceStartMessageId: 2,
-          sourceEndMessageId: 2,
-          sourceHash: '',
-          updatedAt: '2026-01-03T00:00:00.000Z',
-        },
-      ],
-      coveredThroughMessageId: 2,
-      coveredThroughHash: '',
-      updatedAt: '2026-01-03T00:00:00.000Z',
+    state.storySkeleton = {
+      text: '长期主线骨架',
+      coveredThroughMessageId: 1,
+      sourceHash: 'skeleton-hash',
     };
-    await stageSummaryService.reconcileHistory(stored);
-    const reconciled = context.chatMetadata[MODULE_ID];
-    reconciled.storySkeleton = {
-      text: storySkeleton('前三阶段已被整理为长期剧情大纲。'),
-      coveredThroughMessageId: 2,
-      sourceHash: await storySkeletonSourceHash(reconciled.stageSummary.entries, 2),
-    };
-    const promptChat = structuredClone(sourceChat);
-    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
+    const original = install(state);
+    const request = structuredClone(original);
 
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
+    await storyEchoGenerateInterceptor(request, 8_192, vi.fn(), 'swipe');
 
-    const injected = promptChat.filter(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
-    );
-    expect(injected).toHaveLength(3);
+    const injected = request.filter((message) => message.extra?.['story_echo_injection'] === true);
     expect(injected[0]?.mes).toContain('<story_echo_skeleton>');
-    expect(injected[0]?.mes).toContain('前三阶段已被整理为长期剧情大纲');
-    const stageBlocks = injected.filter((message) => message.mes.includes('<story_echo_summary>'));
-    expect(stageBlocks).toHaveLength(2);
-    expect(stageBlocks[0]?.mes).toContain('第二阶段');
-    expect(stageBlocks[1]?.mes).toContain('第三阶段');
-    expect(stageBlocks.map((message) => message.mes))
-      .not.toContain(expect.stringContaining('第一阶段'));
+    expect(injected.some((message) => message.mes.includes('阶段二'))).toBe(true);
+    expect(injected.some((message) => message.mes.includes('阶段三'))).toBe(true);
+    expect(injected.every((message) => message.extra?.['story_echo_injection_kind'] === 'summary'))
+      .toBe(true);
+    expect(state.metrics.generationsTrimmed).toBe(1);
+    expect(state.metrics.messagesRemoved).toBeGreaterThan(0);
   });
 
-  it('skips a deleted older summary while keeping its raw range covered', async () => {
-    const { context, settings } = await installContext({
-      withMemory: false,
-      summaryCoveredThrough: 2,
-    });
-    settings.summary.windowSize = 5;
-    const stored = context.chatMetadata[MODULE_ID];
-    stored.stageSummary = {
-      entries: [
-        {
-          text: sectionedSummary('已删除的第一阶段'),
-          sourceStartMessageId: 0,
-          sourceEndMessageId: 0,
-          sourceHash: '',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-          deleted: true,
-        },
-        {
-          text: sectionedSummary('第二阶段'),
-          sourceStartMessageId: 1,
-          sourceEndMessageId: 1,
-          sourceHash: '',
-          updatedAt: '2026-01-02T00:00:00.000Z',
-        },
-        {
-          text: sectionedSummary('第三阶段'),
-          sourceStartMessageId: 2,
-          sourceEndMessageId: 2,
-          sourceHash: '',
-          updatedAt: '2026-01-03T00:00:00.000Z',
-        },
-      ],
-      coveredThroughMessageId: 2,
-      coveredThroughHash: '',
-      updatedAt: '2026-01-03T00:00:00.000Z',
+  it('keeps stale skeletons out of the request and records a warning', async () => {
+    const state = chatState();
+    state.stageSummary = {
+      entries: [summary('已验证总结', 0, 5)],
+      coveredThroughMessageId: 5,
+      coveredThroughHash: 'hash-0-5',
     };
-    const promptChat = structuredClone(sourceChat);
-    promptChat.at(-1)!.mes = '我们继续在院中交谈。';
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    const rendered = promptChat.map((message) => message.mes).join('\n');
-    expect(rendered).not.toContain('已删除的第一阶段');
-    expect(rendered).not.toContain('greeting');
-    expect(rendered).toContain('第二阶段');
-    expect(rendered).toContain('第三阶段');
-  });
-
-  it('restores the latest deleted summary source to the next request as raw messages', async () => {
-    const { context } = await installContext({
-      withMemory: false,
-      summaryCoveredThrough: 2,
-    });
-    const stored = context.chatMetadata[MODULE_ID];
-    stored.stageSummary = {
-      entries: [
-        {
-          text: sectionedSummary('第一阶段'),
-          sourceStartMessageId: 0,
-          sourceEndMessageId: 1,
-          sourceHash: '',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        },
-        {
-          text: sectionedSummary('第二阶段'),
-          sourceStartMessageId: 2,
-          sourceEndMessageId: 2,
-          sourceHash: '',
-          updatedAt: '2026-01-02T00:00:00.000Z',
-        },
-      ],
-      coveredThroughMessageId: 2,
-      coveredThroughHash: '',
-      updatedAt: '2026-01-02T00:00:00.000Z',
+    state.storySkeleton = {
+      text: '过期骨架',
+      coveredThroughMessageId: 3,
+      sourceHash: 'old',
+      stale: true,
     };
+    const original = install(state);
+    const request = structuredClone(original);
+    await storyEchoGenerateInterceptor(request, 8_192, vi.fn(), 'regenerate');
 
-    await new MemoryRepository().deleteStageSummaryEntry(2);
-    const promptChat = structuredClone(sourceChat);
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(context.chatMetadata[MODULE_ID].stageSummary.coveredThroughMessageId).toBe(1);
-    expect(promptChat.map((message) => message.mes)).toContain('林雨收好了银色钥匙。');
-    expect(promptChat.some((message) => message.mes.includes('第二阶段'))).toBe(false);
-  });
-
-  it('excludes inferred memories and summary hypotheses from strict fact verification', async () => {
-    const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
-    const stored = context.chatMetadata[MODULE_ID];
-    stored.memories[0]!.truthStatus = 'inferred';
-    stored.stageSummary.entries[0]!.text =
-      '众人在院中喝水；福尔摩斯猜测托马斯持有银色钥匙，但这一说法尚未证实。';
-    const promptChat = structuredClone(sourceChat);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(promptChat.some(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'recall',
-    )).toBe(false);
-    expect(promptChat.some(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
-    )).toBe(false);
-    const injected = promptChat.map((message) => message.mes).join('\n');
-    expect(injected).not.toContain('托马斯');
-    expect(context.chatMetadata[MODULE_ID].lastInspection?.candidateMemoryIds).toEqual([]);
-  });
-
-  it('omits summaries from before an explicit story-phase boundary during ordinary continuation', async () => {
-    const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 2 });
-    context.chat[3] = { is_user: true, mes: '上一段剧情已经结束，接下来进入全新的雪原篇章。' };
-    context.chat[4] = { is_user: false, mes: '雪原篇章里只有一双蓝手套。' };
-    context.chat[5] = { is_user: true, mes: '我们继续向雪原深处前进。' };
-    const promptChat = structuredClone(context.chat);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(promptChat.some(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
-    )).toBe(false);
-    expect(promptChat.map((message) => message.mes).join('\n')).not.toContain('林雨开始保管银色钥匙');
-    expect(promptChat.map((message) => message.mes)).toEqual([
-      '上一段剧情已经结束，接下来进入全新的雪原篇章。',
-      '雪原篇章里只有一双蓝手套。',
-      '我们继续向雪原深处前进。',
-    ]);
-  });
-
-  it('restores earlier summaries when the User explicitly asks to review an earlier phase', async () => {
-    const { context } = await installContext({ withMemory: false, summaryCoveredThrough: 2 });
-    context.chat[3] = { is_user: true, mes: '上一段剧情已经结束，接下来进入全新的雪原篇章。' };
-    context.chat[4] = { is_user: false, mes: '雪原篇章里只有一双蓝手套。' };
-    context.chat[5] = { is_user: true, mes: '回顾上一段剧情发生的事情。' };
-    const promptChat = structuredClone(context.chat);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    const summaries = promptChat.filter(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'summary',
-    );
-    expect(summaries).toHaveLength(1);
-    expect(summaries[0]?.mes).toContain('林雨开始保管银色钥匙');
-  });
-
-  it('does not perform pending vector writes in foreground prompt preparation', async () => {
-    const { context, settings, state } = await installContext({
-      withMemory: true,
-      summaryCoveredThrough: 2,
-    });
-    settings.recall.maxEvents = 0;
-    state.pendingVectorHashes = [123];
-    const promptChat = structuredClone(sourceChat);
-    const fetchMock = vi.mocked(globalThis.fetch);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(context.chatMetadata[MODULE_ID].pendingVectorHashes).toEqual([123]);
-    expect(context.chatMetadata[MODULE_ID].lastInspection?.warnings).toContain(
-      '部分剧情记忆尚未完成向量化，将使用可用索引和关键词召回。',
-    );
-  });
-
-  it('invalidates a changed branch locally without purging vectors in foreground', async () => {
-    const { context, state } = await installContext({
-      withMemory: true,
-      summaryCoveredThrough: 2,
-    });
-    state.indexedPrefixHash = 'hash-from-a-different-branch';
-    const promptChat = structuredClone(sourceChat);
-    const fetchMock = vi.mocked(globalThis.fetch);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(context.chatMetadata[MODULE_ID].memories).toEqual([]);
-    expect(context.chatMetadata[MODULE_ID].pendingVectorDeleteHashes).toEqual([123]);
-    expect(promptChat).toEqual(sourceChat);
-  });
-
-  it('isolates an unsupported legacy name from recall, disambiguation, and current-state injection', async () => {
-    const { context } = await installContext({ withMemory: true, summaryCoveredThrough: 2 });
-    const stored = context.chatMetadata[MODULE_ID];
-    const source = { startMessageId: 3, endMessageId: 4, sourceHash: 'phantom-source' };
-    stored.memories = [memory({
-      source,
-      sourceMessageIds: [3, 4],
-      sourceHistory: [
-        { startMessageId: 1, endMessageId: 2, sourceHash: 'older-phantom' },
-        source,
-      ],
-      event: '托马斯转移到钟楼。',
-      entities: ['托马斯'],
-      aliases: [],
-      scene: { participants: ['托马斯'] },
-      stateChanges: [{ entity: '托马斯', attribute: '位置', after: '钟楼' }],
-      knownBy: ['托马斯'],
-      retrievalText: '托马斯当前位于钟楼。',
-      injectionText: '托马斯当前位于钟楼。',
-      truthStatus: 'confirmed',
-    })];
-    const promptChat = structuredClone(sourceChat);
-
-    await storyEchoGenerateInterceptor(promptChat, 32_000, () => undefined, 'normal');
-
-    const injected = promptChat.map((message) => message.mes).join('\n');
-    expect(injected).not.toContain('托马斯');
-    expect(promptChat.some(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'recall',
-    )).toBe(false);
-    expect(promptChat.some(
-      (message) => message.extra?.['story_echo_injection_kind'] === 'state',
-    )).toBe(false);
-    expect(context.chatMetadata[MODULE_ID].debugTraces.some(
-      (trace) => trace.message.includes('已隔离缺少源楼层证据的旧版记忆'),
-    )).toBe(true);
+    expect(request.some((message) => message.mes.includes('过期骨架'))).toBe(false);
+    expect(state.lastInspection?.warnings.join('\n')).toContain('来源已失效');
   });
 });

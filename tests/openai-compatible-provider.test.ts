@@ -69,45 +69,19 @@ describe('OpenAiCompatibleProvider', () => {
     expect(body.max_tokens).toBe(10_000);
   });
 
-  it('passes a strict schema in the format expected by SillyTavern', async () => {
+  it('keeps summary requests in plain text mode', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: '{}' } }],
     }), { status: 200 }));
     const config = customConfig();
     config.baseUrl = 'https://example.com/v1';
     config.model = 'model-name';
-    config.strictJsonSchema = true;
-    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
-    const schema = { type: 'object', properties: {} };
-
-    await provider.complete({ system: 'system', prompt: 'prompt', jsonSchema: schema });
-
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(body.json_schema).toEqual({
-      name: 'story_echo_response',
-      strict: true,
-      value: schema,
-    });
-  });
-
-  it('passes DeepSeek-compatible json_object through SillyTavern custom_include_body', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
-      choices: [{ message: { content: '{}' } }],
-    }), { status: 200 }));
-    const config = customConfig();
-    config.baseUrl = 'https://api.deepseek.com/v1';
-    config.model = 'deepseek-v4-pro';
     const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
 
-    await provider.complete({
-      system: 'system',
-      prompt: 'prompt',
-      structuredOutput: 'json-object',
-      jsonSchema: { type: 'object' },
-    });
+    await provider.complete({ system: 'system', prompt: 'prompt' });
 
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(body.custom_include_body).toBe('response_format:\n  type: json_object');
+    expect(body.custom_include_body).toBe('');
     expect(body.json_schema).toBeUndefined();
   });
 

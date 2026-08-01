@@ -1,103 +1,43 @@
 import { EXTENSION_VERSION } from '../core/constants';
 import type { StoryEchoChatState, StoryEchoSettings } from '../core/types';
-import { structuredOutputDiagnosticsSnapshot } from '../llm/structured-diagnostics';
-import { renderCurrentStateCoordinationBlock, renderMemoryEntry } from '../prompt/render';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 
 export function buildDebugReport(
   state: StoryEchoChatState,
   settings: StoryEchoSettings,
-  vectorCount: number | string = 'unknown',
 ): string {
-  const memoryStatus = {
-    active: state.memories.filter((memory) => memory.status === 'active').length,
-    resolved: state.memories.filter((memory) => memory.status === 'resolved').length,
-    superseded: state.memories.filter((memory) => memory.status === 'superseded').length,
-    invalid: state.memories.filter((memory) => memory.status === 'invalid').length,
-  };
-  const selected = new Set(state.lastInspection?.selectedMemoryIds ?? []);
-
   const report = JSON.stringify({
     storyEchoVersion: EXTENSION_VERSION,
     generatedAt: new Date().toISOString(),
     chat: {
       ownerChatId: state.ownerChatId,
       chatUuid: state.chatUuid,
-      vectorCollectionId: state.vectorCollectionId,
-      indexedThroughMessageId: state.indexedThroughMessageId,
       stageSummary: {
         coveredThroughMessageId: state.stageSummary.coveredThroughMessageId,
         updatedAt: state.stageSummary.updatedAt ?? null,
         entryCount: state.stageSummary.entries.filter((entry) => !entry.deleted).length,
         deletedEntryCount: state.stageSummary.entries.filter((entry) => entry.deleted).length,
         entries: state.stageSummary.entries,
-        currentStateCoordination: renderCurrentStateCoordinationBlock(state.memories) || null,
       },
       storySkeleton: state.storySkeleton,
-      memoryStatus,
-      vectorCount,
-      pendingVectorHashes: state.pendingVectorHashes.length,
-      pendingVectorDeleteHashes: state.pendingVectorDeleteHashes.length,
     },
     settings: {
       enabled: settings.enabled,
-      memoryEnabled: settings.memory.enabled,
       debug: settings.debug,
       recentWindow: settings.recentWindow,
       summary: settings.summary,
-      recall: settings.recall,
-      extraction: settings.extraction,
       llmProvider: settings.llm.provider,
-      vectorSource: settings.vector.source,
-      vectorModel: settings.vector.model,
     },
     metrics: state.metrics,
     runtimeDiagnostics: {
-      structuredOutput: structuredOutputDiagnosticsSnapshot(),
       taskQueue: storyEchoTaskCoordinator.snapshot(),
     },
     lastInspection: state.lastInspection ?? null,
-    selectedMemories: state.memories
-      .filter((memory) => selected.has(memory.id))
-      .map((memory) => ({
-        id: memory.id,
-        logicalKey: memory.logicalKey,
-        status: memory.status,
-        evidenceRole: memory.evidenceRole,
-        lastOperation: memory.lastOperation,
-        source: memory.source,
-        sourceMessageIds: memory.sourceMessageIds,
-        injectionText: memory.injectionText,
-        renderedInjection: renderMemoryEntry(memory),
-      })),
-    recentMemories: [...state.memories]
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, 100)
-      .map((memory) => ({
-        id: memory.id,
-        logicalKey: memory.logicalKey,
-        type: memory.type,
-        status: memory.status,
-        evidenceRole: memory.evidenceRole,
-        lastOperation: memory.lastOperation,
-        source: memory.source,
-        sourceMessageIds: memory.sourceMessageIds,
-        supersedesMemoryIds: memory.supersedesMemoryIds,
-        replacedByMemoryId: memory.replacedByMemoryId ?? null,
-        event: memory.event,
-        stateChanges: memory.stateChanges,
-        knownBy: memory.knownBy,
-        injectionText: memory.injectionText,
-      })),
     recentDebugTraces: state.debugTraces,
   }, null, 2);
   const redactions = [
     settings.llm.custom.baseUrl.trim(),
-    settings.vector.custom.baseUrl.trim(),
-    settings.vector.volcengine.baseUrl.trim(),
     settings.llm.custom.apiKey.trim(),
-    settings.vector.custom.apiKey.trim(),
-    settings.vector.volcengine.apiKey.trim(),
   ].filter(Boolean);
   return redactions.reduce(
     (sanitized, value) => sanitized.split(value).join('[REDACTED]'),

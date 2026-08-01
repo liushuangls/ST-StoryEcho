@@ -1,15 +1,5 @@
-import type { StoryMemory, TavernChatMessage } from '../core/types';
-import { normalizeIdentityText } from '../consolidation/identity';
+import type { TavernChatMessage } from '../core/types';
 
-/**
- * A story-phase boundary must be explicit. Ordinary scene changes, time skips,
- * new clues and side activities are deliberately excluded so long-lived facts
- * are not hidden merely because the narrative moved forward.
- *
- * “案件/案子” remains one supported genre noun in this local deterministic
- * detector, alongside chapters, quests, journeys and story arcs. None of these
- * detector phrases are sent to an LLM.
- */
 const PHASE_NOUN = '(?:剧情(?:阶段|线)?|故事(?:阶段|线)?|篇章|章节|任务|委托|旅程|冒险|阶段|主线|支线|事件|案件|案子|章|案)';
 const STORY_SCALE_NOUN = '(?:剧情(?:阶段|线)?|故事(?:阶段|线)?|篇章|章节|旅程|冒险|阶段|主线|案件|案子|章|案)';
 const CLOSED = '(?:已(?:经)?|刚|正式)?(?:结束|完成|告一段落|收尾|落幕|完结|完(?:了)?|解决|结(?:案)?)';
@@ -59,18 +49,8 @@ function isExplicitStoryPhaseBoundary(value: string): boolean {
   });
 }
 
-function asksForEarlierStoryPhase(value: string): boolean {
+export function asksForEarlierStoryPhase(value: string): boolean {
   return EARLIER_STORY_PHASE_QUERY.some((pattern) => pattern.test(value));
-}
-
-function memoryTerms(memory: StoryMemory): string[] {
-  return [...new Set([
-    ...memory.entities,
-    ...memory.aliases,
-    ...memory.stateChanges.map((change) => change.entity),
-  ])]
-    .map(normalizeIdentityText)
-    .filter((term) => term.length >= 2);
 }
 
 export function currentStoryPhaseStart(
@@ -104,66 +84,4 @@ export function firstStoryPhaseBoundary(
     }
   }
   return null;
-}
-
-export interface StoryPhaseMemoryScope {
-  boundaryMessageId: number | null;
-  memories: StoryMemory[];
-  excludedMemoryIds: string[];
-  earlierPhaseQuery: boolean;
-}
-
-/**
- * Keep automatic recall inside the latest explicitly declared story phase.
- * Pinned/manual memories remain global. An older memory may cross the boundary
- * only when the current User explicitly names one of its entities and the same
- * entity has no fact in the current phase.
- */
-export function scopeMemoriesToCurrentStoryPhase(
-  memories: StoryMemory[],
-  messages: readonly TavernChatMessage[],
-  currentInputMessageId: number,
-): StoryPhaseMemoryScope {
-  const boundaryMessageId = currentStoryPhaseStart(messages, currentInputMessageId);
-  const currentInput = messages[currentInputMessageId]?.mes ?? '';
-  const earlierPhaseQuery = asksForEarlierStoryPhase(currentInput);
-  if (boundaryMessageId === null || earlierPhaseQuery) {
-    return {
-      boundaryMessageId,
-      memories,
-      excludedMemoryIds: [],
-      earlierPhaseQuery,
-    };
-  }
-
-  const normalizedQuery = normalizeIdentityText(currentInput);
-  const currentPhaseTerms = new Set(memories
-    .filter((memory) => memory.source.endMessageId >= boundaryMessageId)
-    .flatMap(memoryTerms));
-  const kept: StoryMemory[] = [];
-  const excludedMemoryIds: string[] = [];
-
-  for (const memory of memories) {
-    const terms = memoryTerms(memory);
-    const explicitlyRequestedOlderEntity = terms.some((term) => (
-      normalizedQuery.includes(term) && !currentPhaseTerms.has(term)
-    ));
-    if (
-      memory.source.endMessageId >= boundaryMessageId ||
-      memory.pinned ||
-      memory.manuallyEdited ||
-      explicitlyRequestedOlderEntity
-    ) {
-      kept.push(memory);
-    } else {
-      excludedMemoryIds.push(memory.id);
-    }
-  }
-
-  return {
-    boundaryMessageId,
-    memories: kept,
-    excludedMemoryIds,
-    earlierPhaseQuery,
-  };
 }

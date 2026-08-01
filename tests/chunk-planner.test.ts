@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TavernChatMessage } from '../src/core/types';
-import { countCompletedTurns, planNextChunk } from '../src/extraction/chunk-planner';
+import { countCompletedTurns, planNextChunk } from '../src/history/chunk-planner';
 
 const messages: TavernChatMessage[] = [
   { is_user: false, mes: 'greeting' },

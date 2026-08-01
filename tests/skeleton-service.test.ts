@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MODULE_ID } from '../src/core/constants';
 import type { StageSummaryEntry, StoryEchoSettings, TavernChatMessage } from '../src/core/types';
-import { MemoryRepository } from '../src/memory/repository';
+import { StoryStateRepository } from '../src/state/repository';
 import type { SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { StorySkeletonService } from '../src/summary/skeleton-service';
@@ -49,7 +49,7 @@ function installContext(
   settings.enabled = true;
   settings.summary.windowSize = options.windowSize ?? 4;
   settings.summary.skeletonMaxTokens = options.skeletonMaxTokens ?? 5_000;
-  const state = chatState([]);
+  const state = chatState();
   state.ownerChatId = 'chat-id';
   state.stageSummary = {
     entries,
@@ -405,7 +405,7 @@ describe('global story skeleton lifecycle', () => {
       coveredThroughMessageId: entries[0]!.sourceEndMessageId,
       sourceHash: await storySkeletonSourceHash(entries, entries[0]!.sourceEndMessageId),
     };
-    const repository = new MemoryRepository();
+    const repository = new StoryStateRepository();
     const edited = await repository.updateStorySkeleton({
       text: skeletonText('用户人工确认：姜梦是长期同行者。'),
     });

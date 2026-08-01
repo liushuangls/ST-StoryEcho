@@ -5,10 +5,6 @@ const summaryManager = readFileSync(
   new URL('../src/ui/summary-manager.ts', import.meta.url),
   'utf8',
 );
-const memoryManager = readFileSync(
-  new URL('../src/ui/memory-manager.ts', import.meta.url),
-  'utf8',
-);
 const settingsPanel = readFileSync(
   new URL('../src/ui/settings-panel.ts', import.meta.url),
   'utf8',
@@ -27,7 +23,7 @@ function expectButtonCapturedBeforeConfirmation(source: string, selector: string
 }
 
 describe('asynchronous confirmation handlers', () => {
-  it('captures each action button before awaiting the SillyTavern popup', () => {
+  it('captures each action button before awaiting confirmation', () => {
     for (const selector of [
       '#story-echo-skeleton-update',
       '#story-echo-skeleton-rebuild',
@@ -35,12 +31,6 @@ describe('asynchronous confirmation handlers', () => {
       '#story-echo-summary-delete',
     ]) {
       expectButtonCapturedBeforeConfirmation(summaryManager, selector);
-    }
-    for (const selector of [
-      '#story-echo-memory-rebuild',
-      '#story-echo-memory-delete',
-    ]) {
-      expectButtonCapturedBeforeConfirmation(memoryManager, selector);
     }
     expectButtonCapturedBeforeConfirmation(settingsPanel, '#story-echo-reset-stats');
   });

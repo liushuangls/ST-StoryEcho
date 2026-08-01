@@ -1,11 +1,11 @@
 import type { TavernChatMessage } from '../core/types';
 
-export interface ExtractionChunk {
+export interface HistoryChunk {
   startMessageId: number;
   endMessageId: number;
 }
 
-export function countCompletedTurns(messages: TavernChatMessage[]): number {
+export function countCompletedTurns(messages: readonly TavernChatMessage[]): number {
   let waitingForAssistant = false;
   let completed = 0;
   for (const message of messages) {
@@ -23,16 +23,15 @@ export function countCompletedTurns(messages: TavernChatMessage[]): number {
 }
 
 export function planNextChunk(
-  messages: TavernChatMessage[],
+  messages: readonly TavernChatMessage[],
   startMessageId: number,
   maximumEndMessageId: number,
   targetTurns: number,
   maxCharacters = 32_000,
-): ExtractionChunk | null {
+): HistoryChunk | null {
   if (startMessageId > maximumEndMessageId || startMessageId >= messages.length) {
     return null;
   }
-
   const maximumEnd = Math.min(maximumEndMessageId, messages.length - 1);
   const target = Math.max(1, Math.floor(targetTurns));
   const characterLimit = Math.max(1_000, Math.floor(maxCharacters));
@@ -44,9 +43,6 @@ export function planNextChunk(
   for (let index = startMessageId; index <= maximumEnd; index += 1) {
     const message = messages[index];
     const nextCharacters = characters + (message?.mes.length ?? 0);
-    // Never split one user+assistant turn. If the next message would exceed
-    // the cap, close at the most recent completed turn; one exceptionally
-    // large turn is allowed to exceed the cap so indexing can still advance.
     if (nextCharacters > characterLimit && lastCompletedTurnEnd >= startMessageId) {
       return { startMessageId, endMessageId: lastCompletedTurnEnd };
     }
@@ -67,6 +63,5 @@ export function planNextChunk(
       }
     }
   }
-
   return { startMessageId, endMessageId: maximumEnd };
 }

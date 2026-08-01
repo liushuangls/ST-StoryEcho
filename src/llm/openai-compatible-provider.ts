@@ -1,7 +1,6 @@
 import type {
   LlmProvider,
   LlmRequest,
-  LlmStructuredOutputMode,
   StoryEchoSettings,
 } from '../core/types';
 import { readResponseTextWithLimit } from '../http/response';
@@ -65,17 +64,6 @@ function responseError(payload: unknown, fallback: string, apiKey: string): stri
 export class OpenAiCompatibleProvider implements LlmProvider {
   readonly id = 'openai-compatible' as const;
 
-  supportsStructuredOutput(_mode: LlmStructuredOutputMode): boolean {
-    return true;
-  }
-
-  structuredOutputOrder(): readonly LlmStructuredOutputMode[] {
-    const modelName = this.config.model.trim().toLocaleLowerCase().split('/').at(-1) ?? '';
-    return modelName.startsWith('deepseek-')
-      ? ['json-object', 'json-schema', 'text']
-      : ['json-schema', 'json-object', 'text'];
-  }
-
   constructor(
     private readonly config: StoryEchoSettings['llm']['custom'],
     private readonly fetchImpl: FetchLike = fetch,
@@ -110,8 +98,6 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
     const abort = () => controller.abort();
     request.signal?.addEventListener('abort', abort, { once: true });
-    const structuredOutput = request.structuredOutput
-      ?? (this.config.strictJsonSchema && request.jsonSchema ? 'json-schema' : 'text');
     const body = {
       messages: [
         { role: 'system', content: request.system },
@@ -133,19 +119,8 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       proxy_password: '',
       custom_url: baseUrl,
       custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : '',
-      custom_include_body: structuredOutput === 'json-object'
-        ? 'response_format:\n  type: json_object'
-        : '',
+      custom_include_body: '',
       custom_exclude_body: '',
-      ...(structuredOutput === 'json-schema' && request.jsonSchema
-        ? {
-            json_schema: {
-              name: 'story_echo_response',
-              strict: true,
-              value: request.jsonSchema,
-            },
-          }
-        : {}),
     };
 
     try {

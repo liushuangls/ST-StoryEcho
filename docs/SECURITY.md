@@ -1,67 +1,47 @@
-# StoryEcho 安全说明
+# StoryEcho 安全边界
 
-## API Key 的真实存储边界
+## 凭据
 
-为了做到无需额外服务端插件且能跟随 SillyTavern 用户设置多端同步，StoryEcho 将自定义 LLM 与 Embedding 的 API Key 保存在 `extensionSettings.story_echo`。
+StoryEcho 只有自定义 LLM 一类可选凭据。Base URL、模型和 API Key 保存在当前 SillyTavern 用户的 `extensionSettings.story_echo`，用于刷新恢复和多端同步。
 
-这是一种方便优先的设计，不是安全密钥库：
+这不是 Secret Manager：同页面扩展以及能读取酒馆用户设置的人可能看到明文 Key。建议使用限额、限权、可撤销的独立 Key。
 
-- Key 会由 SillyTavern 持久化和同步，刷新页面后无需重填；
-- Key 以明文存在于用户设置中；
-- 同页面运行的其他 UI 扩展可以读取它；
-- 能访问用户设置文件、备份或同步数据的人也可能读取它；
-- Key 不写入聊天元数据、角色卡、Vector Storage、日志或调试报告；
-- 重置 StoryEcho 设置会清除这两个 Key。
+Key 不写入：
 
-建议使用额度受限、权限最小、可随时撤销的独立 Key，不要复用高价值主账号密钥。
+- 聊天消息；
+- `chatMetadata.story_echo`；
+- 阶段总结或全局骨架；
+- 控制台日志；
+- Token 卡片；
+- 诊断报告。
 
-参考：[SillyTavern UI Extensions - Security](https://docs.sillytavern.app/for-contributors/writing-extensions/)
+诊断报告会同时脱敏配置的 API Key 和自定义 Base URL，包括调试错误详情中的重复值。
 
-## 两条请求链路
+## 网络
 
-### 自定义 LLM
+- 主连接通过 SillyTavern 的 `generateRaw`；
+- 自定义 OpenAI 兼容连接通过同源 `/api/backends/chat-completions/generate`；
+- 浏览器不会直接向第三方域名发送 Key；
+- 默认只允许 HTTPS；
+- HTTP 必须由用户显式开启，且只应连接可信内网；
+- Base URL 经过协议、用户信息、片段和路径规范化；
+- API Key 拒绝换行和异常长度；
+- 请求超时最大 10 分钟，设置默认上限 5 分钟；
+- 响应使用 2 MiB 流式上限，错误详情限制为 500 字符并脱敏；
+- 本地超时和可识别的上游 408/504/524 会进入一次有界重试。
 
-- 浏览器把模型、提示、Base URL 和 Authorization Header 配置发送给同源的 SillyTavern 后端；
-- SillyTavern 自带的 Chat Completions 后端再请求外部 LLM；
-- 浏览器不直接跨域连接 LLM 接口，但 Key 仍会经过前端运行时和浏览器到酒馆服务器的请求；
-- HTTP 部署下，浏览器到 SillyTavern 服务器这一段没有 TLS，局域网内仍可能被监听。
+## 提示词与内容
 
-### 自定义 Embedding
+- 世界书内容的 `<`、`>` 会转为全角字符，避免伪造 StoryEcho 协议标签；
+- 世界书明确标记为背景设定，不作为事件发生证据；
+- 阶段总结和骨架明确标记为历史数据，不是待执行指令；
+- 当前用户输入与近期原文的时间优先级高于派生内容；
+- 内部 LLM 请求携带随机 nonce，防止被生成拦截器递归处理；
+- UI 使用 `textContent` 或表单 value 显示动态内容，不把聊天文本拼接为可执行 HTML；
+- 确认弹窗会转义 HTML 特殊字符。
 
-- 浏览器向同源的 SillyTavern `/proxy/` 发送模型输入和可选 Bearer Key；OpenAI兼容来源使用字符串数组，火山多模态来源为每段文本发送独立的 `{ type: "text" }` 输入；
-- SillyTavern 内置代理再请求外部 Embedding Endpoint，因此外部接口不需要允许浏览器 CORS；
-- 使用自定义 Embedding 必须在 `config.yaml` 启用 `enableCorsProxy` 并重启酒馆；
-- 返回向量在浏览器校验数量、有限数值和统一维度；火山多模态来源最多并发4个请求并保持原输入顺序；
-- 向量随后交给 SillyTavern Vector Storage，保存和相似度检索仍在酒馆服务端完成；
-- StoryEcho 不在浏览器持久化独立向量索引。
+## 数据删除
 
-## 自定义端点
+设置页可以删除阶段总结，但不会删除聊天原文。删除最新总结只会让对应原文重新进入请求；删除旧总结保留覆盖墓碑。清空诊断只清除指标、检查记录和调试轨迹，不影响总结与骨架。
 
-- 仅允许 `http:` 和 `https:`；
-- Base URL 拒绝内嵌用户名、密码和查询参数，避免凭据混入 URL；
-- 默认要求 HTTPS；HTTP 必须显式开启，仅建议可信局域网服务；
-- LLM 和 Embedding 请求都有超时；响应大小受限；
-- 错误消息会裁剪，并在可能时移除当前 Key；
-- Embedding Base URL 只在请求时自动加同源 `/proxy/` 前缀，持久化设置中不保存代理地址；
-- SillyTavern 内置代理会处理外部重定向；仅应连接可信的 Embedding Endpoint；
-- 修改 Embedding 端点或模型会触发向量集合重建，修改 Key 或超时不会。
-
-## 模型输出
-
-- 结构化输出执行 Schema 校验；
-- LLM 查询改写只发送最新用户发言和最近 3 条有界非系统上下文，不发送完整聊天；
-- 查询改写 Prompt 把聊天内容视为不可信剧情数据；
-- 改写结果只用于检索，不覆盖用户输入，也不直接作为剧情事实注入；
-- 非法输出不会写入聊天元数据；
-- 不执行模型返回的代码、HTML 或命令。
-
-## 调试数据
-
-- 调试模式默认关闭，每个聊天最多保留最近 50 条运行轨迹；
-- 调试报告不包含 API Key 和自定义 LLM Base URL；
-- 报告会包含检索查询、事件 ID 和召回剧情文本，分享前应检查聊天隐私；
-- 重置统计会删除累计指标、调试轨迹和最近一次检查记录，不影响剧情记忆。
-
-## 第三方扩展边界
-
-所有 UI 扩展运行在同一个页面信任域。StoryEcho 无法阻止恶意扩展读取设置、截获请求或滥用已配置接口，因此只应安装可信扩展。若需要更强的密钥隔离，应改用专门的服务端 SecretManager 方案；这会增加一次独立安装与维护成本，不是当前默认架构。
+旧版状态升级为 Schema 2 时，未被当前模型声明的旧字段会被丢弃。
