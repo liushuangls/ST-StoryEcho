@@ -111,7 +111,7 @@ export class BackgroundProcessingScheduler {
       );
     }
 
-    const replyHandler = (): void => {
+    const replyHandler = (messageId?: unknown): void => {
       if (tauriTavernAgentBridge.isRunActive()) {
         // An Agent workspace can commit several assistant messages before the
         // run ends. Keep the foreground lease until the Agent terminal event
@@ -119,6 +119,7 @@ export class BackgroundProcessingScheduler {
         this.agentReplyObserved = true;
         return;
       }
+      tauriTavernAgentBridge.captureCompletedStandardPrompt(getContext(), messageId);
       storyEchoTaskCoordinator.releaseForegroundLease('assistant-message-received');
       this.schedule();
     };

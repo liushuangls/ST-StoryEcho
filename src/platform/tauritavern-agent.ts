@@ -6,8 +6,9 @@ import { getCurrentChatId } from './sillytavern';
 
 const AGENT_RUN_STATE_CHANGED_EVENT = 'tauritavern-agent-run-state-changed';
 const AGENT_RUN_EVENT = 'tauritavern-agent-run-event';
-const PROMPT_CAPTURE_MAX_AGE_MS = 2 * 60 * 1_000;
+const PROMPT_CAPTURE_MAX_AGE_MS = 10 * 60 * 1_000;
 const MAX_CAPTURED_RUNS = 4;
+const MAX_CAPTURED_STANDARD_PROMPTS = 1;
 
 interface TauriTavernAgentApi {
   readModelTurn?(input: {
@@ -36,7 +37,7 @@ interface PendingAgentPrompt {
 }
 
 type AgentPromptSurface = Pick<
-  TauriAgentPromptSnapshot,
+  TauriPromptSnapshot,
   'messages' | 'toolDefinitions' | 'api' | 'model' | 'profile'
 >;
 
@@ -46,11 +47,7 @@ interface StoryEchoPreparation {
   injectedBlockCount: number;
 }
 
-export interface TauriAgentPromptSnapshot {
-  runId: string;
-  chatId: string;
-  generationType: string;
-  expectedMessageId: number;
+export interface TauriPromptSnapshot {
   messages: unknown[];
   toolDefinitions: unknown[];
   api: string;
@@ -59,6 +56,22 @@ export interface TauriAgentPromptSnapshot {
   capturedAt: number;
   actualInputTokens: number | null;
   storyEchoTrimmedByAgentAssembly: boolean;
+}
+
+export interface TauriAgentPromptSnapshot extends TauriPromptSnapshot {
+  runId: string;
+  chatId: string;
+  generationType: string;
+  expectedMessageId: number;
+}
+
+export interface TauriStandardPromptSnapshot extends TauriPromptSnapshot {
+  chatId: string;
+  messageId: number;
+}
+
+interface SequencedStandardPromptSnapshot extends TauriStandardPromptSnapshot {
+  promptSequence: number;
 }
 
 export interface TauriAgentRunStateChange {
@@ -94,6 +107,11 @@ function finiteTokenCount(value: unknown): number | null {
   }
   const number = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.round(number) : null;
+}
+
+function messageIdValue(value: unknown): number | null {
+  const number = typeof value === 'number' ? value : Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : null;
 }
 
 function nestedRecord(value: unknown, key: string): Record<string, unknown> | null {
@@ -232,6 +250,10 @@ function expectedMessageId(context: SillyTavernContext, generationType: string):
     : context.chat.length;
 }
 
+function standardSnapshotKey(chatId: string, messageId: number): string {
+  return `${chatId}:${messageId}`;
+}
+
 function currentAgentApi(): TauriTavernAgentApi | null {
   return globalThis.__TAURITAVERN__?.api?.agent ?? null;
 }
@@ -245,6 +267,7 @@ export class TauriTavernAgentBridge {
   private activeRunId: string | null = null;
   private readonly snapshots = new Map<string, TauriAgentPromptSnapshot>();
   private readonly snapshotPromptSequences = new Map<string, number>();
+  private readonly standardSnapshots = new Map<string, SequencedStandardPromptSnapshot>();
   private readonly usageReads = new Set<string>();
   private readonly stateListeners = new Set<AgentRunStateListener>();
   private promptSequence = 0;
@@ -299,15 +322,12 @@ export class TauriTavernAgentBridge {
     }
     this.registeredEventSource = null;
     this.settingsEventName = '';
-    if (this.pendingPromptExpiry !== undefined) {
-      clearTimeout(this.pendingPromptExpiry);
-      this.pendingPromptExpiry = undefined;
-    }
-    this.pendingPrompt = null;
+    this.clearPendingPrompt();
     this.storyEchoPreparation = null;
     this.activeRunId = null;
     this.snapshots.clear();
     this.snapshotPromptSequences.clear();
+    this.standardSnapshots.clear();
     this.usageReads.clear();
     this.stateListeners.clear();
     this.promptSequence = 0;
@@ -319,6 +339,10 @@ export class TauriTavernAgentBridge {
   }
 
   beginStoryEchoPreparation(chatId: string | null): void {
+    // A new real-generation interception supersedes any prompt left behind by
+    // an aborted request. This keeps the wider capture window from pairing a
+    // stale prompt with a later ordinary or Agent reply.
+    this.clearPendingPrompt();
     this.storyEchoPreparation = chatId
       ? {
           chatId,
@@ -352,10 +376,15 @@ export class TauriTavernAgentBridge {
     if (!chatId || latestMessageId < 0) {
       return null;
     }
+    const standardSnapshot = this.standardSnapshotForLatestMessage(context);
     const messageRunId = messageAgentRunId(context.chat[latestMessageId]);
     if (messageRunId) {
       const snapshot = this.snapshots.get(messageRunId);
       if (snapshot?.chatId !== chatId) {
+        return null;
+      }
+      const agentSequence = this.snapshotPromptSequences.get(messageRunId) ?? -1;
+      if (standardSnapshot && standardSnapshot.promptSequence > agentSequence) {
         return null;
       }
       snapshot.profile ||= messageAgentProfileId(context.chat[latestMessageId]);
@@ -371,8 +400,67 @@ export class TauriTavernAgentBridge {
     return candidates[0] ?? null;
   }
 
+  standardPromptForLatestMessage(
+    context: SillyTavernContext,
+  ): TauriStandardPromptSnapshot | null {
+    const snapshot = this.standardSnapshotForLatestMessage(context);
+    return snapshot?.promptSequence === this.promptSequence ? snapshot : null;
+  }
+
   latestMessageBelongsToAgent(context: SillyTavernContext): boolean {
-    return Boolean(messageAgentRunId(context.chat[context.chat.length - 1]));
+    const runId = messageAgentRunId(context.chat[context.chat.length - 1]);
+    if (!runId) {
+      return false;
+    }
+    const standardSnapshot = this.standardSnapshotForLatestMessage(context);
+    const agentSequence = this.snapshotPromptSequences.get(runId) ?? -1;
+    return !standardSnapshot || standardSnapshot.promptSequence <= agentSequence;
+  }
+
+  captureCompletedStandardPrompt(
+    context: SillyTavernContext,
+    receivedMessageId?: unknown,
+  ): boolean {
+    if (!this.registered || this.activeRunId) {
+      return false;
+    }
+    const chatId = getCurrentChatId(context) ?? '';
+    const messageId = messageIdValue(receivedMessageId) ?? context.chat.length - 1;
+    const pending = this.pendingPrompt;
+    const preparation = this.storyEchoPreparation;
+    this.clearPendingPrompt();
+    this.storyEchoPreparation = null;
+    const ageMs = pending ? Date.now() - pending.capturedAt : Number.POSITIVE_INFINITY;
+    if (
+      !chatId ||
+      messageId < 0 ||
+      !pending ||
+      pending.chatId !== chatId ||
+      !preparation ||
+      preparation.chatId !== chatId ||
+      ageMs < 0 ||
+      ageMs > PROMPT_CAPTURE_MAX_AGE_MS
+    ) {
+      return false;
+    }
+    const prompt = clonePromptSurface(pending.prompt);
+    if (!prompt) {
+      return false;
+    }
+    const key = standardSnapshotKey(chatId, messageId);
+    this.standardSnapshots.delete(key);
+    this.standardSnapshots.set(key, {
+      chatId,
+      messageId,
+      ...prompt,
+      capturedAt: Date.now(),
+      actualInputTokens: null,
+      storyEchoTrimmedByAgentAssembly: false,
+      promptSequence: pending.sequence,
+    });
+    this.pruneStandardSnapshots();
+    emitDiagnosticsUpdated();
+    return true;
   }
 
   private readonly onCompletionSettingsReady = (payload: unknown): void => {
@@ -384,9 +472,15 @@ export class TauriTavernAgentBridge {
     }
     const prompt = promptSurface(payload);
     const chatId = context ? getCurrentChatId(context) ?? '' : '';
-    if (!chatId || !prompt) {
+    if (
+      !chatId ||
+      !prompt ||
+      !this.storyEchoPreparation ||
+      this.storyEchoPreparation.chatId !== chatId
+    ) {
       return;
     }
+    this.clearPendingPrompt();
     this.promptSequence += 1;
     this.pendingPrompt = {
       chatId,
@@ -394,9 +488,6 @@ export class TauriTavernAgentBridge {
       capturedAt: Date.now(),
       sequence: this.promptSequence,
     };
-    if (this.pendingPromptExpiry !== undefined) {
-      clearTimeout(this.pendingPromptExpiry);
-    }
     const capturedPrompt = this.pendingPrompt;
     this.pendingPromptExpiry = setTimeout(() => {
       if (this.pendingPrompt === capturedPrompt) {
@@ -468,12 +559,8 @@ export class TauriTavernAgentBridge {
     const chatId = getCurrentChatId(context) ?? '';
     const pending = this.pendingPrompt;
     const preparation = this.storyEchoPreparation;
-    this.pendingPrompt = null;
+    this.clearPendingPrompt();
     this.storyEchoPreparation = null;
-    if (this.pendingPromptExpiry !== undefined) {
-      clearTimeout(this.pendingPromptExpiry);
-      this.pendingPromptExpiry = undefined;
-    }
     const ageMs = pending ? Date.now() - pending.capturedAt : Number.POSITIVE_INFINITY;
     if (
       !chatId ||
@@ -557,6 +644,37 @@ export class TauriTavernAgentBridge {
       this.snapshotPromptSequences.delete(oldestRunId);
       this.usageReads.delete(oldestRunId);
     }
+  }
+
+  private standardSnapshotForLatestMessage(
+    context: SillyTavernContext,
+  ): SequencedStandardPromptSnapshot | null {
+    const chatId = getCurrentChatId(context) ?? '';
+    const messageId = context.chat.length - 1;
+    if (!chatId || messageId < 0) {
+      return null;
+    }
+    return this.standardSnapshots.get(standardSnapshotKey(chatId, messageId)) ?? null;
+  }
+
+  private pruneStandardSnapshots(): void {
+    // Ordinary requests only need the latest completed snapshot. Older ones
+    // remain available through TauriTavern's persistent itemized-prompt store.
+    while (this.standardSnapshots.size > MAX_CAPTURED_STANDARD_PROMPTS) {
+      const oldestKey = this.standardSnapshots.keys().next().value as string | undefined;
+      if (!oldestKey) {
+        return;
+      }
+      this.standardSnapshots.delete(oldestKey);
+    }
+  }
+
+  private clearPendingPrompt(): void {
+    if (this.pendingPromptExpiry !== undefined) {
+      clearTimeout(this.pendingPromptExpiry);
+      this.pendingPromptExpiry = undefined;
+    }
+    this.pendingPrompt = null;
   }
 }
 

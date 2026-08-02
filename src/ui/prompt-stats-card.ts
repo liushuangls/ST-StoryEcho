@@ -180,11 +180,14 @@ export class PromptTokenStatsCard {
 
   private renderBreakdown(panel: HTMLElement, breakdown: LatestPromptTokenBreakdown): void {
     const agentPrompt = breakdown.origin === 'tauritavern-agent';
+    const standardTauriPrompt = breakdown.origin === 'tauritavern-standard';
     element<HTMLElement>(panel, '#story-echo-prompt-stats-subtitle').textContent = agentPrompt
       ? `消息 #${breakdown.messageId} · Agent 首轮${
-        breakdown.totalMeasured ? '实测总量 / 分类估算' : '可识别文本估算'
-      }`
-      : `消息 #${breakdown.messageId} · ${breakdown.detailed
+          breakdown.totalMeasured ? '实测总量 / 分类估算' : '可识别文本估算'
+        }`
+      : standardTauriPrompt
+        ? `消息 #${breakdown.messageId} · TauriTavern 普通请求文本估算`
+        : `消息 #${breakdown.messageId} · ${breakdown.detailed
         ? `酒馆分类明细${breakdown.estimated ? '（部分估算）' : ''}`
         : '可识别文本估算'}`;
     element<HTMLElement>(panel, '#story-echo-prompt-stats-total').textContent =
@@ -221,6 +224,9 @@ export class PromptTokenStatsCard {
         measurement,
         '这里只统计首次模型调用，不包含后续工具循环或子代理调用。',
       ].filter(Boolean).join(' ');
+    } else if (standardTauriPrompt) {
+      note.textContent =
+        '当前总量与分类按 TauriTavern 普通生成最终消息和工具定义快照估算；消息角色、模板及序列化开销可能产生少量差异。';
     } else {
       note.textContent = breakdown.detailed
         ? `总量取自 SillyTavern 最近一次提示词明细；StoryEcho 标签${breakdown.estimated

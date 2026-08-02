@@ -142,8 +142,9 @@ async function getRequestHeaders(context = getContext()) {
 // src/platform/tauritavern-agent.ts
 var AGENT_RUN_STATE_CHANGED_EVENT = "tauritavern-agent-run-state-changed";
 var AGENT_RUN_EVENT = "tauritavern-agent-run-event";
-var PROMPT_CAPTURE_MAX_AGE_MS = 2 * 60 * 1e3;
+var PROMPT_CAPTURE_MAX_AGE_MS = 10 * 60 * 1e3;
 var MAX_CAPTURED_RUNS = 4;
+var MAX_CAPTURED_STANDARD_PROMPTS = 1;
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -156,6 +157,10 @@ function finiteTokenCount(value) {
   }
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.round(number) : null;
+}
+function messageIdValue(value) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : null;
 }
 function nestedRecord(value, key) {
   return isRecord(value) && isRecord(value[key]) ? value[key] : null;
@@ -272,6 +277,9 @@ function storyEchoSummaryCount(messages) {
 function expectedMessageId(context, generationType) {
   return generationType === "swipe" ? Math.max(0, context.chat.length - 1) : context.chat.length;
 }
+function standardSnapshotKey(chatId, messageId) {
+  return `${chatId}:${messageId}`;
+}
 function currentAgentApi() {
   return globalThis.__TAURITAVERN__?.api?.agent ?? null;
 }
@@ -287,6 +295,7 @@ var TauriTavernAgentBridge = class {
   activeRunId = null;
   snapshots = /* @__PURE__ */ new Map();
   snapshotPromptSequences = /* @__PURE__ */ new Map();
+  standardSnapshots = /* @__PURE__ */ new Map();
   usageReads = /* @__PURE__ */ new Set();
   stateListeners = /* @__PURE__ */ new Set();
   promptSequence = 0;
@@ -333,15 +342,12 @@ var TauriTavernAgentBridge = class {
     }
     this.registeredEventSource = null;
     this.settingsEventName = "";
-    if (this.pendingPromptExpiry !== void 0) {
-      clearTimeout(this.pendingPromptExpiry);
-      this.pendingPromptExpiry = void 0;
-    }
-    this.pendingPrompt = null;
+    this.clearPendingPrompt();
     this.storyEchoPreparation = null;
     this.activeRunId = null;
     this.snapshots.clear();
     this.snapshotPromptSequences.clear();
+    this.standardSnapshots.clear();
     this.usageReads.clear();
     this.stateListeners.clear();
     this.promptSequence = 0;
@@ -351,6 +357,7 @@ var TauriTavernAgentBridge = class {
     return this.activeRunId !== null;
   }
   beginStoryEchoPreparation(chatId) {
+    this.clearPendingPrompt();
     this.storyEchoPreparation = chatId ? {
       chatId,
       preparedAt: Date.now(),
@@ -373,10 +380,15 @@ var TauriTavernAgentBridge = class {
     if (!chatId || latestMessageId < 0) {
       return null;
     }
+    const standardSnapshot = this.standardSnapshotForLatestMessage(context);
     const messageRunId = messageAgentRunId(context.chat[latestMessageId]);
     if (messageRunId) {
       const snapshot = this.snapshots.get(messageRunId);
       if (snapshot?.chatId !== chatId) {
+        return null;
+      }
+      const agentSequence = this.snapshotPromptSequences.get(messageRunId) ?? -1;
+      if (standardSnapshot && standardSnapshot.promptSequence > agentSequence) {
         return null;
       }
       snapshot.profile ||= messageAgentProfileId(context.chat[latestMessageId]);
@@ -385,8 +397,51 @@ var TauriTavernAgentBridge = class {
     const candidates = [...this.snapshots.values()].filter((snapshot) => snapshot.chatId === chatId && snapshot.expectedMessageId === latestMessageId && this.snapshotPromptSequences.get(snapshot.runId) === this.promptSequence).sort((left, right) => right.capturedAt - left.capturedAt);
     return candidates[0] ?? null;
   }
+  standardPromptForLatestMessage(context) {
+    const snapshot = this.standardSnapshotForLatestMessage(context);
+    return snapshot?.promptSequence === this.promptSequence ? snapshot : null;
+  }
   latestMessageBelongsToAgent(context) {
-    return Boolean(messageAgentRunId(context.chat[context.chat.length - 1]));
+    const runId = messageAgentRunId(context.chat[context.chat.length - 1]);
+    if (!runId) {
+      return false;
+    }
+    const standardSnapshot = this.standardSnapshotForLatestMessage(context);
+    const agentSequence = this.snapshotPromptSequences.get(runId) ?? -1;
+    return !standardSnapshot || standardSnapshot.promptSequence <= agentSequence;
+  }
+  captureCompletedStandardPrompt(context, receivedMessageId) {
+    if (!this.registered || this.activeRunId) {
+      return false;
+    }
+    const chatId = getCurrentChatId(context) ?? "";
+    const messageId = messageIdValue(receivedMessageId) ?? context.chat.length - 1;
+    const pending = this.pendingPrompt;
+    const preparation = this.storyEchoPreparation;
+    this.clearPendingPrompt();
+    this.storyEchoPreparation = null;
+    const ageMs = pending ? Date.now() - pending.capturedAt : Number.POSITIVE_INFINITY;
+    if (!chatId || messageId < 0 || !pending || pending.chatId !== chatId || !preparation || preparation.chatId !== chatId || ageMs < 0 || ageMs > PROMPT_CAPTURE_MAX_AGE_MS) {
+      return false;
+    }
+    const prompt = clonePromptSurface(pending.prompt);
+    if (!prompt) {
+      return false;
+    }
+    const key = standardSnapshotKey(chatId, messageId);
+    this.standardSnapshots.delete(key);
+    this.standardSnapshots.set(key, {
+      chatId,
+      messageId,
+      ...prompt,
+      capturedAt: Date.now(),
+      actualInputTokens: null,
+      storyEchoTrimmedByAgentAssembly: false,
+      promptSequence: pending.sequence
+    });
+    this.pruneStandardSnapshots();
+    emitDiagnosticsUpdated();
+    return true;
   }
   onCompletionSettingsReady = (payload) => {
     let context;
@@ -397,9 +452,10 @@ var TauriTavernAgentBridge = class {
     }
     const prompt = promptSurface(payload);
     const chatId = context ? getCurrentChatId(context) ?? "" : "";
-    if (!chatId || !prompt) {
+    if (!chatId || !prompt || !this.storyEchoPreparation || this.storyEchoPreparation.chatId !== chatId) {
       return;
     }
+    this.clearPendingPrompt();
     this.promptSequence += 1;
     this.pendingPrompt = {
       chatId,
@@ -407,9 +463,6 @@ var TauriTavernAgentBridge = class {
       capturedAt: Date.now(),
       sequence: this.promptSequence
     };
-    if (this.pendingPromptExpiry !== void 0) {
-      clearTimeout(this.pendingPromptExpiry);
-    }
     const capturedPrompt = this.pendingPrompt;
     this.pendingPromptExpiry = setTimeout(() => {
       if (this.pendingPrompt === capturedPrompt) {
@@ -476,12 +529,8 @@ var TauriTavernAgentBridge = class {
     const chatId = getCurrentChatId(context) ?? "";
     const pending = this.pendingPrompt;
     const preparation = this.storyEchoPreparation;
-    this.pendingPrompt = null;
+    this.clearPendingPrompt();
     this.storyEchoPreparation = null;
-    if (this.pendingPromptExpiry !== void 0) {
-      clearTimeout(this.pendingPromptExpiry);
-      this.pendingPromptExpiry = void 0;
-    }
     const ageMs = pending ? Date.now() - pending.capturedAt : Number.POSITIVE_INFINITY;
     if (!chatId || !pending || pending.chatId !== chatId || ageMs < 0 || ageMs > PROMPT_CAPTURE_MAX_AGE_MS) {
       return;
@@ -553,6 +602,30 @@ var TauriTavernAgentBridge = class {
       this.snapshotPromptSequences.delete(oldestRunId);
       this.usageReads.delete(oldestRunId);
     }
+  }
+  standardSnapshotForLatestMessage(context) {
+    const chatId = getCurrentChatId(context) ?? "";
+    const messageId = context.chat.length - 1;
+    if (!chatId || messageId < 0) {
+      return null;
+    }
+    return this.standardSnapshots.get(standardSnapshotKey(chatId, messageId)) ?? null;
+  }
+  pruneStandardSnapshots() {
+    while (this.standardSnapshots.size > MAX_CAPTURED_STANDARD_PROMPTS) {
+      const oldestKey = this.standardSnapshots.keys().next().value;
+      if (!oldestKey) {
+        return;
+      }
+      this.standardSnapshots.delete(oldestKey);
+    }
+  }
+  clearPendingPrompt() {
+    if (this.pendingPromptExpiry !== void 0) {
+      clearTimeout(this.pendingPromptExpiry);
+      this.pendingPromptExpiry = void 0;
+    }
+    this.pendingPrompt = null;
   }
 };
 var tauriTavernAgentBridge = new TauriTavernAgentBridge();
@@ -906,7 +979,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.4";
+var EXTENSION_VERSION = "0.21.5";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -4002,11 +4075,12 @@ var BackgroundProcessingScheduler = class {
         this.onAgentRunStateChanged
       );
     }
-    const replyHandler = () => {
+    const replyHandler = (messageId) => {
       if (tauriTavernAgentBridge.isRunActive()) {
         this.agentReplyObserved = true;
         return;
       }
+      tauriTavernAgentBridge.captureCompletedStandardPrompt(getContext(), messageId);
       storyEchoTaskCoordinator.releaseForegroundLease("assistant-message-received");
       this.schedule();
     };
@@ -4648,6 +4722,9 @@ var notify = {
 
 // src/prompt/itemization.ts
 var ITEMIZED_PROMPTS_MODULE_URL = "/scripts/itemized-prompts.js";
+var HOST_LIB_MODULE_URL = "/lib.js";
+var TAURI_PROMPT_STORAGE_NAME = "SillyTavern_Prompts";
+var TAURI_PROMPT_RECORD_PREFIX = "tt_prompts_record:";
 var CATEGORY_ORDER = [
   "system",
   "character",
@@ -4664,16 +4741,36 @@ async function loadItemizedPromptsModule() {
     ITEMIZED_PROMPTS_MODULE_URL
   );
 }
+var tauriPromptStoragePromise = null;
+async function loadTauriItemizedPromptRecord(chatId, recordId) {
+  if (!tauriPromptStoragePromise) {
+    tauriPromptStoragePromise = import(
+      /* @vite-ignore */
+      HOST_LIB_MODULE_URL
+    ).then((module) => module.localforage?.createInstance({ name: TAURI_PROMPT_STORAGE_NAME }) ?? null).catch(() => null);
+  }
+  const storage = await tauriPromptStoragePromise;
+  if (!storage) {
+    return null;
+  }
+  const value = await storage.getItem(
+    `${TAURI_PROMPT_RECORD_PREFIX}${chatId}:${recordId}`
+  );
+  return isRecord7(value) ? value : null;
+}
 function finiteTokens(value) {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
 }
-function messageIdValue(value) {
+function messageIdValue2(value) {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isInteger(number) && number >= 0 ? number : null;
 }
 function stringValue2(value) {
   return typeof value === "string" ? value : "";
+}
+function isRecord7(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function promptText(value) {
   if (typeof value === "string") {
@@ -4750,13 +4847,27 @@ function latestRecord(value, latestChatMessageId) {
       continue;
     }
     const record = candidate;
-    const messageId = messageIdValue(record.mesId);
+    const messageId = messageIdValue2(record.mesId);
     if (messageId === null || messageId > latestChatMessageId) {
       continue;
     }
     return record;
   }
   return null;
+}
+async function resolveItemizedPromptRecord(candidate, chatId, recordLoader) {
+  if ("rawPrompt" in candidate || "finalPrompt" in candidate) {
+    return candidate;
+  }
+  const recordId = stringValue2(candidate["recordId"]).trim();
+  if (!recordId) {
+    return candidate;
+  }
+  try {
+    return await recordLoader(chatId, recordId);
+  } catch {
+    return null;
+  }
 }
 function categoryList(values, total) {
   const normalizedTotal = Math.max(0, Math.round(total));
@@ -4860,7 +4971,7 @@ async function buildBreakdown(record, context) {
   const mainApi = stringValue2(record["main_api"]);
   const storedTotal = finiteTokens(record["oaiTotalTokens"]);
   const hasChatCompletionBreakdown = mainApi === "openai" && storedTotal > 0;
-  const messageId = messageIdValue(record.mesId);
+  const messageId = messageIdValue2(record.mesId);
   if (messageId === null) {
     return null;
   }
@@ -5014,7 +5125,7 @@ async function buildBreakdown(record, context) {
     agentContextTrimmed: false
   };
 }
-async function buildAgentBreakdown(snapshot, context) {
+async function buildTauriBreakdown(snapshot, context, origin) {
   const texts = {
     system: [],
     "recent-context": [],
@@ -5105,13 +5216,14 @@ async function buildAgentBreakdown(snapshot, context) {
     agentProfile: snapshot.profile,
     detailed: false,
     estimated: true,
-    origin: "tauritavern-agent",
+    origin,
     totalMeasured: measuredTotal !== null,
-    agentContextTrimmed: snapshot.storyEchoTrimmedByAgentAssembly
+    agentContextTrimmed: origin === "tauritavern-agent" && snapshot.storyEchoTrimmedByAgentAssembly
   };
 }
-function agentSnapshotSignature(snapshot) {
+function tauriSnapshotSignature(snapshot, origin) {
   return JSON.stringify([
+    origin,
     snapshot.actualInputTokens,
     snapshot.api,
     snapshot.model,
@@ -5120,9 +5232,10 @@ function agentSnapshotSignature(snapshot) {
   ]);
 }
 var PromptItemizationService = class {
-  constructor(loader = loadItemizedPromptsModule, agentPrompts = tauriTavernAgentBridge) {
+  constructor(loader = loadItemizedPromptsModule, agentPrompts = tauriTavernAgentBridge, recordLoader = loadTauriItemizedPromptRecord) {
     this.loader = loader;
     this.agentPrompts = agentPrompts;
+    this.recordLoader = recordLoader;
   }
   cachedAgentSnapshot = null;
   cachedAgentSignature = "";
@@ -5152,8 +5265,9 @@ var PromptItemizationService = class {
     }
     const agentSnapshot = this.agentPrompts.promptForLatestMessage(context);
     if (agentSnapshot) {
-      return this.latestAgent(agentSnapshot, context);
+      return this.latestTauri(agentSnapshot, context, "tauritavern-agent");
     }
+    const standardSnapshot = this.agentPrompts.standardPromptForLatestMessage?.(context);
     this.clearAgentCache();
     if (this.agentPrompts.latestMessageBelongsToAgent?.(context)) {
       this.clearCache();
@@ -5161,8 +5275,29 @@ var PromptItemizationService = class {
     }
     const module = await this.loader();
     const records = Array.isArray(module.itemizedPrompts) ? module.itemizedPrompts : [];
-    const record = latestRecord(records, context.chat.length - 1);
+    const candidate = latestRecord(records, context.chat.length - 1);
+    const candidateMessageId = candidate ? messageIdValue2(candidate.mesId) : null;
+    if (!candidate || standardSnapshot && candidateMessageId !== standardSnapshot.messageId) {
+      if (standardSnapshot) {
+        return this.latestTauri(standardSnapshot, context, "tauritavern-standard");
+      }
+      this.cachedChatId = chatId;
+      this.cachedChatLength = context.chat.length;
+      this.cachedItemCount = records.length;
+      this.cachedRecord = null;
+      this.cachedRawPrompt = void 0;
+      this.cachedBreakdown = null;
+      return null;
+    }
+    const record = await resolveItemizedPromptRecord(
+      candidate,
+      chatId,
+      this.recordLoader
+    );
     if (!record) {
+      if (standardSnapshot) {
+        return this.latestTauri(standardSnapshot, context, "tauritavern-standard");
+      }
       this.cachedChatId = chatId;
       this.cachedChatLength = context.chat.length;
       this.cachedItemCount = records.length;
@@ -5219,8 +5354,8 @@ var PromptItemizationService = class {
     this.cachedBreakdown = null;
     this.clearPending();
   }
-  async latestAgent(snapshot, context) {
-    const signature = agentSnapshotSignature(snapshot);
+  async latestTauri(snapshot, context, origin) {
+    const signature = tauriSnapshotSignature(snapshot, origin);
     const chatLength = context.chat.length;
     if (snapshot === this.cachedAgentSnapshot && signature === this.cachedAgentSignature && chatLength === this.cachedAgentChatLength) {
       return this.cachedAgentBreakdown;
@@ -5228,7 +5363,7 @@ var PromptItemizationService = class {
     if (snapshot === this.pendingAgentSnapshot && signature === this.pendingAgentSignature && chatLength === this.pendingAgentChatLength && this.pendingAgentBreakdown) {
       return this.pendingAgentBreakdown;
     }
-    const pending = buildAgentBreakdown(snapshot, context);
+    const pending = buildTauriBreakdown(snapshot, context, origin);
     this.pendingAgentSnapshot = snapshot;
     this.pendingAgentSignature = signature;
     this.pendingAgentChatLength = chatLength;
@@ -5246,7 +5381,8 @@ var PromptItemizationService = class {
       return breakdown;
     }
     this.clearPendingAgent();
-    if (this.agentPrompts.promptForLatestMessage(context) !== snapshot) {
+    const currentSnapshot = origin === "tauritavern-agent" ? this.agentPrompts.promptForLatestMessage(context) : this.agentPrompts.standardPromptForLatestMessage?.(context) ?? null;
+    if (currentSnapshot !== snapshot) {
       return null;
     }
     this.cachedAgentSnapshot = snapshot;
@@ -5468,7 +5604,8 @@ var PromptTokenStatsCard = class {
   }
   renderBreakdown(panel, breakdown) {
     const agentPrompt = breakdown.origin === "tauritavern-agent";
-    element(panel, "#story-echo-prompt-stats-subtitle").textContent = agentPrompt ? `\u6D88\u606F #${breakdown.messageId} \xB7 Agent \u9996\u8F6E${breakdown.totalMeasured ? "\u5B9E\u6D4B\u603B\u91CF / \u5206\u7C7B\u4F30\u7B97" : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}` : `\u6D88\u606F #${breakdown.messageId} \xB7 ${breakdown.detailed ? `\u9152\u9986\u5206\u7C7B\u660E\u7EC6${breakdown.estimated ? "\uFF08\u90E8\u5206\u4F30\u7B97\uFF09" : ""}` : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}`;
+    const standardTauriPrompt = breakdown.origin === "tauritavern-standard";
+    element(panel, "#story-echo-prompt-stats-subtitle").textContent = agentPrompt ? `\u6D88\u606F #${breakdown.messageId} \xB7 Agent \u9996\u8F6E${breakdown.totalMeasured ? "\u5B9E\u6D4B\u603B\u91CF / \u5206\u7C7B\u4F30\u7B97" : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}` : standardTauriPrompt ? `\u6D88\u606F #${breakdown.messageId} \xB7 TauriTavern \u666E\u901A\u8BF7\u6C42\u6587\u672C\u4F30\u7B97` : `\u6D88\u606F #${breakdown.messageId} \xB7 ${breakdown.detailed ? `\u9152\u9986\u5206\u7C7B\u660E\u7EC6${breakdown.estimated ? "\uFF08\u90E8\u5206\u4F30\u7B97\uFF09" : ""}` : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}`;
     element(panel, "#story-echo-prompt-stats-total").textContent = `${breakdown.totalTokens.toLocaleString()} Token`;
     element(panel, "#story-echo-prompt-stats-empty").hidden = true;
     element(panel, "#story-echo-prompt-stats-content").hidden = false;
@@ -5495,6 +5632,8 @@ var PromptTokenStatsCard = class {
         measurement,
         "\u8FD9\u91CC\u53EA\u7EDF\u8BA1\u9996\u6B21\u6A21\u578B\u8C03\u7528\uFF0C\u4E0D\u5305\u542B\u540E\u7EED\u5DE5\u5177\u5FAA\u73AF\u6216\u5B50\u4EE3\u7406\u8C03\u7528\u3002"
       ].filter(Boolean).join(" ");
+    } else if (standardTauriPrompt) {
+      note.textContent = "\u5F53\u524D\u603B\u91CF\u4E0E\u5206\u7C7B\u6309 TauriTavern \u666E\u901A\u751F\u6210\u6700\u7EC8\u6D88\u606F\u548C\u5DE5\u5177\u5B9A\u4E49\u5FEB\u7167\u4F30\u7B97\uFF1B\u6D88\u606F\u89D2\u8272\u3001\u6A21\u677F\u53CA\u5E8F\u5217\u5316\u5F00\u9500\u53EF\u80FD\u4EA7\u751F\u5C11\u91CF\u5DEE\u5F02\u3002";
     } else {
       note.textContent = breakdown.detailed ? `\u603B\u91CF\u53D6\u81EA SillyTavern \u6700\u8FD1\u4E00\u6B21\u63D0\u793A\u8BCD\u660E\u7EC6\uFF1BStoryEcho \u6807\u7B7E${breakdown.estimated ? "\u5728\u9152\u9986 Tokenizer \u4E0D\u53EF\u7528\u65F6\u91C7\u7528\u672C\u5730\u4F30\u7B97" : "\u4F7F\u7528\u9152\u9986\u5F53\u524D Tokenizer \u8BA1\u6570"}\u3002\u6D88\u606F\u89D2\u8272\u3001\u6A21\u677F\u548C\u5C11\u91CF\u65E0\u6CD5\u6807\u6CE8\u7684\u5F00\u9500\u4F1A\u5F52\u5165\u6240\u5C5E\u5927\u7C7B\u6216\u201C\u672A\u5206\u7C7B\u201D\u3002` : "SillyTavern \u672A\u4FDD\u5B58\u8FD9\u4E00\u8F6E\u7684\u5B8C\u6574\u5206\u7C7B\u8BA1\u6570\uFF0C\u5F53\u524D\u6309\u6700\u7EC8\u63D0\u793A\u8BCD\u4E2D\u7684\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97\uFF1B\u201C\u2014\u201D\u8868\u793A\u6700\u8FD1\u539F\u6587\u65E0\u6CD5\u4ECE\u5408\u5E76\u8BF7\u6C42\u4E2D\u53EF\u9760\u5206\u79BB\u3002";
     }

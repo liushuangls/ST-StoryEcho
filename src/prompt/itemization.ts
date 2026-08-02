@@ -3,6 +3,8 @@ import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import {
   tauriTavernAgentBridge,
   type TauriAgentPromptSnapshot,
+  type TauriPromptSnapshot,
+  type TauriStandardPromptSnapshot,
 } from '../platform/tauritavern-agent';
 import { estimateTokens } from './render';
 
@@ -40,7 +42,10 @@ export interface LatestPromptTokenBreakdown {
   agentProfile: string;
   detailed: boolean;
   estimated: boolean;
-  origin: 'sillytavern-itemization' | 'tauritavern-agent';
+  origin:
+    | 'sillytavern-itemization'
+    | 'tauritavern-agent'
+    | 'tauritavern-standard';
   totalMeasured: boolean;
   agentContextTrimmed: boolean;
 }
@@ -58,8 +63,26 @@ type ItemizedPromptsLoader = () => Promise<ItemizedPromptsModule>;
 
 interface AgentPromptLookup {
   promptForLatestMessage(context: SillyTavernContext): TauriAgentPromptSnapshot | null;
+  standardPromptForLatestMessage?(
+    context: SillyTavernContext,
+  ): TauriStandardPromptSnapshot | null;
   latestMessageBelongsToAgent?(context: SillyTavernContext): boolean;
 }
+
+interface LocalForageStorage {
+  getItem<T>(key: string): Promise<T | null>;
+}
+
+interface LocalForageModule {
+  localforage?: {
+    createInstance(options: { name: string }): LocalForageStorage;
+  };
+}
+
+type ItemizedPromptRecordLoader = (
+  chatId: string,
+  recordId: string,
+) => Promise<ItemizedPromptRecord | null>;
 
 interface CountedText {
   tokens: number;
@@ -72,6 +95,9 @@ interface AllocationSeed<T extends string> {
 }
 
 const ITEMIZED_PROMPTS_MODULE_URL = '/scripts/itemized-prompts.js';
+const HOST_LIB_MODULE_URL = '/lib.js';
+const TAURI_PROMPT_STORAGE_NAME = 'SillyTavern_Prompts';
+const TAURI_PROMPT_RECORD_PREFIX = 'tt_prompts_record:';
 const CATEGORY_ORDER: readonly PromptTokenCategoryId[] = [
   'system',
   'character',
@@ -87,6 +113,29 @@ async function loadItemizedPromptsModule(): Promise<ItemizedPromptsModule> {
   return import(/* @vite-ignore */ ITEMIZED_PROMPTS_MODULE_URL) as Promise<ItemizedPromptsModule>;
 }
 
+let tauriPromptStoragePromise: Promise<LocalForageStorage | null> | null = null;
+
+async function loadTauriItemizedPromptRecord(
+  chatId: string,
+  recordId: string,
+): Promise<ItemizedPromptRecord | null> {
+  if (!tauriPromptStoragePromise) {
+    tauriPromptStoragePromise = (
+      import(/* @vite-ignore */ HOST_LIB_MODULE_URL) as Promise<LocalForageModule>
+    ).then((module) => (
+      module.localforage?.createInstance({ name: TAURI_PROMPT_STORAGE_NAME }) ?? null
+    )).catch(() => null);
+  }
+  const storage = await tauriPromptStoragePromise;
+  if (!storage) {
+    return null;
+  }
+  const value = await storage.getItem<unknown>(
+    `${TAURI_PROMPT_RECORD_PREFIX}${chatId}:${recordId}`,
+  );
+  return isRecord(value) ? value : null;
+}
+
 function finiteTokens(value: unknown): number {
   const number = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
@@ -99,6 +148,10 @@ function messageIdValue(value: unknown): number | null {
 
 function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function promptText(value: unknown): string {
@@ -199,6 +252,27 @@ function latestRecord(
     return record;
   }
   return null;
+}
+
+async function resolveItemizedPromptRecord(
+  candidate: ItemizedPromptRecord,
+  chatId: string,
+  recordLoader: ItemizedPromptRecordLoader,
+): Promise<ItemizedPromptRecord | null> {
+  if ('rawPrompt' in candidate || 'finalPrompt' in candidate) {
+    return candidate;
+  }
+  const recordId = stringValue(candidate['recordId']).trim();
+  if (!recordId) {
+    return candidate;
+  }
+  try {
+    return await recordLoader(chatId, recordId);
+  } catch {
+    // TauriTavern keeps full prompt records in lazy localforage storage.
+    // Diagnostics remain fail-open if that optional storage cannot be read.
+    return null;
+  }
 }
 
 function categoryList(values: Partial<Record<PromptTokenCategoryId, number>>, total: number): PromptTokenCategory[] {
@@ -478,9 +552,10 @@ async function buildBreakdown(
   };
 }
 
-async function buildAgentBreakdown(
-  snapshot: TauriAgentPromptSnapshot,
+async function buildTauriBreakdown(
+  snapshot: TauriPromptSnapshot,
   context: SillyTavernContext,
+  origin: 'tauritavern-agent' | 'tauritavern-standard',
 ): Promise<LatestPromptTokenBreakdown | null> {
   const texts: Record<
     'system' | 'recent-context' | 'story-echo-summary' | 'other-prompts',
@@ -585,14 +660,19 @@ async function buildAgentBreakdown(
     agentProfile: snapshot.profile,
     detailed: false,
     estimated: true,
-    origin: 'tauritavern-agent',
+    origin,
     totalMeasured: measuredTotal !== null,
-    agentContextTrimmed: snapshot.storyEchoTrimmedByAgentAssembly,
+    agentContextTrimmed: origin === 'tauritavern-agent' &&
+      snapshot.storyEchoTrimmedByAgentAssembly,
   };
 }
 
-function agentSnapshotSignature(snapshot: TauriAgentPromptSnapshot): string {
+function tauriSnapshotSignature(
+  snapshot: TauriPromptSnapshot,
+  origin: 'tauritavern-agent' | 'tauritavern-standard',
+): string {
   return JSON.stringify([
+    origin,
     snapshot.actualInputTokens,
     snapshot.api,
     snapshot.model,
@@ -602,11 +682,11 @@ function agentSnapshotSignature(snapshot: TauriAgentPromptSnapshot): string {
 }
 
 export class PromptItemizationService {
-  private cachedAgentSnapshot: TauriAgentPromptSnapshot | null = null;
+  private cachedAgentSnapshot: TauriPromptSnapshot | null = null;
   private cachedAgentSignature = '';
   private cachedAgentChatLength = -1;
   private cachedAgentBreakdown: LatestPromptTokenBreakdown | null = null;
-  private pendingAgentSnapshot: TauriAgentPromptSnapshot | null = null;
+  private pendingAgentSnapshot: TauriPromptSnapshot | null = null;
   private pendingAgentSignature = '';
   private pendingAgentChatLength = -1;
   private pendingAgentBreakdown: Promise<LatestPromptTokenBreakdown | null> | null = null;
@@ -626,6 +706,8 @@ export class PromptItemizationService {
   constructor(
     private readonly loader: ItemizedPromptsLoader = loadItemizedPromptsModule,
     private readonly agentPrompts: AgentPromptLookup = tauriTavernAgentBridge,
+    private readonly recordLoader: ItemizedPromptRecordLoader =
+      loadTauriItemizedPromptRecord,
   ) {}
 
   async latest(context = getContext()): Promise<LatestPromptTokenBreakdown | null> {
@@ -636,8 +718,9 @@ export class PromptItemizationService {
     }
     const agentSnapshot = this.agentPrompts.promptForLatestMessage(context);
     if (agentSnapshot) {
-      return this.latestAgent(agentSnapshot, context);
+      return this.latestTauri(agentSnapshot, context, 'tauritavern-agent');
     }
+    const standardSnapshot = this.agentPrompts.standardPromptForLatestMessage?.(context);
     this.clearAgentCache();
     if (this.agentPrompts.latestMessageBelongsToAgent?.(context)) {
       // TauriTavern Agent bypasses SillyTavern's itemized-prompt store. After
@@ -648,8 +731,32 @@ export class PromptItemizationService {
     }
     const module = await this.loader();
     const records = Array.isArray(module.itemizedPrompts) ? module.itemizedPrompts : [];
-    const record = latestRecord(records, context.chat.length - 1);
+    const candidate = latestRecord(records, context.chat.length - 1);
+    const candidateMessageId = candidate ? messageIdValue(candidate.mesId) : null;
+    if (
+      !candidate ||
+      (standardSnapshot && candidateMessageId !== standardSnapshot.messageId)
+    ) {
+      if (standardSnapshot) {
+        return this.latestTauri(standardSnapshot, context, 'tauritavern-standard');
+      }
+      this.cachedChatId = chatId;
+      this.cachedChatLength = context.chat.length;
+      this.cachedItemCount = records.length;
+      this.cachedRecord = null;
+      this.cachedRawPrompt = undefined;
+      this.cachedBreakdown = null;
+      return null;
+    }
+    const record = await resolveItemizedPromptRecord(
+      candidate,
+      chatId,
+      this.recordLoader,
+    );
     if (!record) {
+      if (standardSnapshot) {
+        return this.latestTauri(standardSnapshot, context, 'tauritavern-standard');
+      }
       this.cachedChatId = chatId;
       this.cachedChatLength = context.chat.length;
       this.cachedItemCount = records.length;
@@ -722,11 +829,12 @@ export class PromptItemizationService {
     this.clearPending();
   }
 
-  private async latestAgent(
-    snapshot: TauriAgentPromptSnapshot,
+  private async latestTauri(
+    snapshot: TauriPromptSnapshot,
     context: SillyTavernContext,
+    origin: 'tauritavern-agent' | 'tauritavern-standard',
   ): Promise<LatestPromptTokenBreakdown | null> {
-    const signature = agentSnapshotSignature(snapshot);
+    const signature = tauriSnapshotSignature(snapshot, origin);
     const chatLength = context.chat.length;
     if (
       snapshot === this.cachedAgentSnapshot &&
@@ -743,7 +851,7 @@ export class PromptItemizationService {
     ) {
       return this.pendingAgentBreakdown;
     }
-    const pending = buildAgentBreakdown(snapshot, context);
+    const pending = buildTauriBreakdown(snapshot, context, origin);
     this.pendingAgentSnapshot = snapshot;
     this.pendingAgentSignature = signature;
     this.pendingAgentChatLength = chatLength;
@@ -761,7 +869,10 @@ export class PromptItemizationService {
       return breakdown;
     }
     this.clearPendingAgent();
-    if (this.agentPrompts.promptForLatestMessage(context) !== snapshot) {
+    const currentSnapshot = origin === 'tauritavern-agent'
+      ? this.agentPrompts.promptForLatestMessage(context)
+      : this.agentPrompts.standardPromptForLatestMessage?.(context) ?? null;
+    if (currentSnapshot !== snapshot) {
       return null;
     }
     this.cachedAgentSnapshot = snapshot;

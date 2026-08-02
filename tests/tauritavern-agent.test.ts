@@ -212,11 +212,12 @@ describe('TauriTavern Agent compatibility bridge', () => {
     target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {
       activeRun: null,
     }));
+    bridge.beginStoryEchoPreparation('chat-id');
     handlers.get('completion-settings-ready')?.({
       messages: [{ role: 'user', content: 'expires' }],
       tools: [{ callback: () => undefined }],
     });
-    vi.advanceTimersByTime(2 * 60 * 1_000);
+    vi.advanceTimersByTime(10 * 60 * 1_000);
     target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {
       activeRun: { runId: 'expired-run' },
     }));
@@ -231,6 +232,7 @@ describe('TauriTavern Agent compatibility bridge', () => {
     const bridge = new TauriTavernAgentBridge(target);
     bridge.register(context);
 
+    bridge.beginStoryEchoPreparation('chat-id');
     handlers.get('completion-settings-ready')?.({
       messages: [{
         role: 'system',
@@ -262,6 +264,7 @@ describe('TauriTavern Agent compatibility bridge', () => {
     for (let index = 2; index <= 6; index += 1) {
       const runId = `run-${index}`;
       delete context.chat.at(-1)!.extra;
+      bridge.beginStoryEchoPreparation('chat-id');
       handlers.get('completion-settings-ready')?.({
         messages: [{ role: 'user', content: `prompt-${index}` }],
       });
@@ -290,6 +293,7 @@ describe('TauriTavern Agent compatibility bridge', () => {
     const bridge = new TauriTavernAgentBridge(target);
     bridge.register(context);
 
+    bridge.beginStoryEchoPreparation('chat-id');
     handlers.get('completion-settings-ready')?.({
       messages: [{ role: 'user', content: 'agent prompt' }],
     });
@@ -303,10 +307,70 @@ describe('TauriTavern Agent compatibility bridge', () => {
       lastEvent: { type: 'run_completed' },
     }));
 
+    bridge.beginStoryEchoPreparation('chat-id');
     handlers.get('completion-settings-ready')?.({
       messages: [{ role: 'user', content: 'normal swipe prompt' }],
     });
     expect(bridge.promptForLatestMessage(context)).toBeNull();
+    bridge.unregister();
+  });
+
+  it('does not pair an aborted request prompt with a later generation', () => {
+    const target = new EventTarget();
+    vi.stubGlobal('__TAURITAVERN__', { api: { agent: {} } });
+    const { context, handlers } = installContext();
+    const bridge = new TauriTavernAgentBridge(target);
+    bridge.register(context);
+
+    bridge.beginStoryEchoPreparation('chat-id');
+    handlers.get('completion-settings-ready')?.({
+      messages: [{ role: 'user', content: 'aborted prompt' }],
+    });
+    bridge.beginStoryEchoPreparation('chat-id');
+
+    expect(bridge.captureCompletedStandardPrompt(context, 1)).toBe(false);
+    target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {
+      activeRun: { runId: 'later-run' },
+    }));
+    expect(bridge.promptForLatestMessage(context)).toBeNull();
+    bridge.unregister();
+  });
+
+  it('captures a normal TauriTavern request and overrides residual Agent metadata', () => {
+    const target = new EventTarget();
+    vi.stubGlobal('__TAURITAVERN__', { api: { agent: {} } });
+    const { context, handlers } = installContext();
+    const bridge = new TauriTavernAgentBridge(target);
+    bridge.register(context);
+
+    bridge.beginStoryEchoPreparation('chat-id');
+    handlers.get('completion-settings-ready')?.({
+      messages: [{ role: 'user', content: 'agent swipe prompt' }],
+    });
+    target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {
+      activeRun: { runId: 'agent-swipe', generationType: 'swipe' },
+    }));
+    context.chat[1]!.extra = {
+      tauritavern: { agent: { runId: 'agent-swipe' } },
+    };
+    target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {
+      activeRun: null,
+      lastEvent: { type: 'run_completed' },
+    }));
+
+    bridge.beginStoryEchoPreparation('chat-id');
+    handlers.get('completion-settings-ready')?.({
+      messages: [{ role: 'user', content: 'ordinary swipe prompt' }],
+      model: 'ordinary-model',
+    });
+    expect(bridge.captureCompletedStandardPrompt(context, 1)).toBe(true);
+    expect(bridge.promptForLatestMessage(context)).toBeNull();
+    expect(bridge.latestMessageBelongsToAgent(context)).toBe(false);
+    expect(bridge.standardPromptForLatestMessage(context)).toMatchObject({
+      messageId: 1,
+      model: 'ordinary-model',
+      actualInputTokens: null,
+    });
     bridge.unregister();
   });
 });
