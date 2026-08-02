@@ -2,6 +2,10 @@ import { logger } from '../core/logger';
 import type { StoryEchoSettings, TavernChatMessage } from '../core/types';
 import { emitDiagnosticsUpdated } from '../debug/events';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import {
+  tauriTavernAgentBridge,
+  type TauriAgentRunStateChange,
+} from '../platform/tauritavern-agent';
 import { selectRecentWindow } from '../prompt/window';
 import {
   isBackgroundYieldForForegroundError,
@@ -63,6 +67,9 @@ export class BackgroundProcessingScheduler {
   private rerunRequested = false;
   private requestedChatId: string | null = null;
   private historyRequiresReconcile = true;
+  private agentReplyObserved = false;
+  private agentBridgeRegistered = false;
+  private unsubscribeAgentRunState: (() => void) | undefined;
   private registeredEvents: Array<{
     eventName: string;
     eventSource: NonNullable<ReturnType<typeof getContext>['eventSource']>;
@@ -97,7 +104,21 @@ export class BackgroundProcessingScheduler {
       return false;
     }
 
+    this.agentBridgeRegistered = tauriTavernAgentBridge.register(context);
+    if (this.agentBridgeRegistered) {
+      this.unsubscribeAgentRunState = tauriTavernAgentBridge.subscribeRunState(
+        this.onAgentRunStateChanged,
+      );
+    }
+
     const replyHandler = (): void => {
+      if (tauriTavernAgentBridge.isRunActive()) {
+        // An Agent workspace can commit several assistant messages before the
+        // run ends. Keep the foreground lease until the Agent terminal event
+        // so background summaries cannot overlap the remaining tool loop.
+        this.agentReplyObserved = true;
+        return;
+      }
       storyEchoTaskCoordinator.releaseForegroundLease('assistant-message-received');
       this.schedule();
     };
@@ -125,7 +146,7 @@ export class BackgroundProcessingScheduler {
       const handler = (): void => {
         this.historyRequiresReconcile = true;
         storyEchoTaskCoordinator.cancelRunningBackground(`聊天历史事件：${eventKey}`);
-        if (branchEvents.has(eventKey)) {
+        if (branchEvents.has(eventKey) && !tauriTavernAgentBridge.isRunActive()) {
           storyEchoTaskCoordinator.releaseForegroundLease(
             eventKey === 'CHAT_CHANGED' ? 'chat-changed' : 'message-swiped',
           );
@@ -169,12 +190,15 @@ export class BackgroundProcessingScheduler {
       registeredNames.add(renamedEventName);
     }
 
-    for (const eventKey of ['GENERATION_STOPPED', 'GENERATION_ABORTED']) {
+    for (const eventKey of ['GENERATION_STOPPED', 'GENERATION_ABORTED', 'GENERATION_ENDED']) {
       const eventName = eventTypes[eventKey];
       if (!eventName || registeredNames.has(eventName)) {
         continue;
       }
       const handler = (): void => {
+        if (tauriTavernAgentBridge.isRunActive()) {
+          return;
+        }
         storyEchoTaskCoordinator.releaseForegroundLease('generation-stopped');
       };
       eventSource.on(eventName, handler);
@@ -191,6 +215,13 @@ export class BackgroundProcessingScheduler {
   unregister(): void {
     this.stopped = true;
     this.rerunRequested = false;
+    this.unsubscribeAgentRunState?.();
+    this.unsubscribeAgentRunState = undefined;
+    if (this.agentBridgeRegistered) {
+      tauriTavernAgentBridge.unregister();
+    }
+    this.agentBridgeRegistered = false;
+    this.agentReplyObserved = false;
     storyEchoTaskCoordinator.cancelRunningBackground('StoryEcho扩展已停用');
     storyEchoTaskCoordinator.releaseForegroundLease('extension-disabled');
     if (this.timer !== undefined) {
@@ -205,6 +236,29 @@ export class BackgroundProcessingScheduler {
     this.historyRequiresReconcile = true;
     this.requestedChatId = null;
   }
+
+  private readonly onAgentRunStateChanged = (
+    change: TauriAgentRunStateChange,
+  ): void => {
+    if (change.activeRunId) {
+      if (change.activeRunId !== change.previousRunId) {
+        this.agentReplyObserved = false;
+      }
+      return;
+    }
+    if (!change.previousRunId) {
+      return;
+    }
+    const terminalType = change.terminalEventType || 'ended';
+    storyEchoTaskCoordinator.releaseForegroundLease(
+      `tauritavern-agent-${terminalType}`,
+    );
+    const shouldSchedule = this.agentReplyObserved;
+    this.agentReplyObserved = false;
+    if (shouldSchedule) {
+      this.schedule();
+    }
+  };
 
   schedule(): void {
     if (this.stopped) {

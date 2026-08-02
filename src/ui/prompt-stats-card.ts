@@ -126,6 +126,7 @@ function connectionText(value: LatestPromptTokenBreakdown): string {
     value.api ? `API：${value.api}` : '',
     value.model,
     value.preset ? `预设：${value.preset}` : '',
+    value.agentProfile ? `Agent Profile：${value.agentProfile}` : '',
     value.tokenizer ? `Tokenizer：${value.tokenizer}` : '',
   ].filter(Boolean).join(' · ');
 }
@@ -178,8 +179,12 @@ export class PromptTokenStatsCard {
   }
 
   private renderBreakdown(panel: HTMLElement, breakdown: LatestPromptTokenBreakdown): void {
-    element<HTMLElement>(panel, '#story-echo-prompt-stats-subtitle').textContent =
-      `消息 #${breakdown.messageId} · ${breakdown.detailed
+    const agentPrompt = breakdown.origin === 'tauritavern-agent';
+    element<HTMLElement>(panel, '#story-echo-prompt-stats-subtitle').textContent = agentPrompt
+      ? `消息 #${breakdown.messageId} · Agent 首轮${
+        breakdown.totalMeasured ? '实测总量 / 分类估算' : '可识别文本估算'
+      }`
+      : `消息 #${breakdown.messageId} · ${breakdown.detailed
         ? `酒馆分类明细${breakdown.estimated ? '（部分估算）' : ''}`
         : '可识别文本估算'}`;
     element<HTMLElement>(panel, '#story-echo-prompt-stats-total').textContent =
@@ -203,11 +208,26 @@ export class PromptTokenStatsCard {
     );
     const rows = element<HTMLElement>(panel, '#story-echo-token-rows');
     rows.replaceChildren(...breakdown.categories.map(categoryRow));
-    element<HTMLElement>(panel, '#story-echo-prompt-stats-note').textContent = breakdown.detailed
-      ? `总量取自 SillyTavern 最近一次提示词明细；StoryEcho 标签${breakdown.estimated
-        ? '在酒馆 Tokenizer 不可用时采用本地估算'
-        : '使用酒馆当前 Tokenizer 计数'}。消息角色、模板和少量无法标注的开销会归入所属大类或“未分类”。`
-      : 'SillyTavern 未保存这一轮的完整分类计数，当前按最终提示词中的可识别文本估算；“—”表示最近原文无法从合并请求中可靠分离。';
+    const note = element<HTMLElement>(panel, '#story-echo-prompt-stats-note');
+    if (agentPrompt) {
+      const warning = breakdown.agentContextTrimmed
+        ? '警告：Agent 启动前的二次组装移除了 StoryEcho 骨架/阶段总结；若 Profile 限制了“初始聊天历史楼数”，请设为 -1。'
+        : '';
+      const measurement = breakdown.totalMeasured
+        ? '总量取自 TauriTavern Agent 首轮模型调用的 provider usage；分类按启动前的最终消息与工具定义快照估算，差额归入“未分类”。'
+        : 'TauriTavern 尚未提供首轮 provider usage，当前只估算启动前最终消息与工具定义中的可识别文本。';
+      note.textContent = [
+        warning,
+        measurement,
+        '这里只统计首次模型调用，不包含后续工具循环或子代理调用。',
+      ].filter(Boolean).join(' ');
+    } else {
+      note.textContent = breakdown.detailed
+        ? `总量取自 SillyTavern 最近一次提示词明细；StoryEcho 标签${breakdown.estimated
+          ? '在酒馆 Tokenizer 不可用时采用本地估算'
+          : '使用酒馆当前 Tokenizer 计数'}。消息角色、模板和少量无法标注的开销会归入所属大类或“未分类”。`
+        : 'SillyTavern 未保存这一轮的完整分类计数，当前按最终提示词中的可识别文本估算；“—”表示最近原文无法从合并请求中可靠分离。';
+    }
   }
 }
 

@@ -56,6 +56,12 @@ function chat(turns: number, endsWithAssistant = true): TavernChatMessage[] {
   return messages;
 }
 
+function customEvent(name: string, detail: unknown): Event {
+  const event = new Event(name);
+  Object.defineProperty(event, 'detail', { value: detail });
+  return event;
+}
+
 function installContext(
   messages: TavernChatMessage[],
   currentSettings: StoryEchoSettings,
@@ -85,6 +91,8 @@ function installContext(
       MESSAGE_EDITED: 'edited',
       CHAT_RENAMED: 'renamed',
       GENERATION_STOPPED: 'stopped',
+      GENERATION_ENDED: 'ended',
+      CHAT_COMPLETION_SETTINGS_READY: 'completion-settings-ready',
     },
   };
   vi.stubGlobal('SillyTavern', { getContext: () => context });
@@ -180,5 +188,42 @@ describe('BackgroundProcessingScheduler', () => {
       }),
     });
     expect(new BackgroundProcessingScheduler().register({ silent: true })).toBe(false);
+  });
+
+  it('keeps the foreground lease through Agent intermediate commits', async () => {
+    vi.useFakeTimers();
+    const target = new EventTarget();
+    vi.stubGlobal('addEventListener', target.addEventListener.bind(target));
+    vi.stubGlobal('removeEventListener', target.removeEventListener.bind(target));
+    vi.stubGlobal('__TAURITAVERN__', {
+      api: { agent: { readModelTurn: vi.fn() } },
+    });
+    const current = settings({ enabled: true });
+    const { handlers } = installContext(chat(3), current);
+    const scheduler = new BackgroundProcessingScheduler();
+    expect(scheduler.register()).toBe(true);
+    vi.clearAllTimers();
+
+    await storyEchoTaskCoordinator.enqueueForeground(
+      'Agent上下文准备',
+      async () => true,
+      { holdForegroundLease: (prepared) => prepared },
+    );
+    target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {
+      activeRun: { runId: 'run-1', generationType: 'normal' },
+    }));
+
+    handlers.get('received')?.();
+    handlers.get('stopped')?.();
+    handlers.get('changed')?.();
+    expect(storyEchoTaskCoordinator.snapshot().foregroundLeaseActive).toBe(true);
+
+    target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {
+      activeRun: null,
+      lastEvent: { type: 'run_completed' },
+    }));
+    expect(storyEchoTaskCoordinator.snapshot().foregroundLeaseActive).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+    scheduler.unregister();
   });
 });

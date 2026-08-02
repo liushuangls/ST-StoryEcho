@@ -139,6 +139,424 @@ async function getRequestHeaders(context = getContext()) {
   return scriptModule.getRequestHeaders();
 }
 
+// src/platform/tauritavern-agent.ts
+var AGENT_RUN_STATE_CHANGED_EVENT = "tauritavern-agent-run-state-changed";
+var AGENT_RUN_EVENT = "tauritavern-agent-run-event";
+var PROMPT_CAPTURE_MAX_AGE_MS = 2 * 60 * 1e3;
+var MAX_CAPTURED_RUNS = 4;
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function stringValue(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function finiteTokenCount(value) {
+  if (value === null || value === void 0 || typeof value === "boolean" || typeof value === "string" && !value.trim()) {
+    return null;
+  }
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.round(number) : null;
+}
+function nestedRecord(value, key) {
+  return isRecord(value) && isRecord(value[key]) ? value[key] : null;
+}
+function agentUsageInputTokens(value) {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const usage = nestedRecord(value, "usage") ?? value;
+  const nestedUsage = nestedRecord(usage, "usageMetadata") ?? usage;
+  for (const key of ["total_input_tokens", "totalInputTokens"]) {
+    const tokens = finiteTokenCount(nestedUsage[key]);
+    if (tokens !== null) {
+      return tokens;
+    }
+  }
+  for (const key of ["prompt_tokens", "promptTokens", "prompt_token_count", "promptTokenCount"]) {
+    const tokens = finiteTokenCount(nestedUsage[key]);
+    if (tokens !== null) {
+      return tokens;
+    }
+  }
+  for (const key of ["input_tokens", "inputTokens"]) {
+    const inputTokens = finiteTokenCount(nestedUsage[key]);
+    if (inputTokens === null) {
+      continue;
+    }
+    const cacheCreation = finiteTokenCount(
+      nestedUsage["cache_creation_input_tokens"] ?? nestedUsage["cacheCreationInputTokens"]
+    ) ?? 0;
+    const cacheRead = finiteTokenCount(
+      nestedUsage["cache_read_input_tokens"] ?? nestedUsage["cacheReadInputTokens"]
+    ) ?? 0;
+    return inputTokens + cacheCreation + cacheRead;
+  }
+  return null;
+}
+function agentRunId(value) {
+  if (!isRecord(value)) {
+    return "";
+  }
+  return stringValue(value["runId"] ?? value["run_id"]);
+}
+function agentGenerationType(value) {
+  if (!isRecord(value)) {
+    return "normal";
+  }
+  return stringValue(value["generationType"] ?? value["generation_type"]) || "normal";
+}
+function eventDetail(event) {
+  const detail = event.detail;
+  return isRecord(detail) ? detail : {};
+}
+function messageAgentRunId(message) {
+  const tauri = nestedRecord(message?.extra, "tauritavern");
+  const agent = nestedRecord(tauri, "agent");
+  return stringValue(agent?.["runId"] ?? agent?.["run_id"]);
+}
+function messageAgentProfileId(message) {
+  const tauri = nestedRecord(message?.extra, "tauritavern");
+  const agent = nestedRecord(tauri, "agent");
+  return stringValue(agent?.["profileId"] ?? agent?.["profile_id"]);
+}
+function promptSurface(payload) {
+  if (!isRecord(payload) || !Array.isArray(payload["messages"])) {
+    return null;
+  }
+  return {
+    messages: payload["messages"],
+    toolDefinitions: Array.isArray(payload["tools"]) ? payload["tools"] : [],
+    api: stringValue(payload["chat_completion_source"] ?? payload["chatCompletionSource"]),
+    model: stringValue(payload["model"]),
+    profile: stringValue(payload["agent_profile_id"] ?? payload["agentProfileId"])
+  };
+}
+function clonePromptSurface(surface) {
+  let messages;
+  try {
+    messages = structuredClone(surface.messages);
+  } catch {
+    return null;
+  }
+  let toolDefinitions = [];
+  if (surface.toolDefinitions.length > 0) {
+    try {
+      toolDefinitions = structuredClone(surface.toolDefinitions);
+    } catch {
+      toolDefinitions = [];
+    }
+  }
+  return {
+    messages,
+    toolDefinitions,
+    api: surface.api,
+    model: surface.model,
+    profile: surface.profile
+  };
+}
+function storyEchoSummaryCount(messages) {
+  return messages.reduce((total, message) => {
+    if (!isRecord(message)) {
+      return total;
+    }
+    let serialized = "";
+    try {
+      serialized = typeof message["content"] === "string" ? message["content"] : JSON.stringify(message["content"] ?? "");
+    } catch {
+      return total;
+    }
+    const matches = serialized.match(/<story_echo_(?:skeleton|summary)>/giu);
+    return total + (matches?.length ?? 0);
+  }, 0);
+}
+function expectedMessageId(context, generationType) {
+  return generationType === "swipe" ? Math.max(0, context.chat.length - 1) : context.chat.length;
+}
+function currentAgentApi() {
+  return globalThis.__TAURITAVERN__?.api?.agent ?? null;
+}
+var TauriTavernAgentBridge = class {
+  constructor(eventTarget = globalThis) {
+    this.eventTarget = eventTarget;
+  }
+  registeredEventSource = null;
+  settingsEventName = "";
+  pendingPrompt = null;
+  pendingPromptExpiry;
+  storyEchoPreparation = null;
+  activeRunId = null;
+  snapshots = /* @__PURE__ */ new Map();
+  snapshotPromptSequences = /* @__PURE__ */ new Map();
+  usageReads = /* @__PURE__ */ new Set();
+  stateListeners = /* @__PURE__ */ new Set();
+  promptSequence = 0;
+  registered = false;
+  register(context) {
+    if (this.registered) {
+      return true;
+    }
+    if (!currentAgentApi()) {
+      return false;
+    }
+    const eventSource = context.eventSource;
+    const eventTypes = {
+      ...context.event_types ?? {},
+      ...context.eventTypes ?? {}
+    };
+    const settingsEventName = eventTypes["CHAT_COMPLETION_SETTINGS_READY"];
+    if (!eventSource || !settingsEventName) {
+      return false;
+    }
+    eventSource.on(settingsEventName, this.onCompletionSettingsReady);
+    this.eventTarget.addEventListener(AGENT_RUN_STATE_CHANGED_EVENT, this.onRunStateChanged);
+    this.eventTarget.addEventListener(AGENT_RUN_EVENT, this.onRunEvent);
+    this.registeredEventSource = eventSource;
+    this.settingsEventName = settingsEventName;
+    this.registered = true;
+    return true;
+  }
+  unregister() {
+    if (this.registeredEventSource && this.settingsEventName) {
+      const remove = this.registeredEventSource.off ?? this.registeredEventSource.removeListener;
+      remove?.call(
+        this.registeredEventSource,
+        this.settingsEventName,
+        this.onCompletionSettingsReady
+      );
+    }
+    if (this.registered) {
+      this.eventTarget.removeEventListener(
+        AGENT_RUN_STATE_CHANGED_EVENT,
+        this.onRunStateChanged
+      );
+      this.eventTarget.removeEventListener(AGENT_RUN_EVENT, this.onRunEvent);
+    }
+    this.registeredEventSource = null;
+    this.settingsEventName = "";
+    if (this.pendingPromptExpiry !== void 0) {
+      clearTimeout(this.pendingPromptExpiry);
+      this.pendingPromptExpiry = void 0;
+    }
+    this.pendingPrompt = null;
+    this.storyEchoPreparation = null;
+    this.activeRunId = null;
+    this.snapshots.clear();
+    this.snapshotPromptSequences.clear();
+    this.usageReads.clear();
+    this.stateListeners.clear();
+    this.promptSequence = 0;
+    this.registered = false;
+  }
+  isRunActive() {
+    return this.activeRunId !== null;
+  }
+  beginStoryEchoPreparation(chatId) {
+    this.storyEchoPreparation = chatId ? {
+      chatId,
+      preparedAt: Date.now(),
+      injectedBlockCount: 0
+    } : null;
+  }
+  markStoryEchoSummaryInjected(chatId, blockCount = 1) {
+    if (!chatId || !this.storyEchoPreparation || this.storyEchoPreparation.chatId !== chatId) {
+      return;
+    }
+    this.storyEchoPreparation.injectedBlockCount = Math.max(0, Math.floor(blockCount));
+  }
+  subscribeRunState(listener) {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  }
+  promptForLatestMessage(context) {
+    const chatId = getCurrentChatId(context) ?? "";
+    const latestMessageId = context.chat.length - 1;
+    if (!chatId || latestMessageId < 0) {
+      return null;
+    }
+    const messageRunId = messageAgentRunId(context.chat[latestMessageId]);
+    if (messageRunId) {
+      const snapshot = this.snapshots.get(messageRunId);
+      if (snapshot?.chatId !== chatId) {
+        return null;
+      }
+      snapshot.profile ||= messageAgentProfileId(context.chat[latestMessageId]);
+      return snapshot;
+    }
+    const candidates = [...this.snapshots.values()].filter((snapshot) => snapshot.chatId === chatId && snapshot.expectedMessageId === latestMessageId && this.snapshotPromptSequences.get(snapshot.runId) === this.promptSequence).sort((left, right) => right.capturedAt - left.capturedAt);
+    return candidates[0] ?? null;
+  }
+  latestMessageBelongsToAgent(context) {
+    return Boolean(messageAgentRunId(context.chat[context.chat.length - 1]));
+  }
+  onCompletionSettingsReady = (payload) => {
+    let context;
+    try {
+      context = globalThis.SillyTavern?.getContext();
+    } catch {
+      return;
+    }
+    const prompt = promptSurface(payload);
+    const chatId = context ? getCurrentChatId(context) ?? "" : "";
+    if (!chatId || !prompt) {
+      return;
+    }
+    this.promptSequence += 1;
+    this.pendingPrompt = {
+      chatId,
+      prompt,
+      capturedAt: Date.now(),
+      sequence: this.promptSequence
+    };
+    if (this.pendingPromptExpiry !== void 0) {
+      clearTimeout(this.pendingPromptExpiry);
+    }
+    const capturedPrompt = this.pendingPrompt;
+    this.pendingPromptExpiry = setTimeout(() => {
+      if (this.pendingPrompt === capturedPrompt) {
+        this.pendingPrompt = null;
+      }
+      this.pendingPromptExpiry = void 0;
+    }, PROMPT_CAPTURE_MAX_AGE_MS);
+  };
+  onRunStateChanged = (event) => {
+    const detail = eventDetail(event);
+    const activeRun = detail["activeRun"];
+    const nextRunId = agentRunId(activeRun);
+    const previousRunId = this.activeRunId;
+    this.activeRunId = nextRunId || null;
+    if (nextRunId) {
+      this.captureStartedRun(nextRunId, activeRun);
+    }
+    const terminalEvent = isRecord(detail["lastEvent"]) ? detail["lastEvent"] : {};
+    const change = {
+      activeRunId: this.activeRunId,
+      previousRunId,
+      terminalEventType: stringValue(terminalEvent["type"])
+    };
+    for (const listener of this.stateListeners) {
+      listener(change);
+    }
+  };
+  onRunEvent = (event) => {
+    const detail = eventDetail(event);
+    const runEvent = isRecord(detail["event"]) ? detail["event"] : {};
+    const runId = agentRunId(runEvent) || this.activeRunId || "";
+    const payload = isRecord(runEvent["payload"]) ? runEvent["payload"] : {};
+    if (stringValue(runEvent["type"]) === "profile_resolved") {
+      const snapshot = this.snapshots.get(runId);
+      if (snapshot) {
+        snapshot.profile = stringValue(payload["profileId"] ?? payload["profile_id"]) || snapshot.profile;
+      }
+      return;
+    }
+    if (stringValue(runEvent["type"]) !== "model_completed") {
+      return;
+    }
+    const round = finiteTokenCount(payload["round"]);
+    if (round !== 1) {
+      return;
+    }
+    if (!runId || !this.snapshots.has(runId) || this.usageReads.has(runId)) {
+      return;
+    }
+    this.usageReads.add(runId);
+    const invocationId = stringValue(payload["invocationId"] ?? payload["invocation_id"]);
+    void this.readFirstTurnUsage(runId, invocationId);
+  };
+  captureStartedRun(runId, activeRun) {
+    let context;
+    try {
+      context = globalThis.SillyTavern?.getContext();
+    } catch {
+      return;
+    }
+    if (!context) {
+      return;
+    }
+    const chatId = getCurrentChatId(context) ?? "";
+    const pending = this.pendingPrompt;
+    const preparation = this.storyEchoPreparation;
+    this.pendingPrompt = null;
+    this.storyEchoPreparation = null;
+    if (this.pendingPromptExpiry !== void 0) {
+      clearTimeout(this.pendingPromptExpiry);
+      this.pendingPromptExpiry = void 0;
+    }
+    const ageMs = pending ? Date.now() - pending.capturedAt : Number.POSITIVE_INFINITY;
+    if (!chatId || !pending || pending.chatId !== chatId || ageMs < 0 || ageMs > PROMPT_CAPTURE_MAX_AGE_MS) {
+      return;
+    }
+    const prompt = clonePromptSurface(pending.prompt);
+    if (!prompt) {
+      return;
+    }
+    const generationType = agentGenerationType(activeRun);
+    const preparationMatches = Boolean(
+      preparation && preparation.chatId === chatId && Date.now() - preparation.preparedAt <= PROMPT_CAPTURE_MAX_AGE_MS
+    );
+    const storyEchoTrimmedByAgentAssembly = Boolean(
+      preparationMatches && preparation?.injectedBlockCount && storyEchoSummaryCount(prompt.messages) < preparation.injectedBlockCount
+    );
+    const snapshot = {
+      runId,
+      chatId,
+      generationType,
+      expectedMessageId: expectedMessageId(context, generationType),
+      ...prompt,
+      capturedAt: Date.now(),
+      actualInputTokens: null,
+      storyEchoTrimmedByAgentAssembly
+    };
+    this.snapshots.set(runId, snapshot);
+    this.snapshotPromptSequences.set(runId, pending.sequence);
+    this.pruneSnapshots();
+    if (storyEchoTrimmedByAgentAssembly) {
+      logger.warn(
+        "TauriTavern Agent \u542F\u52A8\u524D\u7684\u4E8C\u6B21\u7EC4\u88C5\u79FB\u9664\u4E86StoryEcho\u9AA8\u67B6\u4E0E\u9636\u6BB5\u603B\u7ED3\uFF1B\u82E5Profile\u9650\u5236\u4E86\u521D\u59CB\u5386\u53F2\uFF0C\u8BF7\u5C06\u201C\u521D\u59CB\u804A\u5929\u5386\u53F2\u697C\u6570\u201D\u8BBE\u4E3A -1\u3002"
+      );
+    }
+    emitDiagnosticsUpdated();
+  }
+  async readFirstTurnUsage(runId, invocationId) {
+    const agentApi = currentAgentApi();
+    const readModelTurn = agentApi?.readModelTurn;
+    if (typeof readModelTurn !== "function") {
+      return;
+    }
+    try {
+      const result = await readModelTurn.call(agentApi, {
+        runId,
+        round: 1,
+        ...invocationId ? { invocationId } : {},
+        maxChars: 1
+      });
+      const snapshot = this.snapshots.get(runId);
+      if (!snapshot || !isRecord(result)) {
+        return;
+      }
+      const provider = isRecord(result["provider"]) ? result["provider"] : {};
+      snapshot.actualInputTokens = agentUsageInputTokens(provider["usage"]);
+      snapshot.api = stringValue(provider["source"]) || snapshot.api;
+      snapshot.model = stringValue(provider["model"]) || snapshot.model;
+      emitDiagnosticsUpdated();
+    } catch (error) {
+      logger.debug("\u8BFB\u53D6TauriTavern Agent\u9996\u8F6EToken\u7528\u91CF\u5931\u8D25\uFF0C\u5C06\u4FDD\u7559\u672C\u5730\u4F30\u7B97\u3002", error);
+    }
+  }
+  pruneSnapshots() {
+    while (this.snapshots.size > MAX_CAPTURED_RUNS) {
+      const oldestRunId = this.snapshots.keys().next().value;
+      if (!oldestRunId) {
+        return;
+      }
+      this.snapshots.delete(oldestRunId);
+      this.snapshotPromptSequences.delete(oldestRunId);
+      this.usageReads.delete(oldestRunId);
+    }
+  }
+};
+var tauriTavernAgentBridge = new TauriTavernAgentBridge();
+
 // src/prompt/window.ts
 function findCurrentInputIndex(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -488,7 +906,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.3";
+var EXTENSION_VERSION = "0.21.4";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -526,31 +944,31 @@ var DEFAULT_SETTINGS = Object.freeze({
 function cloneDefaults() {
   return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 }
-function isRecord(value) {
+function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function mergeKnown(defaults, stored) {
   if (Array.isArray(defaults)) {
     return Array.isArray(stored) ? stored : defaults;
   }
-  if (!isRecord(defaults)) {
+  if (!isRecord2(defaults)) {
     if (typeof defaults === "number") {
       return typeof stored === "number" && Number.isFinite(stored) ? stored : defaults;
     }
     return typeof stored === typeof defaults ? stored : defaults;
   }
-  const source = isRecord(stored) ? stored : {};
+  const source = isRecord2(stored) ? stored : {};
   return Object.fromEntries(Object.entries(defaults).map(([key, defaultValue]) => [
     key,
     mergeKnown(defaultValue, source[key])
   ]));
 }
 function migrateContextSettings(settings, stored) {
-  const root = isRecord(stored) ? stored : {};
-  const storedSummary = isRecord(root["summary"]) ? root["summary"] : {};
-  if (!isRecord(storedSummary["reference"])) {
-    const extraction = isRecord(root["extraction"]) ? root["extraction"] : {};
-    const reference = isRecord(extraction["reference"]) ? extraction["reference"] : {};
+  const root = isRecord2(stored) ? stored : {};
+  const storedSummary = isRecord2(root["summary"]) ? root["summary"] : {};
+  if (!isRecord2(storedSummary["reference"])) {
+    const extraction = isRecord2(root["extraction"]) ? root["extraction"] : {};
+    const reference = isRecord2(extraction["reference"]) ? extraction["reference"] : {};
     if (typeof reference["mode"] === "string") {
       settings.summary.reference.enabled = reference["mode"] === "character-world-info";
     }
@@ -559,8 +977,8 @@ function migrateContextSettings(settings, stored) {
     }
   }
   const storedVersion = Number(root["version"]);
-  const storedLlm = isRecord(root["llm"]) ? root["llm"] : {};
-  const storedCustom = isRecord(storedLlm["custom"]) ? storedLlm["custom"] : {};
+  const storedLlm = isRecord2(root["llm"]) ? root["llm"] : {};
+  const storedCustom = isRecord2(storedLlm["custom"]) ? storedLlm["custom"] : {};
   if ((!Number.isFinite(storedVersion) || storedVersion < 9) && Number(storedCustom["timeoutMs"]) === 6e4) {
     settings.llm.custom.timeoutMs = DEFAULT_SETTINGS.llm.custom.timeoutMs;
   }
@@ -1026,7 +1444,7 @@ function normalizeStorySkeletonText(raw, maxTokens) {
 // src/state/repository.ts
 var MAX_EDITED_SUMMARY_CHARACTERS = 64e3;
 var LEGACY_SUMMARY_UPDATED_AT = "1970-01-01T00:00:00.000Z";
-function isRecord2(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function finiteInteger(value, fallback) {
@@ -1053,7 +1471,7 @@ function createState(ownerChatId) {
   };
 }
 function normalizeStageSummaryEntry(value) {
-  if (!isRecord2(value)) {
+  if (!isRecord3(value)) {
     return null;
   }
   const text = typeof value["text"] === "string" ? value["text"].trim() : "";
@@ -1074,7 +1492,7 @@ function normalizeStageSummaryEntry(value) {
   };
 }
 function normalizeStageSummary(value) {
-  const stored = isRecord2(value) ? value : {};
+  const stored = isRecord3(value) ? value : {};
   const entries = [];
   const candidates = Array.isArray(stored["entries"]) ? stored["entries"] : [];
   let expectedStartMessageId = 0;
@@ -1108,7 +1526,7 @@ function normalizeStageSummary(value) {
   };
 }
 function normalizeStorySkeleton(value) {
-  const stored = isRecord2(value) ? value : {};
+  const stored = isRecord3(value) ? value : {};
   const text = typeof stored["text"] === "string" ? stored["text"].trim() : "";
   const coveredThroughMessageId = finiteInteger(stored["coveredThroughMessageId"], -1);
   if (!text || coveredThroughMessageId < 0) {
@@ -1129,7 +1547,7 @@ function normalizeStorySkeleton(value) {
   };
 }
 function normalizeInspection(value) {
-  if (!isRecord2(value) || typeof value["createdAt"] !== "string") {
+  if (!isRecord3(value) || typeof value["createdAt"] !== "string") {
     return void 0;
   }
   return {
@@ -1152,10 +1570,10 @@ function normalizeDebugTraces(value) {
     return [];
   }
   return value.flatMap((candidate) => {
-    if (!isRecord2(candidate) || typeof candidate["id"] !== "string" || typeof candidate["createdAt"] !== "string" || typeof candidate["message"] !== "string" || !["summary", "interceptor", "error"].includes(String(candidate["stage"]))) {
+    if (!isRecord3(candidate) || typeof candidate["id"] !== "string" || typeof candidate["createdAt"] !== "string" || typeof candidate["message"] !== "string" || !["summary", "interceptor", "error"].includes(String(candidate["stage"]))) {
       return [];
     }
-    const details = isRecord2(candidate["details"]) ? Object.fromEntries(Object.entries(candidate["details"]).flatMap(([key, detail]) => typeof detail === "string" || typeof detail === "number" || typeof detail === "boolean" || detail === null ? [[key, detail]] : [])) : void 0;
+    const details = isRecord3(candidate["details"]) ? Object.fromEntries(Object.entries(candidate["details"]).flatMap(([key, detail]) => typeof detail === "string" || typeof detail === "number" || typeof detail === "boolean" || detail === null ? [[key, detail]] : [])) : void 0;
     return [{
       id: candidate["id"],
       createdAt: candidate["createdAt"],
@@ -1166,7 +1584,7 @@ function normalizeDebugTraces(value) {
   }).slice(-50);
 }
 function isStoredState(value) {
-  return isRecord2(value) && (value["schemaVersion"] === 1 || value["schemaVersion"] === CHAT_STATE_VERSION) && typeof value["chatUuid"] === "string" && typeof value["ownerChatId"] === "string";
+  return isRecord3(value) && (value["schemaVersion"] === 1 || value["schemaVersion"] === CHAT_STATE_VERSION) && typeof value["chatUuid"] === "string" && typeof value["ownerChatId"] === "string";
 }
 function normalizeState(stored) {
   const inspection = normalizeInspection(stored["lastInspection"]);
@@ -1637,17 +2055,17 @@ async function withInternalGeneration(request, operation) {
 
 // src/llm/main-provider.ts
 var MAX_REQUEST_TIMEOUT_MS = 6e5;
-function isRecord3(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function tuneInternalGenerationSettings(value) {
-  if (!isRecord3(value)) {
+  if (!isRecord4(value)) {
     return;
   }
   if ("reasoning_effort" in value) {
     value["reasoning_effort"] = "low";
   }
-  if (isRecord3(value["thinking"]) && "type" in value["thinking"]) {
+  if (isRecord4(value["thinking"]) && "type" in value["thinking"]) {
     value["thinking"] = { ...value["thinking"], type: "disabled" };
   }
   if ("enable_thinking" in value) {
@@ -1829,22 +2247,22 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
 var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
 var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 var MAX_REQUEST_TIMEOUT_MS2 = 6e5;
-function isRecord4(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function responseContent(payload) {
-  if (!isRecord4(payload)) {
+  if (!isRecord5(payload)) {
     return typeof payload === "string" ? payload : null;
   }
   const choices = payload["choices"];
-  const first = Array.isArray(choices) && isRecord4(choices[0]) ? choices[0] : null;
-  const message = first && isRecord4(first["message"]) ? first["message"] : null;
+  const first = Array.isArray(choices) && isRecord5(choices[0]) ? choices[0] : null;
+  const message = first && isRecord5(first["message"]) ? first["message"] : null;
   const content = message?.["content"];
   if (typeof content === "string") {
     return content;
   }
   if (Array.isArray(content)) {
-    return content.map((part) => isRecord4(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
+    return content.map((part) => isRecord5(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
   }
   if (first && typeof first["text"] === "string") {
     return first["text"];
@@ -1853,11 +2271,11 @@ function responseContent(payload) {
 }
 function responseError(payload, fallback, apiKey) {
   let message = fallback;
-  if (isRecord4(payload)) {
+  if (isRecord5(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       message = error;
-    } else if (isRecord4(error) && typeof error["message"] === "string") {
+    } else if (isRecord5(error) && typeof error["message"] === "string") {
       message = error["message"];
     } else if (typeof payload["message"] === "string") {
       message = payload["message"];
@@ -3547,6 +3965,9 @@ var BackgroundProcessingScheduler = class {
   rerunRequested = false;
   requestedChatId = null;
   historyRequiresReconcile = true;
+  agentReplyObserved = false;
+  agentBridgeRegistered = false;
+  unsubscribeAgentRunState;
   registeredEvents = [];
   settingsRepository = new SettingsRepository();
   stateRepository = new StoryStateRepository();
@@ -3575,7 +3996,17 @@ var BackgroundProcessingScheduler = class {
       }
       return false;
     }
+    this.agentBridgeRegistered = tauriTavernAgentBridge.register(context);
+    if (this.agentBridgeRegistered) {
+      this.unsubscribeAgentRunState = tauriTavernAgentBridge.subscribeRunState(
+        this.onAgentRunStateChanged
+      );
+    }
     const replyHandler = () => {
+      if (tauriTavernAgentBridge.isRunActive()) {
+        this.agentReplyObserved = true;
+        return;
+      }
       storyEchoTaskCoordinator.releaseForegroundLease("assistant-message-received");
       this.schedule();
     };
@@ -3603,7 +4034,7 @@ var BackgroundProcessingScheduler = class {
       const handler = () => {
         this.historyRequiresReconcile = true;
         storyEchoTaskCoordinator.cancelRunningBackground(`\u804A\u5929\u5386\u53F2\u4E8B\u4EF6\uFF1A${eventKey}`);
-        if (branchEvents.has(eventKey)) {
+        if (branchEvents.has(eventKey) && !tauriTavernAgentBridge.isRunActive()) {
           storyEchoTaskCoordinator.releaseForegroundLease(
             eventKey === "CHAT_CHANGED" ? "chat-changed" : "message-swiped"
           );
@@ -3640,12 +4071,15 @@ var BackgroundProcessingScheduler = class {
       });
       registeredNames.add(renamedEventName);
     }
-    for (const eventKey of ["GENERATION_STOPPED", "GENERATION_ABORTED"]) {
+    for (const eventKey of ["GENERATION_STOPPED", "GENERATION_ABORTED", "GENERATION_ENDED"]) {
       const eventName = eventTypes[eventKey];
       if (!eventName || registeredNames.has(eventName)) {
         continue;
       }
       const handler = () => {
+        if (tauriTavernAgentBridge.isRunActive()) {
+          return;
+        }
         storyEchoTaskCoordinator.releaseForegroundLease("generation-stopped");
       };
       eventSource.on(eventName, handler);
@@ -3660,6 +4094,13 @@ var BackgroundProcessingScheduler = class {
   unregister() {
     this.stopped = true;
     this.rerunRequested = false;
+    this.unsubscribeAgentRunState?.();
+    this.unsubscribeAgentRunState = void 0;
+    if (this.agentBridgeRegistered) {
+      tauriTavernAgentBridge.unregister();
+    }
+    this.agentBridgeRegistered = false;
+    this.agentReplyObserved = false;
     storyEchoTaskCoordinator.cancelRunningBackground("StoryEcho\u6269\u5C55\u5DF2\u505C\u7528");
     storyEchoTaskCoordinator.releaseForegroundLease("extension-disabled");
     if (this.timer !== void 0) {
@@ -3674,6 +4115,26 @@ var BackgroundProcessingScheduler = class {
     this.historyRequiresReconcile = true;
     this.requestedChatId = null;
   }
+  onAgentRunStateChanged = (change) => {
+    if (change.activeRunId) {
+      if (change.activeRunId !== change.previousRunId) {
+        this.agentReplyObserved = false;
+      }
+      return;
+    }
+    if (!change.previousRunId) {
+      return;
+    }
+    const terminalType = change.terminalEventType || "ended";
+    storyEchoTaskCoordinator.releaseForegroundLease(
+      `tauritavern-agent-${terminalType}`
+    );
+    const shouldSchedule = this.agentReplyObserved;
+    this.agentReplyObserved = false;
+    if (shouldSchedule) {
+      this.schedule();
+    }
+  };
   schedule() {
     if (this.stopped) {
       return;
@@ -3802,7 +4263,7 @@ function requestSystemMessage(mes) {
     }
   };
 }
-async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
+async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatId, type) {
   const settings = settingsRepository.get();
   if (!settings.enabled || !isSupportedGenerationType(type)) {
     return;
@@ -3913,6 +4374,10 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
         ...skeletonBlock ? [requestSystemMessage(skeletonBlock)] : [],
         ...summaryBlocks.map(requestSystemMessage)
       );
+      tauriTavernAgentBridge.markStoryEchoSummaryInjected(
+        requestedChatId,
+        (skeletonBlock ? 1 : 0) + summaryBlocks.length
+      );
     }
     state.lastInspection = createInspection(
       type,
@@ -3958,6 +4423,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, type) {
   }
 }
 async function storyEchoGenerateInterceptor(chat, contextSize, abort, type) {
+  tauriTavernAgentBridge.beginStoryEchoPreparation(null);
   const settings = settingsRepository.get();
   if (!settings.enabled || !isSupportedGenerationType(type) || isInternalGenerationRequest(chat)) {
     return;
@@ -3965,6 +4431,7 @@ async function storyEchoGenerateInterceptor(chat, contextSize, abort, type) {
   const requestedContext = getContext();
   const requestedChatId = getCurrentChatId(requestedContext);
   const requestedSourceChat = requestedContext.chat;
+  tauriTavernAgentBridge.beginStoryEchoPreparation(requestedChatId);
   await storyEchoTaskCoordinator.enqueueForeground(
     "\u751F\u6210\u524D\u4E0A\u4E0B\u6587\u51C6\u5907",
     async () => {
@@ -3975,7 +4442,7 @@ async function storyEchoGenerateInterceptor(chat, contextSize, abort, type) {
         logger.info("\u7B49\u5F85\u961F\u5217\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u8FC7\u671F\u7684\u4E0A\u4E0B\u6587\u51C6\u5907\u4EFB\u52A1\u3002");
         return false;
       }
-      await prepareStoryEchoPrompt(chat, contextSize, abort, type);
+      await prepareStoryEchoPrompt(chat, contextSize, abort, requestedChatId, type);
       return true;
     },
     { holdForegroundLease: (prepared) => prepared }
@@ -4026,16 +4493,16 @@ function buildDebugReport(state, settings) {
 // src/llm/model-list.ts
 var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
 var MAX_RESPONSE_BYTES2 = 2 * 1024 * 1024;
-function isRecord5(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function errorMessage(payload, response, apiKey) {
   let detail = "";
-  if (isRecord5(payload)) {
+  if (isRecord6(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       detail = error;
-    } else if (isRecord5(error) && typeof error["message"] === "string") {
+    } else if (isRecord6(error) && typeof error["message"] === "string") {
       detail = error["message"];
     } else if (typeof payload["message"] === "string") {
       detail = payload["message"];
@@ -4047,13 +4514,13 @@ function errorMessage(payload, response, apiKey) {
   return suffix ? `${base} ${suffix}` : base;
 }
 function parseCustomModelList(payload) {
-  const root = isRecord5(payload) ? payload : null;
+  const root = isRecord6(payload) ? payload : null;
   const candidates = Array.isArray(root?.["models"]) ? root["models"] : Array.isArray(root?.["data"]) ? root["data"] : Array.isArray(payload) ? payload : [];
   const names = candidates.map((candidate) => {
     if (typeof candidate === "string") {
       return candidate.trim();
     }
-    if (!isRecord5(candidate)) {
+    if (!isRecord6(candidate)) {
       return "";
     }
     const value = candidate["id"] ?? candidate["model"] ?? candidate["name"];
@@ -4205,7 +4672,7 @@ function messageIdValue(value) {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isInteger(number) && number >= 0 ? number : null;
 }
-function stringValue(value) {
+function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
 function promptText(value) {
@@ -4306,10 +4773,11 @@ function connectionMetadata(record, context, messageId) {
   const message = context.chat[messageId];
   const extra = message?.extra ?? {};
   return {
-    api: stringValue(extra["api"]) || stringValue(record["main_api"]),
-    model: stringValue(extra["model"]),
-    tokenizer: stringValue(record["tokenizer"]),
-    preset: stringValue(record["presetName"])
+    api: stringValue2(extra["api"]) || stringValue2(record["main_api"]),
+    model: stringValue2(extra["model"]),
+    tokenizer: stringValue2(record["tokenizer"]),
+    preset: stringValue2(record["presetName"]),
+    agentProfile: ""
   };
 }
 async function buildBreakdown(record, context) {
@@ -4346,26 +4814,26 @@ async function buildBreakdown(record, context) {
   const stageSummaryText = taggedBlocks(rawText, "story_echo_summary");
   const summaryText = [skeletonText, stageSummaryText].filter(Boolean).join("\n");
   const characterText = [
-    stringValue(record["charDescription"]),
-    stringValue(record["charPersonality"]),
-    stringValue(record["scenarioText"]),
-    stringValue(record["userPersona"])
+    stringValue2(record["charDescription"]),
+    stringValue2(record["charPersonality"]),
+    stringValue2(record["scenarioText"]),
+    stringValue2(record["userPersona"])
   ].filter(Boolean).join("\n");
-  const worldInfoText = stringValue(record["worldInfoString"]);
-  const examplesText = stringValue(record["examplesString"]);
-  const anchorsText = stringValue(record["allAnchors"]);
+  const worldInfoText = stringValue2(record["worldInfoString"]);
+  const examplesText = stringValue2(record["examplesString"]);
+  const anchorsText = stringValue2(record["allAnchors"]);
   const anchorsWithoutKnown = removeExactBlocks(anchorsText, [
     skeletonText,
     stageSummaryText,
     ...worldInfoText && anchorsText.includes(worldInfoText) ? [worldInfoText] : []
   ]);
   const instructionText = [
-    stringValue(record["instruction"]),
-    stringValue(record["generatedPromptCache"]),
-    stringValue(record["promptBias"])
+    stringValue2(record["instruction"]),
+    stringValue2(record["generatedPromptCache"]),
+    stringValue2(record["promptBias"])
   ].filter(Boolean).join("\n");
-  const storyText = stringValue(record["storyString"]);
-  const chatText = stringValue(record["mesSendString"]);
+  const storyText = stringValue2(record["storyString"]);
+  const chatText = stringValue2(record["mesSendString"]);
   const counted = await Promise.all([
     count(rawText),
     count(summaryText),
@@ -4389,7 +4857,7 @@ async function buildBreakdown(record, context) {
     chat
   ] = counted;
   const counterEstimated = counted.some((value) => value.estimated);
-  const mainApi = stringValue(record["main_api"]);
+  const mainApi = stringValue2(record["main_api"]);
   const storedTotal = finiteTokens(record["oaiTotalTokens"]);
   const hasChatCompletionBreakdown = mainApi === "openai" && storedTotal > 0;
   const messageId = messageIdValue(record.mesId);
@@ -4452,7 +4920,10 @@ async function buildBreakdown(record, context) {
       },
       ...metadata,
       detailed: true,
-      estimated: counterEstimated
+      estimated: counterEstimated,
+      origin: "sillytavern-itemization",
+      totalMeasured: true,
+      agentContextTrimmed: false
     };
   }
   const total = raw.tokens;
@@ -4503,7 +4974,10 @@ async function buildBreakdown(record, context) {
       },
       ...metadata,
       detailed: true,
-      estimated: true
+      estimated: true,
+      origin: "sillytavern-itemization",
+      totalMeasured: false,
+      agentContextTrimmed: false
     };
   }
   const fallbackParts = proportionalAllocation([
@@ -4534,13 +5008,130 @@ async function buildBreakdown(record, context) {
     },
     ...metadata,
     detailed: false,
-    estimated: true
+    estimated: true,
+    origin: "sillytavern-itemization",
+    totalMeasured: false,
+    agentContextTrimmed: false
   };
 }
-var PromptItemizationService = class {
-  constructor(loader = loadItemizedPromptsModule) {
-    this.loader = loader;
+async function buildAgentBreakdown(snapshot, context) {
+  const texts = {
+    system: [],
+    "recent-context": [],
+    "story-echo-summary": [],
+    "other-prompts": []
+  };
+  for (const message of snapshot.messages) {
+    const text = promptText(message);
+    if (!text.trim()) {
+      continue;
+    }
+    const skeleton = taggedBlocks(text, "story_echo_skeleton");
+    const summary = taggedBlocks(text, "story_echo_summary");
+    const storyEcho = [skeleton, summary].filter(Boolean).join("\n");
+    if (storyEcho) {
+      texts["story-echo-summary"].push(storyEcho);
+    }
+    const remainder = removeExactBlocks(text, [skeleton, summary]).trim();
+    if (!remainder) {
+      continue;
+    }
+    const role = message && typeof message === "object" && !Array.isArray(message) && typeof message["role"] === "string" ? message["role"].toLowerCase() : "";
+    if (role === "system" || role === "developer") {
+      texts.system.push(remainder);
+    } else if (role === "user" || role === "assistant") {
+      texts["recent-context"].push(remainder);
+    } else {
+      texts["other-prompts"].push(remainder);
+    }
   }
+  if (snapshot.toolDefinitions.length > 0) {
+    try {
+      texts["other-prompts"].push(JSON.stringify(snapshot.toolDefinitions));
+    } catch {
+    }
+  }
+  const count = async (text) => {
+    const normalized = text.trim();
+    if (!normalized) {
+      return 0;
+    }
+    if (context.getTokenCountAsync) {
+      try {
+        const tokens = await context.getTokenCountAsync(normalized, 0);
+        if (Number.isFinite(tokens) && tokens >= 0) {
+          return Math.round(tokens);
+        }
+      } catch {
+      }
+    }
+    return estimateTokens(normalized);
+  };
+  const ids = [
+    "system",
+    "recent-context",
+    "story-echo-summary",
+    "other-prompts"
+  ];
+  const counts = await Promise.all(ids.map((id) => count(texts[id].join("\n"))));
+  const seeds = ids.map((id, index) => ({ id, tokens: counts[index] ?? 0 }));
+  const measuredTotal = snapshot.actualInputTokens;
+  const identifiedTotal = seeds.reduce((total2, seed) => total2 + seed.tokens, 0);
+  const total = measuredTotal ?? identifiedTotal;
+  if (total <= 0) {
+    return null;
+  }
+  const allocation = proportionalAllocation(seeds, total);
+  const unclassified = Math.max(0, total - allocationTotal(allocation));
+  const values = {
+    system: allocation.get("system") ?? 0,
+    "recent-context": allocation.get("recent-context") ?? 0,
+    "story-echo-summary": allocation.get("story-echo-summary") ?? 0,
+    "other-prompts": allocation.get("other-prompts") ?? 0,
+    unclassified
+  };
+  return {
+    messageId: context.chat.length - 1,
+    totalTokens: total,
+    categories: categoryList(values, total),
+    storyEcho: {
+      contextTokens: values["recent-context"] ?? 0,
+      summaryTokens: values["story-echo-summary"] ?? 0
+    },
+    api: snapshot.api,
+    model: snapshot.model,
+    tokenizer: "",
+    preset: "",
+    agentProfile: snapshot.profile,
+    detailed: false,
+    estimated: true,
+    origin: "tauritavern-agent",
+    totalMeasured: measuredTotal !== null,
+    agentContextTrimmed: snapshot.storyEchoTrimmedByAgentAssembly
+  };
+}
+function agentSnapshotSignature(snapshot) {
+  return JSON.stringify([
+    snapshot.actualInputTokens,
+    snapshot.api,
+    snapshot.model,
+    snapshot.profile,
+    snapshot.storyEchoTrimmedByAgentAssembly
+  ]);
+}
+var PromptItemizationService = class {
+  constructor(loader = loadItemizedPromptsModule, agentPrompts = tauriTavernAgentBridge) {
+    this.loader = loader;
+    this.agentPrompts = agentPrompts;
+  }
+  cachedAgentSnapshot = null;
+  cachedAgentSignature = "";
+  cachedAgentChatLength = -1;
+  cachedAgentBreakdown = null;
+  pendingAgentSnapshot = null;
+  pendingAgentSignature = "";
+  pendingAgentChatLength = -1;
+  pendingAgentBreakdown = null;
   cachedChatId = "";
   cachedChatLength = -1;
   cachedItemCount = -1;
@@ -4556,6 +5147,15 @@ var PromptItemizationService = class {
   async latest(context = getContext()) {
     const chatId = getCurrentChatId(context) ?? "";
     if (!chatId || context.chat.length === 0) {
+      this.clearCache();
+      return null;
+    }
+    const agentSnapshot = this.agentPrompts.promptForLatestMessage(context);
+    if (agentSnapshot) {
+      return this.latestAgent(agentSnapshot, context);
+    }
+    this.clearAgentCache();
+    if (this.agentPrompts.latestMessageBelongsToAgent?.(context)) {
       this.clearCache();
       return null;
     }
@@ -4610,6 +5210,7 @@ var PromptItemizationService = class {
     return breakdown;
   }
   clearCache() {
+    this.clearAgentCache();
     this.cachedChatId = "";
     this.cachedChatLength = -1;
     this.cachedItemCount = -1;
@@ -4617,6 +5218,55 @@ var PromptItemizationService = class {
     this.cachedRawPrompt = void 0;
     this.cachedBreakdown = null;
     this.clearPending();
+  }
+  async latestAgent(snapshot, context) {
+    const signature = agentSnapshotSignature(snapshot);
+    const chatLength = context.chat.length;
+    if (snapshot === this.cachedAgentSnapshot && signature === this.cachedAgentSignature && chatLength === this.cachedAgentChatLength) {
+      return this.cachedAgentBreakdown;
+    }
+    if (snapshot === this.pendingAgentSnapshot && signature === this.pendingAgentSignature && chatLength === this.pendingAgentChatLength && this.pendingAgentBreakdown) {
+      return this.pendingAgentBreakdown;
+    }
+    const pending = buildAgentBreakdown(snapshot, context);
+    this.pendingAgentSnapshot = snapshot;
+    this.pendingAgentSignature = signature;
+    this.pendingAgentChatLength = chatLength;
+    this.pendingAgentBreakdown = pending;
+    let breakdown;
+    try {
+      breakdown = await pending;
+    } catch (error) {
+      if (this.pendingAgentBreakdown === pending) {
+        this.clearPendingAgent();
+      }
+      throw error;
+    }
+    if (this.pendingAgentBreakdown !== pending) {
+      return breakdown;
+    }
+    this.clearPendingAgent();
+    if (this.agentPrompts.promptForLatestMessage(context) !== snapshot) {
+      return null;
+    }
+    this.cachedAgentSnapshot = snapshot;
+    this.cachedAgentSignature = signature;
+    this.cachedAgentChatLength = chatLength;
+    this.cachedAgentBreakdown = breakdown;
+    return breakdown;
+  }
+  clearAgentCache() {
+    this.cachedAgentSnapshot = null;
+    this.cachedAgentSignature = "";
+    this.cachedAgentChatLength = -1;
+    this.cachedAgentBreakdown = null;
+    this.clearPendingAgent();
+  }
+  clearPendingAgent() {
+    this.pendingAgentSnapshot = null;
+    this.pendingAgentSignature = "";
+    this.pendingAgentChatLength = -1;
+    this.pendingAgentBreakdown = null;
   }
   clearPending() {
     this.pendingChatId = "";
@@ -4772,6 +5422,7 @@ function connectionText(value) {
     value.api ? `API\uFF1A${value.api}` : "",
     value.model,
     value.preset ? `\u9884\u8BBE\uFF1A${value.preset}` : "",
+    value.agentProfile ? `Agent Profile\uFF1A${value.agentProfile}` : "",
     value.tokenizer ? `Tokenizer\uFF1A${value.tokenizer}` : ""
   ].filter(Boolean).join(" \xB7 ");
 }
@@ -4816,7 +5467,8 @@ var PromptTokenStatsCard = class {
     element(panel, "#story-echo-prompt-stats-content").hidden = true;
   }
   renderBreakdown(panel, breakdown) {
-    element(panel, "#story-echo-prompt-stats-subtitle").textContent = `\u6D88\u606F #${breakdown.messageId} \xB7 ${breakdown.detailed ? `\u9152\u9986\u5206\u7C7B\u660E\u7EC6${breakdown.estimated ? "\uFF08\u90E8\u5206\u4F30\u7B97\uFF09" : ""}` : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}`;
+    const agentPrompt = breakdown.origin === "tauritavern-agent";
+    element(panel, "#story-echo-prompt-stats-subtitle").textContent = agentPrompt ? `\u6D88\u606F #${breakdown.messageId} \xB7 Agent \u9996\u8F6E${breakdown.totalMeasured ? "\u5B9E\u6D4B\u603B\u91CF / \u5206\u7C7B\u4F30\u7B97" : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}` : `\u6D88\u606F #${breakdown.messageId} \xB7 ${breakdown.detailed ? `\u9152\u9986\u5206\u7C7B\u660E\u7EC6${breakdown.estimated ? "\uFF08\u90E8\u5206\u4F30\u7B97\uFF09" : ""}` : "\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97"}`;
     element(panel, "#story-echo-prompt-stats-total").textContent = `${breakdown.totalTokens.toLocaleString()} Token`;
     element(panel, "#story-echo-prompt-stats-empty").hidden = true;
     element(panel, "#story-echo-prompt-stats-content").hidden = false;
@@ -4834,7 +5486,18 @@ var PromptTokenStatsCard = class {
     );
     const rows = element(panel, "#story-echo-token-rows");
     rows.replaceChildren(...breakdown.categories.map(categoryRow));
-    element(panel, "#story-echo-prompt-stats-note").textContent = breakdown.detailed ? `\u603B\u91CF\u53D6\u81EA SillyTavern \u6700\u8FD1\u4E00\u6B21\u63D0\u793A\u8BCD\u660E\u7EC6\uFF1BStoryEcho \u6807\u7B7E${breakdown.estimated ? "\u5728\u9152\u9986 Tokenizer \u4E0D\u53EF\u7528\u65F6\u91C7\u7528\u672C\u5730\u4F30\u7B97" : "\u4F7F\u7528\u9152\u9986\u5F53\u524D Tokenizer \u8BA1\u6570"}\u3002\u6D88\u606F\u89D2\u8272\u3001\u6A21\u677F\u548C\u5C11\u91CF\u65E0\u6CD5\u6807\u6CE8\u7684\u5F00\u9500\u4F1A\u5F52\u5165\u6240\u5C5E\u5927\u7C7B\u6216\u201C\u672A\u5206\u7C7B\u201D\u3002` : "SillyTavern \u672A\u4FDD\u5B58\u8FD9\u4E00\u8F6E\u7684\u5B8C\u6574\u5206\u7C7B\u8BA1\u6570\uFF0C\u5F53\u524D\u6309\u6700\u7EC8\u63D0\u793A\u8BCD\u4E2D\u7684\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97\uFF1B\u201C\u2014\u201D\u8868\u793A\u6700\u8FD1\u539F\u6587\u65E0\u6CD5\u4ECE\u5408\u5E76\u8BF7\u6C42\u4E2D\u53EF\u9760\u5206\u79BB\u3002";
+    const note = element(panel, "#story-echo-prompt-stats-note");
+    if (agentPrompt) {
+      const warning = breakdown.agentContextTrimmed ? "\u8B66\u544A\uFF1AAgent \u542F\u52A8\u524D\u7684\u4E8C\u6B21\u7EC4\u88C5\u79FB\u9664\u4E86 StoryEcho \u9AA8\u67B6/\u9636\u6BB5\u603B\u7ED3\uFF1B\u82E5 Profile \u9650\u5236\u4E86\u201C\u521D\u59CB\u804A\u5929\u5386\u53F2\u697C\u6570\u201D\uFF0C\u8BF7\u8BBE\u4E3A -1\u3002" : "";
+      const measurement = breakdown.totalMeasured ? "\u603B\u91CF\u53D6\u81EA TauriTavern Agent \u9996\u8F6E\u6A21\u578B\u8C03\u7528\u7684 provider usage\uFF1B\u5206\u7C7B\u6309\u542F\u52A8\u524D\u7684\u6700\u7EC8\u6D88\u606F\u4E0E\u5DE5\u5177\u5B9A\u4E49\u5FEB\u7167\u4F30\u7B97\uFF0C\u5DEE\u989D\u5F52\u5165\u201C\u672A\u5206\u7C7B\u201D\u3002" : "TauriTavern \u5C1A\u672A\u63D0\u4F9B\u9996\u8F6E provider usage\uFF0C\u5F53\u524D\u53EA\u4F30\u7B97\u542F\u52A8\u524D\u6700\u7EC8\u6D88\u606F\u4E0E\u5DE5\u5177\u5B9A\u4E49\u4E2D\u7684\u53EF\u8BC6\u522B\u6587\u672C\u3002";
+      note.textContent = [
+        warning,
+        measurement,
+        "\u8FD9\u91CC\u53EA\u7EDF\u8BA1\u9996\u6B21\u6A21\u578B\u8C03\u7528\uFF0C\u4E0D\u5305\u542B\u540E\u7EED\u5DE5\u5177\u5FAA\u73AF\u6216\u5B50\u4EE3\u7406\u8C03\u7528\u3002"
+      ].filter(Boolean).join(" ");
+    } else {
+      note.textContent = breakdown.detailed ? `\u603B\u91CF\u53D6\u81EA SillyTavern \u6700\u8FD1\u4E00\u6B21\u63D0\u793A\u8BCD\u660E\u7EC6\uFF1BStoryEcho \u6807\u7B7E${breakdown.estimated ? "\u5728\u9152\u9986 Tokenizer \u4E0D\u53EF\u7528\u65F6\u91C7\u7528\u672C\u5730\u4F30\u7B97" : "\u4F7F\u7528\u9152\u9986\u5F53\u524D Tokenizer \u8BA1\u6570"}\u3002\u6D88\u606F\u89D2\u8272\u3001\u6A21\u677F\u548C\u5C11\u91CF\u65E0\u6CD5\u6807\u6CE8\u7684\u5F00\u9500\u4F1A\u5F52\u5165\u6240\u5C5E\u5927\u7C7B\u6216\u201C\u672A\u5206\u7C7B\u201D\u3002` : "SillyTavern \u672A\u4FDD\u5B58\u8FD9\u4E00\u8F6E\u7684\u5B8C\u6574\u5206\u7C7B\u8BA1\u6570\uFF0C\u5F53\u524D\u6309\u6700\u7EC8\u63D0\u793A\u8BCD\u4E2D\u7684\u53EF\u8BC6\u522B\u6587\u672C\u4F30\u7B97\uFF1B\u201C\u2014\u201D\u8868\u793A\u6700\u8FD1\u539F\u6587\u65E0\u6CD5\u4ECE\u5408\u5E76\u8BF7\u6C42\u4E2D\u53EF\u9760\u5206\u79BB\u3002";
+    }
   }
 };
 var promptTokenStatsCard = new PromptTokenStatsCard();

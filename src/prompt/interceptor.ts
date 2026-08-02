@@ -13,6 +13,7 @@ import {
 } from '../history/story-phase';
 import { isInternalGenerationRequest } from '../llm/internal-generation';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import { tauriTavernAgentBridge } from '../platform/tauritavern-agent';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
 import { StoryStateRepository } from '../state/repository';
@@ -105,6 +106,7 @@ async function prepareStoryEchoPrompt(
   chat: TavernChatMessage[],
   _contextSize: number,
   _abort: () => void,
+  requestedChatId: string | null,
   type?: string,
 ): Promise<void> {
   const settings = settingsRepository.get();
@@ -232,6 +234,10 @@ async function prepareStoryEchoPrompt(
         ...(skeletonBlock ? [requestSystemMessage(skeletonBlock)] : []),
         ...summaryBlocks.map(requestSystemMessage),
       );
+      tauriTavernAgentBridge.markStoryEchoSummaryInjected(
+        requestedChatId,
+        (skeletonBlock ? 1 : 0) + summaryBlocks.length,
+      );
     }
 
     state.lastInspection = createInspection(
@@ -284,6 +290,7 @@ export async function storyEchoGenerateInterceptor(
   abort: () => void,
   type?: string,
 ): Promise<void> {
+  tauriTavernAgentBridge.beginStoryEchoPreparation(null);
   const settings = settingsRepository.get();
   if (
     !settings.enabled ||
@@ -296,6 +303,7 @@ export async function storyEchoGenerateInterceptor(
   const requestedContext = getContext();
   const requestedChatId = getCurrentChatId(requestedContext);
   const requestedSourceChat = requestedContext.chat;
+  tauriTavernAgentBridge.beginStoryEchoPreparation(requestedChatId);
   await storyEchoTaskCoordinator.enqueueForeground(
     '生成前上下文准备',
     async () => {
@@ -308,7 +316,7 @@ export async function storyEchoGenerateInterceptor(
         logger.info('等待队列期间聊天已切换，已取消过期的上下文准备任务。');
         return false;
       }
-      await prepareStoryEchoPrompt(chat, contextSize, abort, type);
+      await prepareStoryEchoPrompt(chat, contextSize, abort, requestedChatId, type);
       return true;
     },
     { holdForegroundLease: (prepared) => prepared },

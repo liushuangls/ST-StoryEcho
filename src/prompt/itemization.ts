@@ -1,5 +1,9 @@
 import type { SillyTavernContext } from '../platform/sillytavern';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import {
+  tauriTavernAgentBridge,
+  type TauriAgentPromptSnapshot,
+} from '../platform/tauritavern-agent';
 import { estimateTokens } from './render';
 
 export type PromptTokenCategoryId =
@@ -33,8 +37,12 @@ export interface LatestPromptTokenBreakdown {
   model: string;
   tokenizer: string;
   preset: string;
+  agentProfile: string;
   detailed: boolean;
   estimated: boolean;
+  origin: 'sillytavern-itemization' | 'tauritavern-agent';
+  totalMeasured: boolean;
+  agentContextTrimmed: boolean;
 }
 
 interface ItemizedPromptRecord extends Record<string, unknown> {
@@ -47,6 +55,11 @@ interface ItemizedPromptsModule {
 }
 
 type ItemizedPromptsLoader = () => Promise<ItemizedPromptsModule>;
+
+interface AgentPromptLookup {
+  promptForLatestMessage(context: SillyTavernContext): TauriAgentPromptSnapshot | null;
+  latestMessageBelongsToAgent?(context: SillyTavernContext): boolean;
+}
 
 interface CountedText {
   tokens: number;
@@ -204,7 +217,10 @@ function connectionMetadata(
   record: ItemizedPromptRecord,
   context: SillyTavernContext,
   messageId: number,
-): Pick<LatestPromptTokenBreakdown, 'api' | 'model' | 'tokenizer' | 'preset'> {
+): Pick<
+  LatestPromptTokenBreakdown,
+  'api' | 'model' | 'tokenizer' | 'preset' | 'agentProfile'
+> {
   const message = context.chat[messageId];
   const extra = message?.extra ?? {};
   return {
@@ -212,6 +228,7 @@ function connectionMetadata(
     model: stringValue(extra['model']),
     tokenizer: stringValue(record['tokenizer']),
     preset: stringValue(record['presetName']),
+    agentProfile: '',
   };
 }
 
@@ -365,6 +382,9 @@ async function buildBreakdown(
       ...metadata,
       detailed: true,
       estimated: counterEstimated,
+      origin: 'sillytavern-itemization',
+      totalMeasured: true,
+      agentContextTrimmed: false,
     };
   }
 
@@ -417,6 +437,9 @@ async function buildBreakdown(
       ...metadata,
       detailed: true,
       estimated: true,
+      origin: 'sillytavern-itemization',
+      totalMeasured: false,
+      agentContextTrimmed: false,
     };
   }
 
@@ -449,10 +472,144 @@ async function buildBreakdown(
     ...metadata,
     detailed: false,
     estimated: true,
+    origin: 'sillytavern-itemization',
+    totalMeasured: false,
+    agentContextTrimmed: false,
   };
 }
 
+async function buildAgentBreakdown(
+  snapshot: TauriAgentPromptSnapshot,
+  context: SillyTavernContext,
+): Promise<LatestPromptTokenBreakdown | null> {
+  const texts: Record<
+    'system' | 'recent-context' | 'story-echo-summary' | 'other-prompts',
+    string[]
+  > = {
+    system: [],
+    'recent-context': [],
+    'story-echo-summary': [],
+    'other-prompts': [],
+  };
+  for (const message of snapshot.messages) {
+    const text = promptText(message);
+    if (!text.trim()) {
+      continue;
+    }
+    const skeleton = taggedBlocks(text, 'story_echo_skeleton');
+    const summary = taggedBlocks(text, 'story_echo_summary');
+    const storyEcho = [skeleton, summary].filter(Boolean).join('\n');
+    if (storyEcho) {
+      texts['story-echo-summary'].push(storyEcho);
+    }
+    const remainder = removeExactBlocks(text, [skeleton, summary]).trim();
+    if (!remainder) {
+      continue;
+    }
+    const role = (
+      message &&
+      typeof message === 'object' &&
+      !Array.isArray(message) &&
+      typeof (message as Record<string, unknown>)['role'] === 'string'
+    )
+      ? ((message as Record<string, unknown>)['role'] as string).toLowerCase()
+      : '';
+    if (role === 'system' || role === 'developer') {
+      texts.system.push(remainder);
+    } else if (role === 'user' || role === 'assistant') {
+      texts['recent-context'].push(remainder);
+    } else {
+      texts['other-prompts'].push(remainder);
+    }
+  }
+  if (snapshot.toolDefinitions.length > 0) {
+    try {
+      texts['other-prompts'].push(JSON.stringify(snapshot.toolDefinitions));
+    } catch {
+      // The bridge already cloned this value, but keep diagnostics fail-open.
+    }
+  }
+
+  const count = async (text: string): Promise<number> => {
+    const normalized = text.trim();
+    if (!normalized) {
+      return 0;
+    }
+    if (context.getTokenCountAsync) {
+      try {
+        const tokens = await context.getTokenCountAsync(normalized, 0);
+        if (Number.isFinite(tokens) && tokens >= 0) {
+          return Math.round(tokens);
+        }
+      } catch {
+        // Fall through to the bounded local estimate.
+      }
+    }
+    return estimateTokens(normalized);
+  };
+  const ids = [
+    'system',
+    'recent-context',
+    'story-echo-summary',
+    'other-prompts',
+  ] as const;
+  const counts = await Promise.all(ids.map((id) => count(texts[id].join('\n'))));
+  const seeds = ids.map((id, index) => ({ id, tokens: counts[index] ?? 0 }));
+  const measuredTotal = snapshot.actualInputTokens;
+  const identifiedTotal = seeds.reduce((total, seed) => total + seed.tokens, 0);
+  const total = measuredTotal ?? identifiedTotal;
+  if (total <= 0) {
+    return null;
+  }
+  const allocation = proportionalAllocation(seeds, total);
+  const unclassified = Math.max(0, total - allocationTotal(allocation));
+  const values: Partial<Record<PromptTokenCategoryId, number>> = {
+    system: allocation.get('system') ?? 0,
+    'recent-context': allocation.get('recent-context') ?? 0,
+    'story-echo-summary': allocation.get('story-echo-summary') ?? 0,
+    'other-prompts': allocation.get('other-prompts') ?? 0,
+    unclassified,
+  };
+  return {
+    messageId: context.chat.length - 1,
+    totalTokens: total,
+    categories: categoryList(values, total),
+    storyEcho: {
+      contextTokens: values['recent-context'] ?? 0,
+      summaryTokens: values['story-echo-summary'] ?? 0,
+    },
+    api: snapshot.api,
+    model: snapshot.model,
+    tokenizer: '',
+    preset: '',
+    agentProfile: snapshot.profile,
+    detailed: false,
+    estimated: true,
+    origin: 'tauritavern-agent',
+    totalMeasured: measuredTotal !== null,
+    agentContextTrimmed: snapshot.storyEchoTrimmedByAgentAssembly,
+  };
+}
+
+function agentSnapshotSignature(snapshot: TauriAgentPromptSnapshot): string {
+  return JSON.stringify([
+    snapshot.actualInputTokens,
+    snapshot.api,
+    snapshot.model,
+    snapshot.profile,
+    snapshot.storyEchoTrimmedByAgentAssembly,
+  ]);
+}
+
 export class PromptItemizationService {
+  private cachedAgentSnapshot: TauriAgentPromptSnapshot | null = null;
+  private cachedAgentSignature = '';
+  private cachedAgentChatLength = -1;
+  private cachedAgentBreakdown: LatestPromptTokenBreakdown | null = null;
+  private pendingAgentSnapshot: TauriAgentPromptSnapshot | null = null;
+  private pendingAgentSignature = '';
+  private pendingAgentChatLength = -1;
+  private pendingAgentBreakdown: Promise<LatestPromptTokenBreakdown | null> | null = null;
   private cachedChatId = '';
   private cachedChatLength = -1;
   private cachedItemCount = -1;
@@ -466,11 +623,26 @@ export class PromptItemizationService {
   private pendingRawPrompt: unknown;
   private pendingBreakdown: Promise<LatestPromptTokenBreakdown | null> | null = null;
 
-  constructor(private readonly loader: ItemizedPromptsLoader = loadItemizedPromptsModule) {}
+  constructor(
+    private readonly loader: ItemizedPromptsLoader = loadItemizedPromptsModule,
+    private readonly agentPrompts: AgentPromptLookup = tauriTavernAgentBridge,
+  ) {}
 
   async latest(context = getContext()): Promise<LatestPromptTokenBreakdown | null> {
     const chatId = getCurrentChatId(context) ?? '';
     if (!chatId || context.chat.length === 0) {
+      this.clearCache();
+      return null;
+    }
+    const agentSnapshot = this.agentPrompts.promptForLatestMessage(context);
+    if (agentSnapshot) {
+      return this.latestAgent(agentSnapshot, context);
+    }
+    this.clearAgentCache();
+    if (this.agentPrompts.latestMessageBelongsToAgent?.(context)) {
+      // TauriTavern Agent bypasses SillyTavern's itemized-prompt store. After
+      // a reload the in-memory Agent snapshot is gone; showing the preceding
+      // non-Agent request here would be materially misleading.
       this.clearCache();
       return null;
     }
@@ -540,6 +712,7 @@ export class PromptItemizationService {
   }
 
   clearCache(): void {
+    this.clearAgentCache();
     this.cachedChatId = '';
     this.cachedChatLength = -1;
     this.cachedItemCount = -1;
@@ -547,6 +720,70 @@ export class PromptItemizationService {
     this.cachedRawPrompt = undefined;
     this.cachedBreakdown = null;
     this.clearPending();
+  }
+
+  private async latestAgent(
+    snapshot: TauriAgentPromptSnapshot,
+    context: SillyTavernContext,
+  ): Promise<LatestPromptTokenBreakdown | null> {
+    const signature = agentSnapshotSignature(snapshot);
+    const chatLength = context.chat.length;
+    if (
+      snapshot === this.cachedAgentSnapshot &&
+      signature === this.cachedAgentSignature &&
+      chatLength === this.cachedAgentChatLength
+    ) {
+      return this.cachedAgentBreakdown;
+    }
+    if (
+      snapshot === this.pendingAgentSnapshot &&
+      signature === this.pendingAgentSignature &&
+      chatLength === this.pendingAgentChatLength &&
+      this.pendingAgentBreakdown
+    ) {
+      return this.pendingAgentBreakdown;
+    }
+    const pending = buildAgentBreakdown(snapshot, context);
+    this.pendingAgentSnapshot = snapshot;
+    this.pendingAgentSignature = signature;
+    this.pendingAgentChatLength = chatLength;
+    this.pendingAgentBreakdown = pending;
+    let breakdown: LatestPromptTokenBreakdown | null;
+    try {
+      breakdown = await pending;
+    } catch (error) {
+      if (this.pendingAgentBreakdown === pending) {
+        this.clearPendingAgent();
+      }
+      throw error;
+    }
+    if (this.pendingAgentBreakdown !== pending) {
+      return breakdown;
+    }
+    this.clearPendingAgent();
+    if (this.agentPrompts.promptForLatestMessage(context) !== snapshot) {
+      return null;
+    }
+    this.cachedAgentSnapshot = snapshot;
+    this.cachedAgentSignature = signature;
+    this.cachedAgentChatLength = chatLength;
+    this.cachedAgentBreakdown = breakdown;
+    return breakdown;
+  }
+
+  private clearAgentCache(): void {
+    this.cachedAgentSnapshot = null;
+    this.cachedAgentSignature = '';
+    this.cachedAgentChatLength = -1;
+    this.cachedAgentBreakdown = null;
+    this.clearPendingAgent();
+  }
+
+  private clearPendingAgent(): void {
+    this.pendingAgentSnapshot = null;
+    this.pendingAgentSignature = '';
+    this.pendingAgentChatLength = -1;
+    this.pendingAgentBreakdown = null;
   }
 
   private clearPending(): void {

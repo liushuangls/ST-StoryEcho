@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PromptItemizationService } from '../src/prompt/itemization';
 import type { SillyTavernContext } from '../src/platform/sillytavern';
+import type { TauriAgentPromptSnapshot } from '../src/platform/tauritavern-agent';
 
 function context(overrides: Partial<SillyTavernContext> = {}): SillyTavernContext {
   return {
@@ -145,6 +146,24 @@ describe('latest SillyTavern prompt itemization', () => {
     await expect(service.latest(context())).resolves.toBeNull();
   });
 
+  it('does not reuse an older SillyTavern request for a reloaded Agent reply', async () => {
+    const service = new PromptItemizationService(async () => ({
+      itemizedPrompts: [{
+        mesId: 3,
+        main_api: 'openai',
+        rawPrompt: [{ role: 'user', content: 'older request' }],
+        oaiConversationTokens: 20,
+        oaiTotalTokens: 20,
+      }],
+    }));
+    const tavernContext = context();
+    tavernContext.chat[4]!.extra = {
+      tauritavern: { agent: { runId: 'reloaded-run' } },
+    };
+
+    await expect(service.latest(tavernContext)).resolves.toBeNull();
+  });
+
   it('recovers when prompt details are saved after an earlier empty read', async () => {
     const itemizedPrompts: Array<Record<string, unknown>> = [];
     const service = new PromptItemizationService(async () => ({ itemizedPrompts }));
@@ -164,5 +183,86 @@ describe('latest SillyTavern prompt itemization', () => {
     const result = await service.latest(tavernContext);
     expect(result?.messageId).toBe(4);
     expect(result?.totalTokens).toBe(20);
+  });
+});
+
+describe('TauriTavern Agent prompt itemization', () => {
+  it('uses provider usage for the first-call total and estimates the final Agent snapshot categories', async () => {
+    const summary = '<story_echo_summary>older plot</story_echo_summary>';
+    const snapshot: TauriAgentPromptSnapshot = {
+      runId: 'run-1',
+      chatId: 'chat-id',
+      generationType: 'normal',
+      expectedMessageId: 4,
+      messages: [
+        { role: 'system', content: `system rules\n${summary}` },
+        { role: 'user', content: 'continue' },
+      ],
+      toolDefinitions: [{ type: 'function', function: { name: 'search' } }],
+      api: 'openrouter',
+      model: 'agent-model',
+      profile: 'profile-1',
+      capturedAt: Date.now(),
+      actualInputTokens: 500,
+      storyEchoTrimmedByAgentAssembly: true,
+    };
+    const loader = vi.fn(async () => ({ itemizedPrompts: [] }));
+    const lookup = {
+      promptForLatestMessage: vi.fn(() => snapshot),
+    };
+    const service = new PromptItemizationService(loader, lookup);
+
+    const result = await service.latest(context());
+
+    expect(loader).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      messageId: 4,
+      totalTokens: 500,
+      api: 'openrouter',
+      model: 'agent-model',
+      agentProfile: 'profile-1',
+      origin: 'tauritavern-agent',
+      totalMeasured: true,
+      agentContextTrimmed: true,
+    });
+    expect(result?.storyEcho.summaryTokens).toBe(summary.length);
+    expect(result?.storyEcho.contextTokens).toBe('continue'.length);
+    expect(tokenSum(result)).toBe(500);
+    expect(result?.categories.find((entry) => entry.id === 'unclassified')?.tokens)
+      .toBeGreaterThan(0);
+  });
+
+  it('refreshes a cached Agent total when provider usage arrives asynchronously', async () => {
+    const snapshot: TauriAgentPromptSnapshot = {
+      runId: 'run-2',
+      chatId: 'chat-id',
+      generationType: 'normal',
+      expectedMessageId: 4,
+      messages: [{ role: 'user', content: 'continue' }],
+      toolDefinitions: [],
+      api: '',
+      model: '',
+      profile: '',
+      capturedAt: Date.now(),
+      actualInputTokens: null,
+      storyEchoTrimmedByAgentAssembly: false,
+    };
+    const service = new PromptItemizationService(
+      async () => ({ itemizedPrompts: [] }),
+      { promptForLatestMessage: () => snapshot },
+    );
+    const tavernContext = context();
+
+    expect((await service.latest(tavernContext))?.totalTokens).toBe('continue'.length);
+    snapshot.actualInputTokens = 250;
+    const measured = await service.latest(tavernContext);
+    expect(measured?.totalTokens).toBe(250);
+    expect(measured?.totalMeasured).toBe(true);
+    expect(tokenSum(measured)).toBe(250);
+    snapshot.profile = 'writer';
+    snapshot.api = 'custom';
+    const enriched = await service.latest(tavernContext);
+    expect(enriched?.agentProfile).toBe('writer');
+    expect(enriched?.api).toBe('custom');
   });
 });
