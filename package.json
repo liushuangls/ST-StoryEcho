@@ -1,6 +1,6 @@
 {
   "name": "st-storyecho",
-  "version": "0.21.5",
+  "version": "0.21.6",
   "private": true,
   "type": "module",
   "description": "Sliding-window story context management for SillyTavern.",
