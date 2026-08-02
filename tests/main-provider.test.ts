@@ -140,6 +140,7 @@ describe('MainLlmProvider', () => {
     const generateRaw = vi.fn(async () => {
       const settings = {
         reasoning_effort: 'max',
+        include_reasoning: true,
         thinking: { type: 'enabled', budget_tokens: 8_000 },
         enable_thinking: true,
         temperature: 1.1,
@@ -148,6 +149,7 @@ describe('MainLlmProvider', () => {
       handler?.(settings);
       expect(settings).toEqual({
         reasoning_effort: 'low',
+        include_reasoning: false,
         thinking: { type: 'disabled', budget_tokens: 8_000 },
         enable_thinking: false,
         temperature: 0,

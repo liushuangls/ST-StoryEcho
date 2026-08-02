@@ -29,6 +29,9 @@ export function tuneInternalGenerationSettings(value: unknown): void {
   if ('reasoning_effort' in value) {
     value['reasoning_effort'] = 'low';
   }
+  if ('include_reasoning' in value) {
+    value['include_reasoning'] = false;
+  }
   if (isRecord(value['thinking']) && 'type' in value['thinking']) {
     value['thinking'] = { ...value['thinking'], type: 'disabled' };
   }
