@@ -1,4 +1,5 @@
 import type {
+  LlmCompletionResult,
   LlmProvider,
   LlmRequest,
   StoryEchoSettings,
@@ -11,6 +12,7 @@ import {
   isRetriableUpstreamTimeoutStatus,
   LlmRequestTimeoutError,
 } from './errors';
+import { completionMetadataFromPayload } from './completion-metadata';
 
 type FetchLike = typeof fetch;
 type RequestHeadersProvider = () => Promise<Record<string, string>>;
@@ -71,6 +73,10 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   ) {}
 
   async complete(request: LlmRequest): Promise<string> {
+    return (await this.completeDetailed(request)).text;
+  }
+
+  async completeDetailed(request: LlmRequest): Promise<LlmCompletionResult> {
     const model = this.config.model.trim();
     if (!model) {
       throw new Error('自定义LLM模型名不能为空。');
@@ -98,13 +104,17 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
     const abort = () => controller.abort();
     request.signal?.addEventListener('abort', abort, { once: true });
+    const maxTokens = Math.min(
+      10_000,
+      Math.max(16, Math.floor(request.maxTokens ?? 8_192)),
+    );
     const body = {
       messages: [
         { role: 'system', content: request.system },
         { role: 'user', content: request.prompt },
       ],
       model,
-      max_tokens: Math.min(10_000, Math.max(16, Math.floor(request.maxTokens ?? 8_192))),
+      max_tokens: maxTokens,
       temperature: 0,
       top_p: 1,
       stream: false,
@@ -161,7 +171,16 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       if (!content?.trim()) {
         throw new Error('自定义LLM没有返回可读取的内容。');
       }
-      return content;
+      return {
+        text: content,
+        metadata: completionMetadataFromPayload(payload, {
+          provider: this.id,
+          requestedMaxTokens: maxTokens,
+          responseText: content,
+          source: 'custom',
+          model,
+        }),
+      };
     } catch (error) {
       if (request.signal?.aborted) {
         throw error;

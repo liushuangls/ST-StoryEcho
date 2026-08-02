@@ -6,8 +6,9 @@ import type {
   StorySkeleton,
   TavernChatMessage,
 } from '../core/types';
+import { mergeInternalLlmAttempts } from '../debug/internal-llm-attempts';
 import { recordDebugTrace } from '../debug/metrics';
-import { completeWithConfiguredProvider } from '../llm/complete';
+import { completeObservedInternalRequest } from '../llm/observed-completion';
 import { getCurrentChatId } from '../platform/sillytavern';
 import { buildStorySkeletonWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
@@ -417,7 +418,7 @@ export class StorySkeletonService {
       const worldBackground = await this.buildWorldBackground(state, batch, settings);
       const mode = cleanBuildPromptMode(options.rebuild, staleAtStart, index > 0);
       const acceptedPreviousSkeleton = draft;
-      const raw = await completeWithConfiguredProvider(settings, {
+      const completion = await completeObservedInternalRequest(state, settings, {
         system: STORY_SKELETON_SYSTEM_PROMPT,
         prompt: buildStorySkeletonPrompt({
           existingSkeleton: acceptedPreviousSkeleton,
@@ -428,8 +429,15 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
         timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
+      }, {
+        task: 'story-skeleton',
+        sourceStartMessageId: first.sourceStartMessageId,
+        sourceEndMessageId: last.sourceEndMessageId,
       });
-      draft = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      draft = normalizeStorySkeletonText(
+        completion.text,
+        settings.summary.skeletonMaxTokens,
+      );
       processedEntries += batch.length;
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       options.onProgress?.({
@@ -440,6 +448,7 @@ export class StorySkeletonService {
     }
 
     const live = this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
+    mergeInternalLlmAttempts(live, state);
     const updatedAt = new Date().toISOString();
     live.storySkeleton = {
       text: draft,
@@ -508,7 +517,7 @@ export class StorySkeletonService {
         coveredThroughMessageId,
       );
       const worldBackground = await this.buildWorldBackground(state, [sourceEntry], settings);
-      const raw = await completeWithConfiguredProvider(settings, {
+      const completion = await completeObservedInternalRequest(state, settings, {
         system: STORY_SKELETON_SYSTEM_PROMPT,
         prompt: buildStorySkeletonPrompt({
           existingSkeleton: priorSkeleton.text,
@@ -519,8 +528,15 @@ export class StorySkeletonService {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
         timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
+      }, {
+        task: 'story-skeleton',
+        sourceStartMessageId: sourceEntry.sourceStartMessageId,
+        sourceEndMessageId: sourceEntry.sourceEndMessageId,
       });
-      const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      const text = normalizeStorySkeletonText(
+        completion.text,
+        settings.summary.skeletonMaxTokens,
+      );
       const live = this.validateIncrementalSources(
         state,
         settings,
@@ -529,6 +545,7 @@ export class StorySkeletonService {
         sourceSnapshot,
         coveredThroughMessageId,
       );
+      mergeInternalLlmAttempts(live, state);
       const updatedAt = new Date().toISOString();
       state = live;
       state.storySkeleton = {
@@ -595,6 +612,12 @@ export class StorySkeletonService {
       return await this.runIncrementalUpdates(state, settings, options);
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
+        try {
+          assertChatOwner(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn('保存全局剧情骨架取消诊断时聊天已切换或元数据不可用。', saveError);
+        }
         throw error;
       }
       state.metrics.skeletonFailures += 1;

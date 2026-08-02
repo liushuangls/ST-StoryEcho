@@ -801,6 +801,7 @@
 }
 
 #story-echo-settings .story-echo-summary-delete {
+  grid-column: 1 / -1;
   border-color: color-mix(in srgb, #d9534f 70%, var(--SmartThemeBorderColor));
 }
 

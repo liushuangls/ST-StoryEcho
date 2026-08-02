@@ -98,6 +98,14 @@ export interface SillyTavernContext {
     jsonSchema?: Record<string, unknown>;
     responseLength?: number;
   }): Promise<string>;
+  /** SillyTavern 1.18+ raw response seam used to retain finish/usage metadata. */
+  generateRawData?(options: {
+    systemPrompt: string;
+    prompt: string;
+    jsonSchema?: Record<string, unknown>;
+    responseLength?: number;
+  }): Promise<unknown>;
+  extractMessageFromData?(data: unknown, activeApi?: string | null): string;
   getRequestHeaders?(): Record<string, string>;
   getCurrentChatId?(): string | null;
   getChatCompletionModel?(settings?: Record<string, unknown>): string | null;

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoryEchoChatState, StoryEchoSettings, TavernChatMessage } from '../src/core/types';
+import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState } from './fixtures';
 
@@ -19,7 +20,7 @@ vi.mock('../src/state/repository', () => ({
   },
 }));
 vi.mock('../src/llm/complete', () => ({
-  completeWithConfiguredProvider: mocks.complete,
+  completeWithConfiguredProviderDetailed: mocks.complete,
 }));
 
 import {
@@ -66,7 +67,17 @@ function install(chat: TavernChatMessage[], currentSettings = settings()): void 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.state = chatState();
-  mocks.complete.mockResolvedValue('本阶段中，用户完成行动，角色作出回应。');
+  mocks.complete.mockResolvedValue({
+    text: '本阶段中，用户完成行动，角色作出回应。',
+    metadata: {
+      provider: 'main',
+      requestedMaxTokens: 1_600,
+      finishReason: 'stop',
+      completionTokens: 42,
+      reasoningTokens: 0,
+      responseCharacters: 19,
+    },
+  });
 });
 
 afterEach(() => {
@@ -128,6 +139,120 @@ describe('StageSummaryService', () => {
       timeoutMs: 600_000,
     });
     expect(mocks.save).toHaveBeenCalledTimes(2);
+    expect(result.state?.stageSummary.entries[0]).toMatchObject({
+      characterCount: 19,
+      generation: {
+        finishReason: 'stop',
+        completionTokens: 42,
+      },
+    });
+    expect(result.state?.recentInternalLlmAttempts).toHaveLength(2);
+  });
+
+  it('atomically regenerates only the selected summary and invalidates a covered skeleton', async () => {
+    const chat = completedChat(4);
+    install(chat);
+    const service = new StageSummaryService();
+    await service.processAllThrough(chat.length - 1);
+    const first = mocks.state!.stageSummary.entries[0]!;
+    const secondBefore = structuredClone(mocks.state!.stageSummary.entries[1]!);
+    const coveredMessagesBefore = mocks.state!.metrics.summaryMessagesCovered;
+    mocks.state!.storySkeleton = {
+      text: '旧骨架',
+      coveredThroughMessageId: first.sourceEndMessageId,
+      sourceHash: 'old-skeleton-source',
+    };
+    mocks.complete.mockResolvedValueOnce({
+      text: '重新生成的完整阶段总结。',
+      metadata: {
+        provider: 'main',
+        requestedMaxTokens: 1_600,
+        finishReason: 'length',
+        promptTokens: 1_000,
+        completionTokens: 50,
+        reasoningTokens: 20,
+        totalTokens: 1_050,
+        responseCharacters: 12,
+      },
+    });
+
+    const result = await service.regenerateEntry(
+      first.sourceStartMessageId,
+      first.updatedAt,
+    );
+
+    expect(result.previousCharacterCount).toBe(19);
+    expect(result.entry).toMatchObject({
+      text: '重新生成的完整阶段总结。',
+      characterCount: 12,
+      sourceStartMessageId: first.sourceStartMessageId,
+      sourceEndMessageId: first.sourceEndMessageId,
+      sourceHash: first.sourceHash,
+      generation: {
+        finishReason: 'length',
+        completionTokens: 50,
+        reasoningTokens: 20,
+      },
+    });
+    expect(result.state.stageSummary.entries[1]).toEqual(secondBefore);
+    expect(result.state.storySkeleton.stale).toBe(true);
+    expect(result.state.metrics.summaryMessagesCovered).toBe(coveredMessagesBefore);
+    expect(result.state.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      task: 'stage-summary',
+      status: 'completed',
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 3,
+      agentActiveAtStart: false,
+      completion: {
+        finishReason: 'length',
+        responseCharacters: 12,
+      },
+    });
+  });
+
+  it('keeps the old summary when regenerating the selected entry fails', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    const service = new StageSummaryService();
+    await service.processAllThrough(chat.length - 1);
+    const previous = structuredClone(mocks.state!.stageSummary.entries[0]!);
+    mocks.complete.mockRejectedValueOnce(new Error('upstream disconnected'));
+
+    await expect(service.regenerateEntry(
+      previous.sourceStartMessageId,
+      previous.updatedAt,
+    )).rejects.toThrow('upstream disconnected');
+
+    expect(mocks.state!.stageSummary.entries[0]).toEqual(previous);
+    expect(mocks.state!.metrics.summaryFailures).toBe(1);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      task: 'stage-summary',
+      status: 'failed',
+      error: 'upstream disconnected',
+    });
+  });
+
+  it('persists cancellation diagnostics without counting a cancelled summary as a failure', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    mocks.complete.mockRejectedValueOnce(
+      new StoryEchoTaskCancelledError('Agent前台请求开始'),
+    );
+
+    await expect(new StageSummaryService().processAllThrough(chat.length - 1))
+      .rejects.toThrow('Agent前台请求开始');
+
+    expect(mocks.state!.stageSummary.entries).toEqual([]);
+    expect(mocks.state!.metrics.summaryFailures).toBe(0);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      task: 'stage-summary',
+      status: 'cancelled',
+      requestedMaxTokens: 1_600,
+      agentActiveAtStart: false,
+      agentActiveAtEnd: false,
+      error: expect.stringContaining('Agent前台请求开始'),
+    });
+    expect(mocks.save).toHaveBeenCalledOnce();
   });
 
   it('closes a short chunk at an explicit story-phase transition', async () => {
@@ -179,7 +304,15 @@ describe('StageSummaryService', () => {
     install(chat);
     mocks.complete.mockImplementationOnce(async () => {
       chat[0]!.mes = 'changed while generating';
-      return 'stale summary';
+      return {
+        text: 'stale summary',
+        metadata: {
+          provider: 'main',
+          requestedMaxTokens: 1_600,
+          finishReason: 'stop',
+          responseCharacters: 13,
+        },
+      };
     });
     await expect(new StageSummaryService().processAllThrough(3))
       .rejects.toThrow('源消息发生变化');

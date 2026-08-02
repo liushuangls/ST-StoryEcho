@@ -1171,6 +1171,172 @@ function createUuid() {
   ].join("-");
 }
 
+// src/llm/completion-metadata.ts
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function nonNegativeInteger(...values) {
+  for (const value of values) {
+    if (typeof value !== "number" && typeof value !== "string" || typeof value === "string" && !value.trim()) {
+      continue;
+    }
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) {
+      return Math.floor(number);
+    }
+  }
+  return void 0;
+}
+function boundedString(value, maximumLength = 200) {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, maximumLength) : void 0;
+}
+function nestedRecord2(parent, key) {
+  const value = parent[key];
+  return isRecord3(value) ? value : {};
+}
+function completionMetadataFromPayload(payload, options) {
+  const root = isRecord3(payload) ? payload : {};
+  const choices = Array.isArray(root["choices"]) ? root["choices"] : [];
+  const choice = isRecord3(choices[0]) ? choices[0] : {};
+  const candidates = Array.isArray(root["candidates"]) ? root["candidates"] : [];
+  const candidate = isRecord3(candidates[0]) ? candidates[0] : {};
+  const usage = nestedRecord2(root, "usage");
+  const usageMetadata = nestedRecord2(root, "usageMetadata");
+  const completionDetails = nestedRecord2(usage, "completion_tokens_details");
+  const outputDetails = nestedRecord2(usage, "output_tokens_details");
+  const promptTokens = nonNegativeInteger(
+    usage["prompt_tokens"],
+    usage["input_tokens"],
+    usageMetadata["promptTokenCount"]
+  );
+  const completionTokens = nonNegativeInteger(
+    usage["completion_tokens"],
+    usage["output_tokens"],
+    usageMetadata["candidatesTokenCount"]
+  );
+  const reasoningTokens = nonNegativeInteger(
+    completionDetails["reasoning_tokens"],
+    outputDetails["reasoning_tokens"],
+    usage["reasoning_tokens"],
+    usageMetadata["thoughtsTokenCount"]
+  );
+  const totalTokens = nonNegativeInteger(
+    usage["total_tokens"],
+    usageMetadata["totalTokenCount"],
+    promptTokens !== void 0 && completionTokens !== void 0 ? promptTokens + completionTokens : void 0
+  );
+  const finishReason = boundedString(
+    choice["finish_reason"] ?? choice["stop_reason"] ?? root["finish_reason"] ?? root["stop_reason"] ?? root["stopReason"] ?? candidate["finishReason"]
+  );
+  const source = boundedString(options.source);
+  const model = boundedString(root["model"] ?? options.model);
+  return {
+    provider: options.provider,
+    requestedMaxTokens: Math.max(0, Math.floor(options.requestedMaxTokens)),
+    ...finishReason ? { finishReason } : {},
+    ...promptTokens !== void 0 ? { promptTokens } : {},
+    ...completionTokens !== void 0 ? { completionTokens } : {},
+    ...reasoningTokens !== void 0 ? { reasoningTokens } : {},
+    ...totalTokens !== void 0 ? { totalTokens } : {},
+    responseCharacters: Array.from(options.responseText).length,
+    ...source ? { source } : {},
+    ...model ? { model } : {}
+  };
+}
+function normalizeLlmCompletionMetadata(value) {
+  if (!isRecord3(value) || !["main", "openai-compatible"].includes(String(value["provider"]))) {
+    return void 0;
+  }
+  const requestedMaxTokens2 = nonNegativeInteger(value["requestedMaxTokens"]);
+  const responseCharacters = nonNegativeInteger(value["responseCharacters"]);
+  if (requestedMaxTokens2 === void 0 || responseCharacters === void 0) {
+    return void 0;
+  }
+  const finishReason = boundedString(value["finishReason"]);
+  const source = boundedString(value["source"]);
+  const model = boundedString(value["model"]);
+  const fallbackFrom = ["main", "openai-compatible"].includes(String(value["fallbackFrom"])) ? value["fallbackFrom"] : void 0;
+  const promptTokens = nonNegativeInteger(value["promptTokens"]);
+  const completionTokens = nonNegativeInteger(value["completionTokens"]);
+  const reasoningTokens = nonNegativeInteger(value["reasoningTokens"]);
+  const totalTokens = nonNegativeInteger(value["totalTokens"]);
+  return {
+    provider: value["provider"],
+    requestedMaxTokens: requestedMaxTokens2,
+    ...finishReason ? { finishReason } : {},
+    ...promptTokens !== void 0 ? { promptTokens } : {},
+    ...completionTokens !== void 0 ? { completionTokens } : {},
+    ...reasoningTokens !== void 0 ? { reasoningTokens } : {},
+    ...totalTokens !== void 0 ? { totalTokens } : {},
+    responseCharacters,
+    ...source ? { source } : {},
+    ...model ? { model } : {},
+    ...fallbackFrom ? { fallbackFrom } : {}
+  };
+}
+
+// src/debug/internal-llm-attempts.ts
+var MAX_INTERNAL_LLM_ATTEMPTS = 20;
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function finiteInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : fallback;
+}
+function optionalMessageId(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : void 0;
+}
+function normalizeAttempt(value) {
+  if (!isRecord4(value) || typeof value["id"] !== "string" || !["stage-summary", "story-skeleton"].includes(String(value["task"])) || !["completed", "cancelled", "failed"].includes(String(value["status"])) || typeof value["startedAt"] !== "string" || typeof value["finishedAt"] !== "string") {
+    return null;
+  }
+  const sourceStartMessageId = optionalMessageId(value["sourceStartMessageId"]);
+  const sourceEndMessageId = optionalMessageId(value["sourceEndMessageId"]);
+  const completion = normalizeLlmCompletionMetadata(value["completion"]);
+  const error = typeof value["error"] === "string" ? value["error"].replace(/\s+/gu, " ").trim().slice(0, 500) : "";
+  return {
+    id: value["id"].slice(0, 200),
+    task: value["task"],
+    status: value["status"],
+    startedAt: value["startedAt"],
+    finishedAt: value["finishedAt"],
+    durationMs: finiteInteger(value["durationMs"], 0),
+    ...sourceStartMessageId !== void 0 ? { sourceStartMessageId } : {},
+    ...sourceEndMessageId !== void 0 ? { sourceEndMessageId } : {},
+    requestedMaxTokens: finiteInteger(value["requestedMaxTokens"], 0),
+    agentActiveAtStart: value["agentActiveAtStart"] === true,
+    agentActiveAtEnd: value["agentActiveAtEnd"] === true,
+    ...completion ? { completion } : {},
+    ...error ? { error } : {}
+  };
+}
+function normalizeInternalLlmAttempts(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((candidate) => {
+    const attempt = normalizeAttempt(candidate);
+    return attempt ? [attempt] : [];
+  }).slice(-MAX_INTERNAL_LLM_ATTEMPTS);
+}
+function recordInternalLlmAttempt(state, attempt) {
+  state.recentInternalLlmAttempts.push(attempt);
+  if (state.recentInternalLlmAttempts.length > MAX_INTERNAL_LLM_ATTEMPTS) {
+    state.recentInternalLlmAttempts.splice(
+      0,
+      state.recentInternalLlmAttempts.length - MAX_INTERNAL_LLM_ATTEMPTS
+    );
+  }
+}
+function mergeInternalLlmAttempts(target, source) {
+  const byId = new Map(
+    [...target.recentInternalLlmAttempts, ...source.recentInternalLlmAttempts].map((attempt) => [attempt.id, attempt])
+  );
+  target.recentInternalLlmAttempts = [...byId.values()].slice(-MAX_INTERNAL_LLM_ATTEMPTS);
+}
+
 // src/debug/metrics.ts
 var MAX_DEBUG_TRACES = 50;
 function createMetrics() {
@@ -1228,6 +1394,7 @@ function recordDebugTrace(state, enabled, stage, message, details) {
 function resetDiagnostics(state) {
   state.metrics = createMetrics();
   state.debugTraces = [];
+  state.recentInternalLlmAttempts = [];
   delete state.lastInspection;
 }
 
@@ -1517,10 +1684,10 @@ function normalizeStorySkeletonText(raw, maxTokens) {
 // src/state/repository.ts
 var MAX_EDITED_SUMMARY_CHARACTERS = 64e3;
 var LEGACY_SUMMARY_UPDATED_AT = "1970-01-01T00:00:00.000Z";
-function isRecord3(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function finiteInteger(value, fallback) {
+function finiteInteger2(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.floor(number) : fallback;
 }
@@ -1540,15 +1707,17 @@ function createState(ownerChatId) {
       sourceHash: ""
     },
     metrics: createMetrics(),
-    debugTraces: []
+    debugTraces: [],
+    recentInternalLlmAttempts: []
   };
 }
 function normalizeStageSummaryEntry(value) {
-  if (!isRecord3(value)) {
+  if (!isRecord5(value)) {
     return null;
   }
   const text = typeof value["text"] === "string" ? value["text"].trim() : "";
   const deleted = value["deleted"] === true;
+  const generation = normalizeLlmCompletionMetadata(value["generation"]);
   const sourceStartMessageId = Number(value["sourceStartMessageId"]);
   const sourceEndMessageId = Number(value["sourceEndMessageId"]);
   if (!text && !deleted || !Number.isInteger(sourceStartMessageId) || !Number.isInteger(sourceEndMessageId) || sourceStartMessageId < 0 || sourceEndMessageId < sourceStartMessageId) {
@@ -1556,6 +1725,8 @@ function normalizeStageSummaryEntry(value) {
   }
   return {
     text: deleted ? "" : text,
+    characterCount: deleted ? 0 : Array.from(text).length,
+    ...generation ? { generation } : {},
     sourceStartMessageId,
     sourceEndMessageId,
     sourceHash: typeof value["sourceHash"] === "string" ? value["sourceHash"] : "",
@@ -1565,7 +1736,7 @@ function normalizeStageSummaryEntry(value) {
   };
 }
 function normalizeStageSummary(value) {
-  const stored = isRecord3(value) ? value : {};
+  const stored = isRecord5(value) ? value : {};
   const entries = [];
   const candidates = Array.isArray(stored["entries"]) ? stored["entries"] : [];
   let expectedStartMessageId = 0;
@@ -1579,10 +1750,11 @@ function normalizeStageSummary(value) {
   }
   if (entries.length === 0) {
     const legacyText = typeof stored["text"] === "string" ? stored["text"].trim() : "";
-    const legacyEnd = finiteInteger(stored["coveredThroughMessageId"], -1);
+    const legacyEnd = finiteInteger2(stored["coveredThroughMessageId"], -1);
     if (legacyText && legacyEnd >= 0) {
       entries.push({
         text: legacyText,
+        characterCount: Array.from(legacyText).length,
         sourceStartMessageId: 0,
         sourceEndMessageId: legacyEnd,
         sourceHash: typeof stored["coveredThroughHash"] === "string" ? stored["coveredThroughHash"] : "",
@@ -1599,9 +1771,9 @@ function normalizeStageSummary(value) {
   };
 }
 function normalizeStorySkeleton(value) {
-  const stored = isRecord3(value) ? value : {};
+  const stored = isRecord5(value) ? value : {};
   const text = typeof stored["text"] === "string" ? stored["text"].trim() : "";
-  const coveredThroughMessageId = finiteInteger(stored["coveredThroughMessageId"], -1);
+  const coveredThroughMessageId = finiteInteger2(stored["coveredThroughMessageId"], -1);
   if (!text || coveredThroughMessageId < 0) {
     return {
       text: "",
@@ -1620,21 +1792,21 @@ function normalizeStorySkeleton(value) {
   };
 }
 function normalizeInspection(value) {
-  if (!isRecord3(value) || typeof value["createdAt"] !== "string") {
+  if (!isRecord5(value) || typeof value["createdAt"] !== "string") {
     return void 0;
   }
   return {
     createdAt: value["createdAt"],
     generationType: typeof value["generationType"] === "string" ? value["generationType"] : "normal",
-    retainedStartIndex: finiteInteger(value["retainedStartIndex"], 0),
-    retainedEndIndex: finiteInteger(value["retainedEndIndex"], -1),
-    removedMessageCount: Math.max(0, finiteInteger(value["removedMessageCount"], 0)),
-    estimatedRemovedTokens: Math.max(0, finiteInteger(value["estimatedRemovedTokens"], 0)),
-    estimatedInjectedTokens: Math.max(0, finiteInteger(value["estimatedInjectedTokens"], 0)),
-    estimatedNetSavedTokens: Math.max(0, finiteInteger(value["estimatedNetSavedTokens"], 0)),
-    estimatedSummaryTokens: Math.max(0, finiteInteger(value["estimatedSummaryTokens"], 0)),
-    summaryCoveredThroughMessageId: finiteInteger(value["summaryCoveredThroughMessageId"], -1),
-    durationMs: Math.max(0, finiteInteger(value["durationMs"], 0)),
+    retainedStartIndex: finiteInteger2(value["retainedStartIndex"], 0),
+    retainedEndIndex: finiteInteger2(value["retainedEndIndex"], -1),
+    removedMessageCount: Math.max(0, finiteInteger2(value["removedMessageCount"], 0)),
+    estimatedRemovedTokens: Math.max(0, finiteInteger2(value["estimatedRemovedTokens"], 0)),
+    estimatedInjectedTokens: Math.max(0, finiteInteger2(value["estimatedInjectedTokens"], 0)),
+    estimatedNetSavedTokens: Math.max(0, finiteInteger2(value["estimatedNetSavedTokens"], 0)),
+    estimatedSummaryTokens: Math.max(0, finiteInteger2(value["estimatedSummaryTokens"], 0)),
+    summaryCoveredThroughMessageId: finiteInteger2(value["summaryCoveredThroughMessageId"], -1),
+    durationMs: Math.max(0, finiteInteger2(value["durationMs"], 0)),
     warnings: Array.isArray(value["warnings"]) ? value["warnings"].filter((item) => typeof item === "string").slice(0, 100) : []
   };
 }
@@ -1643,10 +1815,10 @@ function normalizeDebugTraces(value) {
     return [];
   }
   return value.flatMap((candidate) => {
-    if (!isRecord3(candidate) || typeof candidate["id"] !== "string" || typeof candidate["createdAt"] !== "string" || typeof candidate["message"] !== "string" || !["summary", "interceptor", "error"].includes(String(candidate["stage"]))) {
+    if (!isRecord5(candidate) || typeof candidate["id"] !== "string" || typeof candidate["createdAt"] !== "string" || typeof candidate["message"] !== "string" || !["summary", "interceptor", "error"].includes(String(candidate["stage"]))) {
       return [];
     }
-    const details = isRecord3(candidate["details"]) ? Object.fromEntries(Object.entries(candidate["details"]).flatMap(([key, detail]) => typeof detail === "string" || typeof detail === "number" || typeof detail === "boolean" || detail === null ? [[key, detail]] : [])) : void 0;
+    const details = isRecord5(candidate["details"]) ? Object.fromEntries(Object.entries(candidate["details"]).flatMap(([key, detail]) => typeof detail === "string" || typeof detail === "number" || typeof detail === "boolean" || detail === null ? [[key, detail]] : [])) : void 0;
     return [{
       id: candidate["id"],
       createdAt: candidate["createdAt"],
@@ -1657,7 +1829,7 @@ function normalizeDebugTraces(value) {
   }).slice(-50);
 }
 function isStoredState(value) {
-  return isRecord3(value) && (value["schemaVersion"] === 1 || value["schemaVersion"] === CHAT_STATE_VERSION) && typeof value["chatUuid"] === "string" && typeof value["ownerChatId"] === "string";
+  return isRecord5(value) && (value["schemaVersion"] === 1 || value["schemaVersion"] === CHAT_STATE_VERSION) && typeof value["chatUuid"] === "string" && typeof value["ownerChatId"] === "string";
 }
 function normalizeState(stored) {
   const inspection = normalizeInspection(stored["lastInspection"]);
@@ -1669,6 +1841,9 @@ function normalizeState(stored) {
     storySkeleton: normalizeStorySkeleton(stored["storySkeleton"]),
     metrics: normalizeMetrics(stored["metrics"]),
     debugTraces: normalizeDebugTraces(stored["debugTraces"]),
+    recentInternalLlmAttempts: normalizeInternalLlmAttempts(
+      stored["recentInternalLlmAttempts"]
+    ),
     ...inspection ? { lastInspection: inspection } : {}
   };
 }
@@ -1717,7 +1892,8 @@ var StoryStateRepository = class {
         chatUuid: createUuid(),
         ownerChatId: currentChatId,
         metrics: createMetrics(),
-        debugTraces: []
+        debugTraces: [],
+        recentInternalLlmAttempts: []
       };
       if (state.storySkeleton.text) {
         state.storySkeleton.stale = true;
@@ -1769,6 +1945,7 @@ var StoryStateRepository = class {
     state.stageSummary.entries[index] = {
       ...existing,
       text: normalized.text,
+      characterCount: Array.from(normalized.text).length,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       manuallyEdited: true
     };
@@ -1804,6 +1981,7 @@ var StoryStateRepository = class {
       entries[index] = {
         ...existing,
         text: "",
+        characterCount: 0,
         deleted: true,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       };
@@ -2128,17 +2306,17 @@ async function withInternalGeneration(request, operation) {
 
 // src/llm/main-provider.ts
 var MAX_REQUEST_TIMEOUT_MS = 6e5;
-function isRecord4(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function tuneInternalGenerationSettings(value) {
-  if (!isRecord4(value)) {
+  if (!isRecord6(value)) {
     return;
   }
   if ("reasoning_effort" in value) {
     value["reasoning_effort"] = "low";
   }
-  if (isRecord4(value["thinking"]) && "type" in value["thinking"]) {
+  if (isRecord6(value["thinking"]) && "type" in value["thinking"]) {
     value["thinking"] = { ...value["thinking"], type: "disabled" };
   }
   if ("enable_thinking" in value) {
@@ -2168,7 +2346,7 @@ async function withLightweightMainReasoning(context, operation) {
 }
 var MainLlmProvider = class {
   id = "main";
-  async complete(request) {
+  async perform(request, captureMetadata) {
     const context = getContext();
     const markedRequest = markInternalGenerationRequest(request.system, request.prompt);
     const options = {
@@ -2196,12 +2374,21 @@ var MainLlmProvider = class {
       () => timeoutController.abort(new LlmRequestTimeoutError(requestedTimeoutMs)),
       requestedTimeoutMs
     ) : null;
-    let response;
+    let result;
     try {
-      response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
+      result = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
         context,
         () => runStoryEchoTaskAbortable(
-          () => context.generateRaw(options),
+          async () => {
+            if (captureMetadata && context.generateRawData && context.extractMessageFromData) {
+              const payload = await context.generateRawData(options);
+              return {
+                text: context.extractMessageFromData(payload, context.mainApi),
+                payload
+              };
+            }
+            return { text: await context.generateRaw(options) };
+          },
           timeoutController?.signal ?? request.signal
         )
       ));
@@ -2211,7 +2398,29 @@ var MainLlmProvider = class {
       }
       request.signal?.removeEventListener("abort", onRequestAbort);
     }
-    return response.replaceAll(`[${markedRequest.marker}]`, "").trim();
+    return {
+      text: result.text.replaceAll(`[${markedRequest.marker}]`, "").trim(),
+      ...result.payload !== void 0 ? { payload: result.payload } : {},
+      requestedMaxTokens: options.responseLength ?? 0
+    };
+  }
+  async complete(request) {
+    return (await this.perform(request, false)).text;
+  }
+  async completeDetailed(request) {
+    const context = getContext();
+    const result = await this.perform(request, true);
+    const identity = getMainConnectionIdentity(context);
+    return {
+      text: result.text,
+      metadata: completionMetadataFromPayload(result.payload, {
+        provider: this.id,
+        requestedMaxTokens: result.requestedMaxTokens,
+        responseText: result.text,
+        ...identity.source ? { source: identity.source } : {},
+        ...identity.model ? { model: identity.model } : {}
+      })
+    };
   }
   async testConnection() {
     const response = await this.complete({
@@ -2320,22 +2529,22 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
 var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
 var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 var MAX_REQUEST_TIMEOUT_MS2 = 6e5;
-function isRecord5(value) {
+function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function responseContent(payload) {
-  if (!isRecord5(payload)) {
+  if (!isRecord7(payload)) {
     return typeof payload === "string" ? payload : null;
   }
   const choices = payload["choices"];
-  const first = Array.isArray(choices) && isRecord5(choices[0]) ? choices[0] : null;
-  const message = first && isRecord5(first["message"]) ? first["message"] : null;
+  const first = Array.isArray(choices) && isRecord7(choices[0]) ? choices[0] : null;
+  const message = first && isRecord7(first["message"]) ? first["message"] : null;
   const content = message?.["content"];
   if (typeof content === "string") {
     return content;
   }
   if (Array.isArray(content)) {
-    return content.map((part) => isRecord5(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
+    return content.map((part) => isRecord7(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
   }
   if (first && typeof first["text"] === "string") {
     return first["text"];
@@ -2344,11 +2553,11 @@ function responseContent(payload) {
 }
 function responseError(payload, fallback, apiKey) {
   let message = fallback;
-  if (isRecord5(payload)) {
+  if (isRecord7(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       message = error;
-    } else if (isRecord5(error) && typeof error["message"] === "string") {
+    } else if (isRecord7(error) && typeof error["message"] === "string") {
       message = error["message"];
     } else if (typeof payload["message"] === "string") {
       message = payload["message"];
@@ -2365,6 +2574,9 @@ var OpenAiCompatibleProvider = class {
   }
   id = "openai-compatible";
   async complete(request) {
+    return (await this.completeDetailed(request)).text;
+  }
+  async completeDetailed(request) {
     const model = this.config.model.trim();
     if (!model) {
       throw new Error("\u81EA\u5B9A\u4E49LLM\u6A21\u578B\u540D\u4E0D\u80FD\u4E3A\u7A7A\u3002");
@@ -2389,13 +2601,17 @@ var OpenAiCompatibleProvider = class {
     const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
     const abort = () => controller.abort();
     request.signal?.addEventListener("abort", abort, { once: true });
+    const maxTokens = Math.min(
+      1e4,
+      Math.max(16, Math.floor(request.maxTokens ?? 8192))
+    );
     const body = {
       messages: [
         { role: "system", content: request.system },
         { role: "user", content: request.prompt }
       ],
       model,
-      max_tokens: Math.min(1e4, Math.max(16, Math.floor(request.maxTokens ?? 8192))),
+      max_tokens: maxTokens,
       temperature: 0,
       top_p: 1,
       stream: false,
@@ -2449,7 +2665,16 @@ var OpenAiCompatibleProvider = class {
       if (!content?.trim()) {
         throw new Error("\u81EA\u5B9A\u4E49LLM\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u5185\u5BB9\u3002");
       }
-      return content;
+      return {
+        text: content,
+        metadata: completionMetadataFromPayload(payload, {
+          provider: this.id,
+          requestedMaxTokens: maxTokens,
+          responseText: content,
+          source: "custom",
+          model
+        })
+      };
     } catch (error) {
       if (request.signal?.aborted) {
         throw error;
@@ -2500,9 +2725,26 @@ function yieldBackgroundAtRetryBoundary() {
     throw new BackgroundYieldForForegroundError();
   }
 }
-async function completeNonEmpty(provider, request) {
-  const first = await provider.complete(request);
-  if (first.trim()) {
+async function providerCompleteDetailed(provider, request) {
+  if (provider.completeDetailed) {
+    return provider.completeDetailed(request);
+  }
+  const text = await provider.complete(request);
+  return {
+    text,
+    metadata: {
+      provider: provider.id,
+      requestedMaxTokens: Math.min(
+        MAX_RETRY_TOKENS,
+        Math.max(16, Math.floor(request.maxTokens ?? 8192))
+      ),
+      responseCharacters: Array.from(text).length
+    }
+  };
+}
+async function completeNonEmptyDetailed(provider, request) {
+  const first = await providerCompleteDetailed(provider, request);
+  if (first.text.trim()) {
     return first;
   }
   throwIfStoryEchoTaskCancelled(request.signal);
@@ -2510,16 +2752,19 @@ async function completeNonEmpty(provider, request) {
   const initialBudget = Math.max(128, Math.floor(request.maxTokens ?? 1024));
   const retryBudget = Math.min(MAX_RETRY_TOKENS, initialBudget * 2);
   logger.warn(`\u5185\u90E8LLM\u8FD4\u56DE\u7A7A\u5185\u5BB9\uFF0C\u4F7F\u7528 ${retryBudget} Token\u9884\u7B97\u91CD\u8BD5\u4E00\u6B21\u3002`);
-  const second = await provider.complete({ ...request, maxTokens: retryBudget });
-  if (!second.trim()) {
+  const second = await providerCompleteDetailed(provider, {
+    ...request,
+    maxTokens: retryBudget
+  });
+  if (!second.text.trim()) {
     throw new Error("\u5185\u90E8LLM\u8FDE\u7EED\u4E24\u6B21\u8FD4\u56DE\u7A7A\u5185\u5BB9\u3002");
   }
   return second;
 }
-async function completeNonEmptyWithTimeoutRetry(provider, request) {
+async function completeNonEmptyDetailedWithTimeoutRetry(provider, request) {
   for (let retry = 0; ; retry += 1) {
     try {
-      return await completeNonEmpty(provider, request);
+      return await completeNonEmptyDetailed(provider, request);
     } catch (error) {
       throwIfStoryEchoTaskCancelled(request.signal);
       if (!isLlmRequestTimeoutError(error) || retry >= MAX_LLM_TIMEOUT_RETRIES) {
@@ -2530,11 +2775,11 @@ async function completeNonEmptyWithTimeoutRetry(provider, request) {
     }
   }
 }
-async function completeWithConfiguredProvider(settings, request) {
+async function completeWithConfiguredProviderDetailed(settings, request) {
   request = withActiveTaskSignal(request);
   const provider = createLlmProvider(settings);
   try {
-    return await completeNonEmptyWithTimeoutRetry(provider, request);
+    return await completeNonEmptyDetailedWithTimeoutRetry(provider, request);
   } catch (error) {
     throwIfStoryEchoTaskCancelled(request.signal);
     if (provider.id !== "openai-compatible" || !settings.llm.custom.fallbackToMain) {
@@ -2542,7 +2787,67 @@ async function completeWithConfiguredProvider(settings, request) {
     }
     yieldBackgroundAtRetryBoundary();
     logger.warn("\u81EA\u5B9A\u4E49LLM\u8C03\u7528\u5931\u8D25\uFF0C\u56DE\u9000\u5230SillyTavern\u4E3B\u8FDE\u63A5\u3002", error);
-    return completeNonEmptyWithTimeoutRetry(new MainLlmProvider(), request);
+    const result = await completeNonEmptyDetailedWithTimeoutRetry(
+      new MainLlmProvider(),
+      request
+    );
+    return {
+      ...result,
+      metadata: {
+        ...result.metadata,
+        fallbackFrom: provider.id
+      }
+    };
+  }
+}
+
+// src/llm/observed-completion.ts
+function requestedMaxTokens(request) {
+  return Math.min(1e4, Math.max(16, Math.floor(request.maxTokens ?? 8192)));
+}
+function boundedError(error) {
+  return (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim().slice(0, 500);
+}
+async function completeObservedInternalRequest(state, settings, request, context) {
+  const startedAt = /* @__PURE__ */ new Date();
+  const startedAtMs = performance.now();
+  const id = createUuid();
+  const agentActiveAtStart = tauriTavernAgentBridge.isRunActive();
+  try {
+    const result = await completeWithConfiguredProviderDetailed(settings, request);
+    const finishedAt = /* @__PURE__ */ new Date();
+    recordInternalLlmAttempt(state, {
+      id,
+      task: context.task,
+      status: "completed",
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs: Math.max(0, Math.round(performance.now() - startedAtMs)),
+      sourceStartMessageId: context.sourceStartMessageId,
+      sourceEndMessageId: context.sourceEndMessageId,
+      requestedMaxTokens: result.metadata.requestedMaxTokens,
+      agentActiveAtStart,
+      agentActiveAtEnd: tauriTavernAgentBridge.isRunActive(),
+      completion: result.metadata
+    });
+    return result;
+  } catch (error) {
+    const finishedAt = /* @__PURE__ */ new Date();
+    recordInternalLlmAttempt(state, {
+      id,
+      task: context.task,
+      status: isStoryEchoTaskCancelledError(error) ? "cancelled" : "failed",
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs: Math.max(0, Math.round(performance.now() - startedAtMs)),
+      sourceStartMessageId: context.sourceStartMessageId,
+      sourceEndMessageId: context.sourceEndMessageId,
+      requestedMaxTokens: requestedMaxTokens(request),
+      agentActiveAtStart,
+      agentActiveAtEnd: tauriTavernAgentBridge.isRunActive(),
+      error: boundedError(error)
+    });
+    throw error;
   }
 }
 
@@ -3209,12 +3514,17 @@ ${prompt}`;
         requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1e3
       });
     }
-    const raw = await completeWithConfiguredProvider(settings, {
+    const completion = await completeObservedInternalRequest(state, settings, {
       system: STAGE_SUMMARY_SYSTEM_PROMPT,
       prompt,
       maxTokens: settings.summary.maxTokens,
       timeoutMs: SUMMARY_LLM_TIMEOUT_MS
+    }, {
+      task: "stage-summary",
+      sourceStartMessageId: chunk.startMessageId,
+      sourceEndMessageId: chunk.endMessageId
     });
+    const raw = completion.text;
     const currentChat = getContext().chat;
     const currentHash = await sha256(sourcePayload2(
       currentChat.slice(chunk.startMessageId, chunk.endMessageId + 1),
@@ -3237,6 +3547,8 @@ ${prompt}`;
     return {
       entry: {
         text,
+        characterCount: Array.from(text).length,
+        generation: completion.metadata,
         sourceStartMessageId: chunk.startMessageId,
         sourceEndMessageId: chunk.endMessageId,
         sourceHash: snapshotHash,
@@ -3247,6 +3559,146 @@ ${prompt}`;
       personaLabelSanitized: text !== withoutPersonaSanitization,
       previousSummaryCharacters: Array.from(boundedPrevious).length
     };
+  }
+  regenerateEntry(sourceStartMessageId, expectedUpdatedAt) {
+    const requestedChatId = getCurrentChatId();
+    const operation = this.queue.then(
+      () => this.regenerateNow(
+        sourceStartMessageId,
+        requestedChatId,
+        expectedUpdatedAt
+      ),
+      () => this.regenerateNow(
+        sourceStartMessageId,
+        requestedChatId,
+        expectedUpdatedAt
+      )
+    );
+    this.queue = operation.then(() => void 0, () => void 0);
+    return operation;
+  }
+  async regenerateNow(sourceStartMessageId, requestedChatId, expectedUpdatedAt) {
+    if (!requestedChatId || getCurrentChatId() !== requestedChatId || !Number.isInteger(sourceStartMessageId) || sourceStartMessageId < 0) {
+      throw new Error("\u7B49\u5F85\u91CD\u65B0\u751F\u6210\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\u6216\u76EE\u6807\u65E0\u6548\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
+    }
+    const settings = this.settingsRepository.get();
+    let state = await this.stateRepository.getOrCreate();
+    if (!state) {
+      throw new Error("\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u804A\u5929\u3002");
+    }
+    state = await this.reconcileHistory(state) ?? state;
+    assertChatOwner(state);
+    const index = state.stageSummary.entries.findIndex(
+      (entry) => entry.sourceStartMessageId === sourceStartMessageId && !entry.deleted
+    );
+    const current = index >= 0 ? state.stageSummary.entries[index] : void 0;
+    if (!current) {
+      throw new Error("\u8981\u91CD\u65B0\u751F\u6210\u7684\u9636\u6BB5\u603B\u7ED3\u4E0D\u5B58\u5728\uFF0C\u53EF\u80FD\u5DF2\u88AB\u5220\u9664\u6216\u56E0\u5386\u53F2\u53D8\u5316\u800C\u5931\u6548\u3002");
+    }
+    if (expectedUpdatedAt && current.updatedAt !== expectedUpdatedAt) {
+      throw new Error("\u9636\u6BB5\u603B\u7ED3\u5DF2\u5728\u5176\u4ED6\u64CD\u4F5C\u4E2D\u53D1\u751F\u53D8\u5316\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5\u3002");
+    }
+    const context = getContext();
+    if (current.sourceEndMessageId >= context.chat.length) {
+      throw new Error("\u9636\u6BB5\u603B\u7ED3\u6765\u6E90\u8303\u56F4\u5DF2\u8D85\u51FA\u5F53\u524D\u804A\u5929\uFF0C\u8BF7\u5148\u5237\u65B0\u72B6\u6001\u3002");
+    }
+    const snapshot = context.chat.slice(current.sourceStartMessageId, current.sourceEndMessageId + 1).map((message) => ({
+      is_user: message.is_user,
+      is_system: Boolean(message.is_system),
+      ...message.name ? { name: message.name } : {},
+      mes: message.mes
+    }));
+    const sourceHash = await sha256(sourcePayload2(snapshot, current.sourceStartMessageId));
+    if (current.sourceHash && current.sourceHash !== sourceHash) {
+      throw new Error("\u9636\u6BB5\u603B\u7ED3\u6765\u6E90\u6D88\u606F\u5DF2\u7ECF\u53D8\u5316\uFF0C\u8BF7\u5148\u5237\u65B0\u5E76\u91CD\u65B0\u5904\u7406\u5386\u53F2\u3002");
+    }
+    const chunk = {
+      startMessageId: current.sourceStartMessageId,
+      endMessageId: current.sourceEndMessageId,
+      snapshot,
+      sourceCharacters: snapshot.reduce((total, message) => total + message.mes.length, 0)
+    };
+    const entriesSnapshot = state.stageSummary.entries.map((entry) => ({ ...entry }));
+    const skeletonSnapshot = { ...state.storySkeleton };
+    const priorAttemptId = state.recentInternalLlmAttempts.at(-1)?.id;
+    const previousSummary = latestActiveSummaryText(entriesSnapshot.slice(0, index));
+    try {
+      const generated = await this.generateEntry(
+        context,
+        settings,
+        state,
+        chunk,
+        previousSummary
+      );
+      const live = this.stateRepository.getExisting();
+      if (!live || live.ownerChatId !== state.ownerChatId) {
+        throw new Error("\u91CD\u65B0\u751F\u6210\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u4E22\u5F03\u672C\u6B21\u7ED3\u679C\u3002");
+      }
+      if (!sameStageSummaryEntries(live.stageSummary.entries, entriesSnapshot)) {
+        throw new Error("\u91CD\u65B0\u751F\u6210\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u5DF2\u6709\u603B\u7ED3\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u4E22\u5F03\u672C\u6B21\u7ED3\u679C\u3002");
+      }
+      if (!sameStorySkeletonRevision(live.storySkeleton, skeletonSnapshot)) {
+        throw new Error("\u91CD\u65B0\u751F\u6210\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u5168\u5C40\u9AA8\u67B6\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u4E22\u5F03\u672C\u6B21\u7ED3\u679C\u3002");
+      }
+      mergeInternalLlmAttempts(live, state);
+      const replacementIndex = live.stageSummary.entries.findIndex(
+        (entry) => entry.sourceStartMessageId === sourceStartMessageId && !entry.deleted
+      );
+      if (replacementIndex < 0) {
+        throw new Error("\u8981\u91CD\u65B0\u751F\u6210\u7684\u9636\u6BB5\u603B\u7ED3\u5DF2\u5931\u6548\uFF0C\u5DF2\u4FDD\u7559\u539F\u6709\u7ED3\u679C\u3002");
+      }
+      const previousCharacterCount = Array.from(
+        live.stageSummary.entries[replacementIndex].text
+      ).length;
+      live.stageSummary.entries[replacementIndex] = generated.entry;
+      if (live.storySkeleton.text.trim() && generated.entry.sourceEndMessageId <= live.storySkeleton.coveredThroughMessageId) {
+        live.storySkeleton = { ...live.storySkeleton, stale: true };
+      }
+      const latest = live.stageSummary.entries.at(-1);
+      live.stageSummary = {
+        entries: live.stageSummary.entries,
+        coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+        coveredThroughHash: latest?.sourceHash ?? "",
+        ...latest ? { updatedAt: latest.updatedAt } : {}
+      };
+      live.metrics.summaryUpdates += 1;
+      live.metrics.totalSummaryMs += generated.durationMs;
+      live.metrics.lastSummaryAt = generated.entry.updatedAt;
+      delete live.lastInspection;
+      recordDebugTrace(live, settings.debug, "summary", "\u5355\u6761\u9636\u6BB5\u603B\u7ED3\u5DF2\u539F\u5B50\u91CD\u65B0\u751F\u6210\u3002", {
+        range: `${generated.entry.sourceStartMessageId}-${generated.entry.sourceEndMessageId}`,
+        previousCharacters: previousCharacterCount,
+        summaryCharacters: generated.entry.characterCount ?? generated.entry.text.length,
+        finishReason: generated.entry.generation?.finishReason ?? "unknown",
+        completionTokens: generated.entry.generation?.completionTokens ?? -1,
+        reasoningTokens: generated.entry.generation?.reasoningTokens ?? -1,
+        skeletonMarkedStale: Boolean(live.storySkeleton.stale)
+      });
+      await this.stateRepository.save(live);
+      return {
+        state: live,
+        entry: generated.entry,
+        previousCharacterCount
+      };
+    } catch (error) {
+      const attemptRecorded = state.recentInternalLlmAttempts.at(-1)?.id !== priorAttemptId;
+      if (!isStoryEchoTaskCancelledError(error) && attemptRecorded) {
+        state.metrics.summaryFailures += 1;
+        recordDebugTrace(state, settings.debug, "error", "\u91CD\u65B0\u751F\u6210\u5355\u6761\u9636\u6BB5\u603B\u7ED3\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u539F\u6709\u7ED3\u679C\u3002", {
+          range: `${current.sourceStartMessageId}-${current.sourceEndMessageId}`,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+      if (attemptRecorded) {
+        try {
+          assertChatOwner(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn("\u4FDD\u5B58\u5355\u6761\u9636\u6BB5\u603B\u7ED3\u91CD\u65B0\u751F\u6210\u8BCA\u65AD\u65F6\u804A\u5929\u5DF2\u5207\u6362\u6216\u5143\u6570\u636E\u4E0D\u53EF\u7528\u3002", saveError);
+        }
+      }
+      throw error;
+    }
   }
   async rebuildNow(targetEndMessageId, requestedChatId, onProgress) {
     if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
@@ -3327,6 +3779,7 @@ ${prompt}`;
       if (!sameStorySkeletonRevision(live.storySkeleton, skeletonSnapshot)) {
         throw new Error("\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u671F\u95F4\u5168\u5C40\u9AA8\u67B6\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u4E22\u5F03\u672C\u6B21\u7ED3\u679C\u3002");
       }
+      mergeInternalLlmAttempts(live, state);
       const latest = rebuiltEntries.at(-1);
       const rebuiltSourceHash = await sha256(sourcePayload2(
         chatSnapshot.slice(0, latest.sourceEndMessageId + 1),
@@ -3365,6 +3818,12 @@ ${prompt}`;
       return { state, updatedChunks: rebuiltEntries.length };
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
+        try {
+          assertChatOwner(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u53D6\u6D88\u8BCA\u65AD\u65F6\u804A\u5929\u5DF2\u5207\u6362\u6216\u5143\u6570\u636E\u4E0D\u53EF\u7528\u3002", saveError);
+        }
         throw error;
       }
       state.metrics.summaryFailures += 1;
@@ -3430,6 +3889,7 @@ ${prompt}`;
         if (!sameStageSummaryEntries(live.stageSummary.entries, entriesBeforeRequest)) {
           throw new Error("\u9636\u6BB5\u603B\u7ED3\u751F\u6210\u671F\u95F4\u5DF2\u6709\u603B\u7ED3\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u4E22\u5F03\u672C\u6B21\u7ED3\u679C\u3002");
         }
+        mergeInternalLlmAttempts(live, state);
         state = live;
         assertChatOwner(state);
         state.stageSummary.entries.push(generated.entry);
@@ -3461,6 +3921,12 @@ ${prompt}`;
       }
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
+        try {
+          assertChatOwner(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u53D6\u6D88\u8BCA\u65AD\u65F6\u804A\u5929\u5DF2\u5207\u6362\u6216\u5143\u6570\u636E\u4E0D\u53EF\u7528\u3002", saveError);
+        }
         throw error;
       }
       state.metrics.summaryFailures += 1;
@@ -3827,7 +4293,7 @@ var StorySkeletonService = class {
       const worldBackground = await this.buildWorldBackground(state, batch, settings);
       const mode = cleanBuildPromptMode(options.rebuild, staleAtStart, index > 0);
       const acceptedPreviousSkeleton = draft;
-      const raw = await completeWithConfiguredProvider(settings, {
+      const completion = await completeObservedInternalRequest(state, settings, {
         system: STORY_SKELETON_SYSTEM_PROMPT,
         prompt: buildStorySkeletonPrompt({
           existingSkeleton: acceptedPreviousSkeleton,
@@ -3838,8 +4304,15 @@ var StorySkeletonService = class {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
         timeoutMs: SUMMARY_LLM_TIMEOUT_MS
+      }, {
+        task: "story-skeleton",
+        sourceStartMessageId: first.sourceStartMessageId,
+        sourceEndMessageId: last.sourceEndMessageId
       });
-      draft = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      draft = normalizeStorySkeletonText(
+        completion.text,
+        settings.summary.skeletonMaxTokens
+      );
       processedEntries += batch.length;
       this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
       options.onProgress?.({
@@ -3849,6 +4322,7 @@ var StorySkeletonService = class {
       });
     }
     const live = this.validateCleanBuildSources(state, sourceSnapshot, skeletonSnapshot);
+    mergeInternalLlmAttempts(live, state);
     const updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     live.storySkeleton = {
       text: draft,
@@ -3907,7 +4381,7 @@ var StorySkeletonService = class {
         coveredThroughMessageId
       );
       const worldBackground = await this.buildWorldBackground(state, [sourceEntry], settings);
-      const raw = await completeWithConfiguredProvider(settings, {
+      const completion = await completeObservedInternalRequest(state, settings, {
         system: STORY_SKELETON_SYSTEM_PROMPT,
         prompt: buildStorySkeletonPrompt({
           existingSkeleton: priorSkeleton.text,
@@ -3918,8 +4392,15 @@ var StorySkeletonService = class {
         }),
         maxTokens: settings.summary.skeletonMaxTokens,
         timeoutMs: SUMMARY_LLM_TIMEOUT_MS
+      }, {
+        task: "story-skeleton",
+        sourceStartMessageId: sourceEntry.sourceStartMessageId,
+        sourceEndMessageId: sourceEntry.sourceEndMessageId
       });
-      const text = normalizeStorySkeletonText(raw, settings.summary.skeletonMaxTokens);
+      const text = normalizeStorySkeletonText(
+        completion.text,
+        settings.summary.skeletonMaxTokens
+      );
       const live = this.validateIncrementalSources(
         state,
         settings,
@@ -3928,6 +4409,7 @@ var StorySkeletonService = class {
         sourceSnapshot,
         coveredThroughMessageId
       );
+      mergeInternalLlmAttempts(live, state);
       const updatedAt = (/* @__PURE__ */ new Date()).toISOString();
       state = live;
       state.storySkeleton = {
@@ -3986,6 +4468,12 @@ var StorySkeletonService = class {
       return await this.runIncrementalUpdates(state, settings, options);
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
+        try {
+          assertChatOwner2(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn("\u4FDD\u5B58\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u53D6\u6D88\u8BCA\u65AD\u65F6\u804A\u5929\u5DF2\u5207\u6362\u6216\u5143\u6570\u636E\u4E0D\u53EF\u7528\u3002", saveError);
+        }
         throw error;
       }
       state.metrics.skeletonFailures += 1;
@@ -4549,7 +5037,8 @@ function buildDebugReport(state, settings) {
     },
     metrics: state.metrics,
     runtimeDiagnostics: {
-      taskQueue: storyEchoTaskCoordinator.snapshot()
+      taskQueue: storyEchoTaskCoordinator.snapshot(),
+      recentInternalLlmAttempts: state.recentInternalLlmAttempts
     },
     lastInspection: state.lastInspection ?? null,
     recentDebugTraces: state.debugTraces
@@ -4567,16 +5056,16 @@ function buildDebugReport(state, settings) {
 // src/llm/model-list.ts
 var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
 var MAX_RESPONSE_BYTES2 = 2 * 1024 * 1024;
-function isRecord6(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function errorMessage(payload, response, apiKey) {
   let detail = "";
-  if (isRecord6(payload)) {
+  if (isRecord8(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       detail = error;
-    } else if (isRecord6(error) && typeof error["message"] === "string") {
+    } else if (isRecord8(error) && typeof error["message"] === "string") {
       detail = error["message"];
     } else if (typeof payload["message"] === "string") {
       detail = payload["message"];
@@ -4588,13 +5077,13 @@ function errorMessage(payload, response, apiKey) {
   return suffix ? `${base} ${suffix}` : base;
 }
 function parseCustomModelList(payload) {
-  const root = isRecord6(payload) ? payload : null;
+  const root = isRecord8(payload) ? payload : null;
   const candidates = Array.isArray(root?.["models"]) ? root["models"] : Array.isArray(root?.["data"]) ? root["data"] : Array.isArray(payload) ? payload : [];
   const names = candidates.map((candidate) => {
     if (typeof candidate === "string") {
       return candidate.trim();
     }
-    if (!isRecord6(candidate)) {
+    if (!isRecord8(candidate)) {
       return "";
     }
     const value = candidate["id"] ?? candidate["model"] ?? candidate["name"];
@@ -4756,7 +5245,7 @@ async function loadTauriItemizedPromptRecord(chatId, recordId) {
   const value = await storage.getItem(
     `${TAURI_PROMPT_RECORD_PREFIX}${chatId}:${recordId}`
   );
-  return isRecord7(value) ? value : null;
+  return isRecord9(value) ? value : null;
 }
 function finiteTokens(value) {
   const number = typeof value === "number" ? value : Number(value);
@@ -4769,7 +5258,7 @@ function messageIdValue2(value) {
 function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord7(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function promptText(value) {
@@ -5663,6 +6152,9 @@ var SUMMARY_PAGE_SIZE = 10;
 function stageSummaryKey(entry) {
   return `${entry.sourceStartMessageId}:${entry.sourceEndMessageId}`;
 }
+function stageSummaryCharacterCount(entry) {
+  return Array.from(entry.text).length;
+}
 function toggleSummarySelection(currentKey, clickedKey) {
   return currentKey === clickedKey ? "" : clickedKey;
 }
@@ -5686,6 +6178,17 @@ function stageSummaryFullRebuildConfirmation(hasUnsavedChanges) {
     "\u5C06\u4F9D\u636E\u5F53\u524D\u804A\u5929\u539F\u6587\u91CD\u65B0\u751F\u6210\u5168\u90E8\u53EF\u5F52\u6863\u9636\u6BB5\u603B\u7ED3\uFF0C\u518D\u7528\u65B0\u603B\u7ED3\u5E72\u51C0\u91CD\u5EFA\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u3002",
     "\u73B0\u6709\u9636\u6BB5\u603B\u7ED3\u7684\u4EBA\u5DE5\u4FEE\u6539\u4F1A\u88AB\u66FF\u6362\uFF1B\u804A\u5929\u539F\u6587\u4E0D\u4F1A\u6539\u53D8\u3002\u9636\u6BB5\u603B\u7ED3\u4F1A\u5728\u5168\u90E8\u6210\u529F\u540E\u4E00\u6B21\u6027\u66FF\u6362\uFF0C\u9AA8\u67B6\u91CD\u5EFA\u5931\u8D25\u65F6\u65B0\u603B\u7ED3\u4ECD\u4F1A\u4FDD\u7559\u4E14\u65E7\u9AA8\u67B6\u505C\u6B62\u6CE8\u5165\u3002",
     "\u8FD9\u53EF\u80FD\u9700\u8981\u591A\u6B21 LLM \u8BF7\u6C42\uFF0C\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F"
+  ].join("\n\n");
+}
+function stageSummaryRegenerationConfirmation(entry, hasUnsavedChanges, invalidatesSkeleton) {
+  return [
+    ...hasUnsavedChanges ? ["\u5F53\u524D\u7F16\u8F91\u6846\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF1B\u7EE7\u7EED\u4F1A\u653E\u5F03\u8FD9\u4E9B\u4FEE\u6539\u3002"] : [],
+    ...entry.manuallyEdited ? ["\u5F53\u524D\u603B\u7ED3\u5305\u542B\u4EBA\u5DE5\u7F16\u8F91\uFF1B\u91CD\u65B0\u751F\u6210\u4F1A\u7528\u6A21\u578B\u7ED3\u679C\u66FF\u6362\u8FD9\u4E9B\u4FEE\u6539\u3002"] : [],
+    `\u5C06\u53EA\u4F9D\u636E\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId} \u7684\u5F53\u524D\u539F\u6587\u91CD\u65B0\u751F\u6210\u8FD9\u4E00\u6761\u603B\u7ED3\uFF0C\u6765\u6E90\u8303\u56F4\u4E0D\u4F1A\u6539\u53D8\u3002`,
+    "\u66F4\u65E9\u548C\u66F4\u665A\u7684\u9636\u6BB5\u603B\u7ED3\u90FD\u4E0D\u4F1A\u91CD\u65B0\u751F\u6210\u3002",
+    "\u6A21\u578B\u8BF7\u6C42\u5168\u90E8\u6210\u529F\u5E76\u901A\u8FC7\u6765\u6E90\u6821\u9A8C\u540E\u624D\u4F1A\u4E00\u6B21\u6027\u66FF\u6362\uFF1B\u5931\u8D25\u3001\u4E2D\u65AD\u6216\u804A\u5929\u5207\u6362\u65F6\u4FDD\u7559\u5F53\u524D\u603B\u7ED3\u3002",
+    ...invalidatesSkeleton ? ["\u8FD9\u6761\u603B\u7ED3\u5DF2\u7ECF\u88AB\u5168\u5C40\u9AA8\u67B6\u8986\u76D6\u3002\u66FF\u6362\u540E\u65E7\u9AA8\u67B6\u4F1A\u6807\u8BB0\u4E3A\u5F85\u91CD\u5EFA\uFF0C\u5E76\u5728\u91CD\u5EFA\u524D\u505C\u6B62\u6CE8\u5165\u3002"] : [],
+    "\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F"
   ].join("\n\n");
 }
 function storySkeletonGenerationStatusText(mode, progress) {
@@ -5723,6 +6226,8 @@ function sourceText(entry) {
     sourceStartMessageId: entry.sourceStartMessageId,
     sourceEndMessageId: entry.sourceEndMessageId,
     sourceHash: entry.sourceHash,
+    characterCount: stageSummaryCharacterCount(entry),
+    generation: entry.generation ?? null,
     manuallyEdited: Boolean(entry.manuallyEdited),
     updatedAt: entry.updatedAt
   }, null, 2);
@@ -5813,15 +6318,18 @@ function stageSummaryManagerTemplate() {
           <textarea id="story-echo-summary-editor-text" class="text_pole" rows="14" maxlength="64000"></textarea>
         </label>
         <div class="story-echo-field story-echo-summary-source-field">
-          <span>\u53EA\u8BFB\u6765\u6E90\u4FE1\u606F</span>
+          <span>\u53EA\u8BFB\u6765\u6E90\u4E0E\u751F\u6210\u4FE1\u606F</span>
           <pre id="story-echo-summary-source" class="story-echo-summary-source"></pre>
         </div>
         <p class="story-echo-hint">
-          \u6B63\u6587\u53EF\u6309\u5267\u60C5\u9700\u8981\u81EA\u7531\u5206\u6BB5\uFF0C\u4FDD\u5B58\u65F6\u53EA\u6821\u9A8C\u975E\u7A7A\u548C\u957F\u5EA6\u3002\u5220\u9664\u7EDD\u4E0D\u4FEE\u6539\u6216\u5220\u9664\u804A\u5929\u539F\u6587\uFF1A\u5220\u9664\u6700\u65B0\u4E00\u6761\u4F1A\u56DE\u9000\u8986\u76D6\u4F4D\u7F6E\uFF0C\u8BA9\u8BE5\u6BB5\u539F\u6587\u91CD\u65B0\u53C2\u4E0E\u540E\u7EED\u8BF7\u6C42\uFF1B\u5220\u9664\u66F4\u8001\u7684\u6761\u76EE\u53EA\u505C\u7528\u8BE5\u603B\u7ED3\uFF0C\u4E0D\u91CD\u65B0\u53D1\u9001\u5F88\u8001\u7684\u539F\u6587\uFF0C\u4E5F\u4E0D\u5F71\u54CD\u540E\u7EED\u603B\u7ED3\u3002
+          \u6B63\u6587\u53EF\u6309\u5267\u60C5\u9700\u8981\u81EA\u7531\u5206\u6BB5\uFF0C\u4FDD\u5B58\u65F6\u53EA\u6821\u9A8C\u975E\u7A7A\u548C\u957F\u5EA6\u3002\u201C\u91CD\u65B0\u751F\u6210\u5F53\u524D\u603B\u7ED3\u201D\u53EA\u91CD\u505A\u8FD9\u4E00\u6761\u5E76\u5728\u6210\u529F\u540E\u539F\u5B50\u66FF\u6362\uFF0C\u5931\u8D25\u65F6\u4FDD\u7559\u65E7\u5185\u5BB9\u3002\u5220\u9664\u7EDD\u4E0D\u4FEE\u6539\u6216\u5220\u9664\u804A\u5929\u539F\u6587\uFF1A\u5220\u9664\u6700\u65B0\u4E00\u6761\u4F1A\u56DE\u9000\u8986\u76D6\u4F4D\u7F6E\uFF0C\u8BA9\u8BE5\u6BB5\u539F\u6587\u91CD\u65B0\u53C2\u4E0E\u540E\u7EED\u8BF7\u6C42\uFF1B\u5220\u9664\u66F4\u8001\u7684\u6761\u76EE\u53EA\u505C\u7528\u8BE5\u603B\u7ED3\uFF0C\u4E0D\u91CD\u65B0\u53D1\u9001\u5F88\u8001\u7684\u539F\u6587\uFF0C\u4E5F\u4E0D\u5F71\u54CD\u540E\u7EED\u603B\u7ED3\u3002
         </p>
         <div class="story-echo-summary-editor-actions">
           <button id="story-echo-summary-save" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>\u4FDD\u5B58\u4FEE\u6539</span>
+          </button>
+          <button id="story-echo-summary-regenerate" class="menu_button" type="button">
+            <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>\u91CD\u65B0\u751F\u6210\u5F53\u524D\u603B\u7ED3</span>
           </button>
           <button id="story-echo-summary-delete" class="menu_button story-echo-summary-delete" type="button">
             <i class="fa-solid fa-trash" aria-hidden="true"></i><span>\u5220\u9664\u603B\u7ED3</span>
@@ -5853,6 +6361,7 @@ var StageSummaryMetadataManager = class {
   skeletonRevision = 0;
   populatedSkeletonUpdatedAt = null;
   skeletonActivityStatus = "";
+  summaryRegenerationActive = false;
   settingsRepository = new SettingsRepository();
   bind(panel, onChanged) {
     const editor = element2(panel, "#story-echo-summary-editor");
@@ -6118,6 +6627,9 @@ var StageSummaryMetadataManager = class {
       await this.changePage(panel, this.currentPage + 1);
     });
     element2(panel, "#story-echo-summary-list").addEventListener("click", async (event) => {
+      if (this.summaryRegenerationActive) {
+        return;
+      }
       const target = event.target;
       if (!(target instanceof Element)) {
         return;
@@ -6165,6 +6677,68 @@ var StageSummaryMetadataManager = class {
         notify.error(error instanceof Error ? error.message : "\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u5931\u8D25\u3002");
       } finally {
         button.disabled = false;
+      }
+    });
+    element2(panel, "#story-echo-summary-regenerate").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const label = button.querySelector("span");
+      const idleLabel = label?.textContent ?? "\u91CD\u65B0\u751F\u6210\u5F53\u524D\u603B\u7ED3";
+      const state = this.repository.getExisting();
+      const current = this.currentSummary(state);
+      if (!state || !current) {
+        this.resetSelection();
+        this.render(panel, state);
+        return;
+      }
+      const invalidatesSkeleton = Boolean(
+        state.storySkeleton.text && current.sourceEndMessageId <= state.storySkeleton.coveredThroughMessageId
+      );
+      if (!await showConfirmation(
+        "\u91CD\u65B0\u751F\u6210\u5F53\u524D\u9636\u6BB5\u603B\u7ED3",
+        stageSummaryRegenerationConfirmation(
+          current,
+          this.editorDirty,
+          invalidatesSkeleton
+        )
+      )) {
+        return;
+      }
+      const requestedChatId = getCurrentChatId();
+      const sourceStartMessageId = current.sourceStartMessageId;
+      const expectedUpdatedAt = current.updatedAt;
+      this.summaryRegenerationActive = true;
+      if (label) {
+        label.textContent = "\u6B63\u5728\u91CD\u65B0\u751F\u6210\u2026";
+      }
+      this.render(panel, state);
+      try {
+        const result = await storyEchoTaskCoordinator.enqueueManual(
+          "\u91CD\u65B0\u751F\u6210\u5F53\u524D\u9636\u6BB5\u603B\u7ED3",
+          async () => {
+            if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+              throw new Error("\u7B49\u5F85\u91CD\u65B0\u751F\u6210\u9636\u6BB5\u603B\u7ED3\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
+            }
+            return stageSummaryService.regenerateEntry(
+              sourceStartMessageId,
+              expectedUpdatedAt
+            );
+          }
+        );
+        this.editorDirty = false;
+        this.populatedSummaryKey = "";
+        this.populatedUpdatedAt = "";
+        await onChanged();
+        notify.success(
+          `\u9636\u6BB5\u603B\u7ED3\u5DF2\u91CD\u65B0\u751F\u6210\uFF1A${result.previousCharacterCount} \u5B57 \u2192 ${stageSummaryCharacterCount(result.entry)} \u5B57\u3002`
+        );
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : "\u91CD\u65B0\u751F\u6210\u9636\u6BB5\u603B\u7ED3\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u539F\u6709\u7ED3\u679C\u3002");
+      } finally {
+        this.summaryRegenerationActive = false;
+        if (label) {
+          label.textContent = idleLabel;
+        }
+        this.render(panel, this.repository.getExisting());
       }
     });
     element2(panel, "#story-echo-summary-delete").addEventListener("click", async (event) => {
@@ -6225,6 +6799,7 @@ ${consequence}
       this.skeletonDirty = false;
       this.populatedSkeletonUpdatedAt = null;
       this.skeletonActivityStatus = "";
+      this.summaryRegenerationActive = false;
     }
     const skeleton = state?.storySkeleton;
     const skeletonText = element2(panel, "#story-echo-skeleton-text");
@@ -6233,13 +6808,16 @@ ${consequence}
     const skeletonRebuild = element2(panel, "#story-echo-skeleton-rebuild");
     const summaryRebuildAll = element2(panel, "#story-echo-summary-rebuild-all");
     const skeletonStatus = element2(panel, "#story-echo-skeleton-status");
-    const skeletonBusy = Boolean(this.skeletonActivityStatus);
+    const skeletonBusy = Boolean(this.skeletonActivityStatus) || this.summaryRegenerationActive;
     skeletonText.disabled = !skeleton?.text || skeletonBusy;
     skeletonSave.disabled = !skeleton?.text || skeletonBusy;
     skeletonUpdate.disabled = !state || skeletonBusy;
     skeletonRebuild.disabled = !state || skeletonBusy;
     summaryRebuildAll.disabled = !state || skeletonBusy;
-    skeletonStatus.classList.toggle("story-echo-skeleton-status-active", skeletonBusy);
+    skeletonStatus.classList.toggle(
+      "story-echo-skeleton-status-active",
+      Boolean(this.skeletonActivityStatus)
+    );
     skeletonStatus.textContent = this.skeletonActivityStatus || (skeleton?.text ? [
       skeleton.stale ? "\u5F85\u91CD\u5EFA\uFF0C\u5F53\u524D\u4E0D\u4F1A\u6CE8\u5165" : `\u8986\u76D6\u5230\u6D88\u606F ${skeleton.coveredThroughMessageId}`,
       formattedTime(skeleton.updatedAt ?? ""),
@@ -6272,8 +6850,8 @@ ${consequence}
       count.textContent = `\u5171 ${entries.length} \u6761\uFF1B${pageDescription}`;
     }
     pagination.hidden = filtered.length <= page.pageSize;
-    previous.disabled = page.page <= 1;
-    next.disabled = page.page >= page.totalPages;
+    previous.disabled = page.page <= 1 || skeletonBusy;
+    next.disabled = page.page >= page.totalPages || skeletonBusy;
     pageLabel.textContent = `\u7B2C ${page.page} / ${page.totalPages} \u9875`;
     if (filtered.length === 0 && entries.length > 0) {
       const empty = document.createElement("div");
@@ -6286,6 +6864,7 @@ ${consequence}
       button.type = "button";
       button.className = "menu_button story-echo-summary-row";
       button.dataset.summaryKey = item.key;
+      button.disabled = skeletonBusy;
       button.classList.toggle(
         "story-echo-summary-row-selected",
         item.key === this.selectedSummaryKey
@@ -6300,6 +6879,7 @@ ${consequence}
       metadata.textContent = [
         `#${item.index + 1}`,
         `\u6D88\u606F ${item.entry.sourceStartMessageId}\uFF5E${item.entry.sourceEndMessageId}`,
+        `${stageSummaryCharacterCount(item.entry)} \u5B57`,
         stageSummaryDeliveryStatus(
           item.entry,
           item.index,
@@ -6319,6 +6899,20 @@ ${consequence}
     }
     const current = this.currentSummary(state);
     editor.hidden = !current;
+    const summaryEditorText = element2(
+      panel,
+      "#story-echo-summary-editor-text"
+    );
+    const summarySave = element2(panel, "#story-echo-summary-save");
+    const summaryRegenerate = element2(
+      panel,
+      "#story-echo-summary-regenerate"
+    );
+    const summaryDelete = element2(panel, "#story-echo-summary-delete");
+    summaryEditorText.disabled = !current || skeletonBusy;
+    summarySave.disabled = !current || skeletonBusy;
+    summaryRegenerate.disabled = !current || skeletonBusy;
+    summaryDelete.disabled = !current || skeletonBusy;
     if (current && (stageSummaryKey(current) !== this.populatedSummaryKey || !this.editorDirty && current.updatedAt !== this.populatedUpdatedAt)) {
       const currentIndex = entries.indexOf(current);
       this.populateEditor(panel, current, currentIndex);
@@ -6334,7 +6928,7 @@ ${consequence}
   }
   setSkeletonActivityStatus(panel, status) {
     this.skeletonActivityStatus = status;
-    const busy = Boolean(status);
+    const busy = Boolean(status) || this.summaryRegenerationActive;
     const state = this.repository.getExisting();
     const skeletonStatus = element2(panel, "#story-echo-skeleton-status");
     skeletonStatus.classList.toggle("story-echo-skeleton-status-active", busy);
@@ -6346,9 +6940,14 @@ ${consequence}
     element2(panel, "#story-echo-skeleton-update").disabled = busy || !state;
     element2(panel, "#story-echo-skeleton-rebuild").disabled = busy || !state;
     element2(panel, "#story-echo-summary-rebuild-all").disabled = busy || !state;
+    const current = this.currentSummary(state);
+    element2(panel, "#story-echo-summary-editor-text").disabled = busy || !current;
+    element2(panel, "#story-echo-summary-save").disabled = busy || !current;
+    element2(panel, "#story-echo-summary-regenerate").disabled = busy || !current;
+    element2(panel, "#story-echo-summary-delete").disabled = busy || !current;
   }
   async changePage(panel, requestedPage) {
-    if (requestedPage === this.currentPage) {
+    if (requestedPage === this.currentPage || this.summaryRegenerationActive) {
       return;
     }
     if (this.editorDirty && !await showConfirmation(
@@ -6362,7 +6961,7 @@ ${consequence}
     this.render(panel, this.repository.getExisting());
   }
   populateEditor(panel, entry, index) {
-    element2(panel, "#story-echo-summary-editor-range").textContent = `#${index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}`;
+    element2(panel, "#story-echo-summary-editor-range").textContent = `#${index + 1}\uFF5C\u6D88\u606F ${entry.sourceStartMessageId}\uFF5E${entry.sourceEndMessageId}\uFF5C${stageSummaryCharacterCount(entry)} \u5B57`;
     element2(panel, "#story-echo-summary-editor-text").value = entry.text;
     element2(panel, "#story-echo-summary-source").textContent = sourceText(entry);
   }
@@ -6921,7 +7520,7 @@ function bindSettings(panel) {
     const button = event.currentTarget;
     const confirmed = await showConfirmation(
       "\u6E05\u7A7A StoryEcho \u7EDF\u8BA1",
-      "\u5C06\u6E05\u7A7A\u5F53\u524D\u804A\u5929\u7684\u8FD0\u884C\u7EDF\u8BA1\u3001\u6700\u8FD1\u68C0\u67E5\u8BB0\u5F55\u548C\u8C03\u8BD5\u8F68\u8FF9\uFF1B\u9636\u6BB5\u603B\u7ED3\u4E0E\u5168\u5C40\u9AA8\u67B6\u4E0D\u4F1A\u6539\u53D8\u3002"
+      "\u5C06\u6E05\u7A7A\u5F53\u524D\u804A\u5929\u7684\u8FD0\u884C\u7EDF\u8BA1\u3001\u6700\u8FD1\u68C0\u67E5\u8BB0\u5F55\u3001\u5185\u90E8\u6A21\u578B\u8BF7\u6C42\u8BB0\u5F55\u548C\u8C03\u8BD5\u8F68\u8FF9\uFF1B\u9636\u6BB5\u603B\u7ED3\u4E0E\u5168\u5C40\u9AA8\u67B6\u4E0D\u4F1A\u6539\u53D8\u3002"
     );
     if (!confirmed) {
       return;
@@ -6968,6 +7567,19 @@ function statsText(state) {
     metrics.estimatedRemovedTokens - metrics.estimatedInjectedTokens
   );
   const queue = storyEchoTaskCoordinator.snapshot();
+  const latestInternalRequest = state.recentInternalLlmAttempts.at(-1);
+  const latestCompletion = latestInternalRequest?.completion;
+  const latestInternalRequestText = latestInternalRequest ? [
+    latestInternalRequest.task === "stage-summary" ? "\u9636\u6BB5\u603B\u7ED3" : "\u5168\u5C40\u9AA8\u67B6",
+    latestInternalRequest.status === "completed" ? "\u5B8C\u6210" : latestInternalRequest.status === "cancelled" ? "\u53D6\u6D88" : "\u5931\u8D25",
+    latestCompletion?.finishReason ? `finish=${latestCompletion.finishReason}` : "finish=\u672A\u77E5",
+    `\u4E0A\u9650=${latestInternalRequest.requestedMaxTokens} Token`,
+    latestCompletion?.completionTokens !== void 0 ? `\u8F93\u51FA=${latestCompletion.completionTokens} Token` : "\u8F93\u51FAToken=\u672A\u77E5",
+    latestCompletion ? `\u54CD\u5E94=${latestCompletion.responseCharacters} \u5B57` : "",
+    latestCompletion?.reasoningTokens !== void 0 ? `\u63A8\u7406=${latestCompletion.reasoningTokens} Token` : "",
+    `Agent=${latestInternalRequest.agentActiveAtStart ? "\u5F00" : "\u5173"}\u2192${latestInternalRequest.agentActiveAtEnd ? "\u5F00" : "\u5173"}`,
+    `${latestInternalRequest.durationMs}ms`
+  ].filter(Boolean).join("\uFF0C") : "\u65E0";
   return [
     `\u5168\u5C40\u9AA8\u67B6\uFF1A\u66F4\u65B0 ${metrics.skeletonUpdates} \u6B21\uFF0C\u5931\u8D25 ${metrics.skeletonFailures} \u6B21\uFF0C\u5E73\u5747 ${averageSkeleton}ms/\u6B21`,
     `\u9636\u6BB5\u603B\u7ED3\uFF1A\u66F4\u65B0 ${metrics.summaryUpdates} \u6B21\uFF0C\u5931\u8D25 ${metrics.summaryFailures} \u6B21\uFF0C\u8986\u76D6 ${metrics.summaryMessagesCovered} \u6761\u6D88\u606F\uFF0C\u5E73\u5747 ${averageSummary}ms/\u6B21`,
@@ -6975,6 +7587,7 @@ function statsText(state) {
     `\u4F30\u7B97 Token\uFF1A\u79FB\u9664 ${metrics.estimatedRemovedTokens}\uFF0C\u6CE8\u5165 ${metrics.estimatedInjectedTokens}\uFF0C\u7D2F\u8BA1\u51C0\u8282\u7701 ${estimatedNetSaved}`,
     `\u4EFB\u52A1\u961F\u5217\uFF1A\u8FD0\u884C ${queue.runningKind ?? (queue.foregroundLeaseActive ? "\u7B49\u5F85\u89D2\u8272\u56DE\u590D" : "\u7A7A\u95F2")}\uFF0C\u6392\u961F\u524D\u53F0 ${queue.queuedForeground}/\u624B\u52A8 ${queue.queuedManual}/\u540E\u53F0 ${queue.queuedBackground}\uFF0C\u6700\u957F\u7B49\u5F85 ${queue.maximumQueueWaitMs}ms`,
     `\u6700\u8FD1\uFF1A\u9AA8\u67B6 ${metrics.lastSkeletonAt ?? "\u65E0"} / \u603B\u7ED3 ${metrics.lastSummaryAt ?? "\u65E0"} / \u751F\u6210 ${metrics.lastGenerationAt ?? "\u65E0"}`,
+    `\u5185\u90E8\u6A21\u578B\u8BF7\u6C42\uFF1A${state.recentInternalLlmAttempts.length}/${MAX_INTERNAL_LLM_ATTEMPTS}\uFF1B\u6700\u8FD1 ${latestInternalRequestText}`,
     `\u8C03\u8BD5\u8F68\u8FF9\uFF1A${state.debugTraces.length}/50`
   ].join("\n");
 }

@@ -95,6 +95,15 @@ describe('StoryStateRepository', () => {
             sourceEndMessageId: 1,
             sourceHash: 123,
             manuallyEdited: true,
+            characterCount: 999,
+            generation: {
+              provider: 'main',
+              requestedMaxTokens: 3_000,
+              finishReason: 'length',
+              completionTokens: 125,
+              responseCharacters: 13,
+              unknown: 'discarded',
+            },
           },
           {
             text: 'ignored for a tombstone',
@@ -136,6 +145,29 @@ describe('StoryStateRepository', () => {
           },
         },
       ],
+      recentInternalLlmAttempts: [
+        { id: 'bad' },
+        {
+          id: 'attempt',
+          task: 'stage-summary',
+          status: 'completed',
+          startedAt: '2026-02-04T01:00:00.000Z',
+          finishedAt: '2026-02-04T01:00:01.000Z',
+          durationMs: 1_000.8,
+          sourceStartMessageId: 0,
+          sourceEndMessageId: 1,
+          requestedMaxTokens: 3_000,
+          agentActiveAtStart: true,
+          agentActiveAtEnd: false,
+          completion: {
+            provider: 'main',
+            requestedMaxTokens: 3_000,
+            finishReason: 'length',
+            completionTokens: 125,
+            responseCharacters: 13,
+          },
+        },
+      ],
       lastInspection: {
         createdAt: '2026-02-05T00:00:00.000Z',
         generationType: 42,
@@ -161,8 +193,16 @@ describe('StoryStateRepository', () => {
         entries: [
           {
             text: 'first summary',
+            characterCount: 13,
             sourceHash: '',
             manuallyEdited: true,
+            generation: {
+              provider: 'main',
+              requestedMaxTokens: 3_000,
+              finishReason: 'length',
+              completionTokens: 125,
+              responseCharacters: 13,
+            },
           },
           {
             text: '',
@@ -188,6 +228,18 @@ describe('StoryStateRepository', () => {
           number: 1,
           boolean: true,
           nullable: null,
+        },
+      }],
+      recentInternalLlmAttempts: [{
+        id: 'attempt',
+        task: 'stage-summary',
+        status: 'completed',
+        durationMs: 1_000,
+        agentActiveAtStart: true,
+        agentActiveAtEnd: false,
+        completion: {
+          finishReason: 'length',
+          completionTokens: 125,
         },
       }],
       lastInspection: {
@@ -275,6 +327,7 @@ describe('StoryStateRepository', () => {
     expect(state?.chatUuid).not.toBe(stored.chatUuid);
     expect(state?.storySkeleton.stale).toBe(true);
     expect(state?.metrics.summaryUpdates).toBe(0);
+    expect(state?.recentInternalLlmAttempts).toEqual([]);
   });
 
   it('edits and deletes summaries while invalidating a covered skeleton', async () => {
@@ -295,6 +348,7 @@ describe('StoryStateRepository', () => {
     const edited = await repository.updateStageSummaryEntry(0, { text: ' edited summary ' });
     expect(edited.stageSummary.entries[0]).toMatchObject({
       text: 'edited summary',
+      characterCount: 14,
       manuallyEdited: true,
     });
     expect(edited.storySkeleton.stale).toBe(true);

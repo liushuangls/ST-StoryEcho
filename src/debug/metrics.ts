@@ -78,5 +78,6 @@ export function recordDebugTrace(
 export function resetDiagnostics(state: StoryEchoChatState): void {
   state.metrics = createMetrics();
   state.debugTraces = [];
+  state.recentInternalLlmAttempts = [];
   delete state.lastInspection;
 }

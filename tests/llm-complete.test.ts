@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   completeWithConfiguredProvider,
+  completeWithConfiguredProviderDetailed,
   MAX_LLM_TIMEOUT_RETRIES,
 } from '../src/llm/complete';
 import { LlmRequestTimeoutError } from '../src/llm/errors';
@@ -63,6 +64,54 @@ describe('completeWithConfiguredProvider', () => {
     expect(response).toBe('{"query":"银钥匙位置"}');
     expect(generateRaw).toHaveBeenNthCalledWith(1, expect.objectContaining({ responseLength: 320 }));
     expect(generateRaw).toHaveBeenNthCalledWith(2, expect.objectContaining({ responseLength: 640 }));
+  });
+
+  it('retries an empty detailed response and keeps metadata from the accepted attempt', async () => {
+    const generateRawData = vi.fn()
+      .mockResolvedValueOnce({
+        choices: [{ finish_reason: 'stop', message: { content: '  ' } }],
+      })
+      .mockResolvedValueOnce({
+        choices: [{ finish_reason: 'length', message: { content: '可见总结' } }],
+        usage: { prompt_tokens: 200, completion_tokens: 40, total_tokens: 240 },
+      });
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({
+        generateRaw: vi.fn(),
+        generateRawData,
+        extractMessageFromData: (payload: {
+          choices: Array<{ message: { content: string } }>;
+        }) => payload.choices[0]?.message.content ?? '',
+        mainApi: 'openai',
+      }),
+    });
+
+    const result = await completeWithConfiguredProviderDetailed(DEFAULT_SETTINGS, {
+      system: 'system',
+      prompt: 'prompt',
+      maxTokens: 320,
+    });
+
+    expect(generateRawData).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ responseLength: 320 }),
+    );
+    expect(generateRawData).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ responseLength: 640 }),
+    );
+    expect(result).toMatchObject({
+      text: '可见总结',
+      metadata: {
+        provider: 'main',
+        requestedMaxTokens: 640,
+        finishReason: 'length',
+        promptTokens: 200,
+        completionTokens: 40,
+        totalTokens: 240,
+        responseCharacters: 4,
+      },
+    });
   });
 
   it('stops after one retry when the provider remains empty', async () => {

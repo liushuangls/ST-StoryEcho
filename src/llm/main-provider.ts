@@ -1,10 +1,18 @@
-import type { LlmProvider, LlmRequest } from '../core/types';
-import { getContext } from '../platform/sillytavern';
+import type {
+  LlmCompletionResult,
+  LlmProvider,
+  LlmRequest,
+} from '../core/types';
+import {
+  getContext,
+  getMainConnectionIdentity,
+} from '../platform/sillytavern';
 import {
   runStoryEchoTaskAbortable,
   StoryEchoTaskCancelledError,
 } from '../runtime/task-cancellation';
 import { LlmRequestTimeoutError } from './errors';
+import { completionMetadataFromPayload } from './completion-metadata';
 import { markInternalGenerationRequest, withInternalGeneration } from './internal-generation';
 
 const MAX_REQUEST_TIMEOUT_MS = 600_000;
@@ -59,7 +67,10 @@ async function withLightweightMainReasoning<T>(
 export class MainLlmProvider implements LlmProvider {
   readonly id = 'main' as const;
 
-  async complete(request: LlmRequest): Promise<string> {
+  private async perform(
+    request: LlmRequest,
+    captureMetadata: boolean,
+  ): Promise<{ text: string; payload?: unknown; requestedMaxTokens: number }> {
     const context = getContext();
     const markedRequest = markInternalGenerationRequest(request.system, request.prompt);
     const options: {
@@ -97,12 +108,25 @@ export class MainLlmProvider implements LlmProvider {
         requestedTimeoutMs,
       )
       : null;
-    let response: string;
+    let result: { text: string; payload?: unknown };
     try {
-      response = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
+      result = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
         context,
         () => runStoryEchoTaskAbortable(
-          () => context.generateRaw(options),
+          async () => {
+            if (
+              captureMetadata &&
+              context.generateRawData &&
+              context.extractMessageFromData
+            ) {
+              const payload = await context.generateRawData(options);
+              return {
+                text: context.extractMessageFromData(payload, context.mainApi),
+                payload,
+              };
+            }
+            return { text: await context.generateRaw(options) };
+          },
           timeoutController?.signal ?? request.signal,
         ),
       ));
@@ -112,7 +136,31 @@ export class MainLlmProvider implements LlmProvider {
       }
       request.signal?.removeEventListener('abort', onRequestAbort);
     }
-    return response.replaceAll(`[${markedRequest.marker}]`, '').trim();
+    return {
+      text: result.text.replaceAll(`[${markedRequest.marker}]`, '').trim(),
+      ...(result.payload !== undefined ? { payload: result.payload } : {}),
+      requestedMaxTokens: options.responseLength ?? 0,
+    };
+  }
+
+  async complete(request: LlmRequest): Promise<string> {
+    return (await this.perform(request, false)).text;
+  }
+
+  async completeDetailed(request: LlmRequest): Promise<LlmCompletionResult> {
+    const context = getContext();
+    const result = await this.perform(request, true);
+    const identity = getMainConnectionIdentity(context);
+    return {
+      text: result.text,
+      metadata: completionMetadataFromPayload(result.payload, {
+        provider: this.id,
+        requestedMaxTokens: result.requestedMaxTokens,
+        responseText: result.text,
+        ...(identity.source ? { source: identity.source } : {}),
+        ...(identity.model ? { model: identity.model } : {}),
+      }),
+    };
   }
 
   async testConnection(): Promise<void> {

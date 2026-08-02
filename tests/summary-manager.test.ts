@@ -5,9 +5,11 @@ import {
   SUMMARY_PAGE_SIZE,
   stageSummaryDeliveryStatus,
   stageSummaryDeletionMode,
+  stageSummaryCharacterCount,
   stageSummaryFullRebuildConfirmation,
   stageSummaryKey,
   stageSummaryManagerTemplate,
+  stageSummaryRegenerationConfirmation,
   storySkeletonGenerationStatusText,
   toggleSummarySelection,
 } from '../src/ui/summary-manager';
@@ -25,6 +27,7 @@ function summary(index: number): StageSummaryEntry {
 describe('stage summary manager selection', () => {
   it('uses the immutable source range as its UI key', () => {
     expect(stageSummaryKey(summary(2))).toBe('20:29');
+    expect(stageSummaryCharacterCount({ ...summary(2), text: '剧情🎭' })).toBe(3);
   });
 
   it('opens a different row and closes the selected row', () => {
@@ -58,6 +61,19 @@ describe('stage summary manager selection', () => {
       .toContain('尚未保存的阶段总结或骨架修改');
     expect(stageSummaryFullRebuildConfirmation(false))
       .not.toContain('尚未保存的阶段总结或骨架修改');
+  });
+
+  it('explains the atomic single-summary regeneration consequences', () => {
+    const entry = { ...summary(1), manuallyEdited: true };
+    const confirmation = stageSummaryRegenerationConfirmation(entry, true, true);
+
+    expect(confirmation).toContain('尚未保存的修改');
+    expect(confirmation).toContain('包含人工编辑');
+    expect(confirmation).toContain('消息 10～19');
+    expect(confirmation).toContain('更早和更晚的阶段总结都不会重新生成');
+    expect(confirmation).toContain('一次性替换');
+    expect(confirmation).toContain('失败、中断或聊天切换时保留当前总结');
+    expect(confirmation).toContain('旧骨架会标记为待重建');
   });
 
   it('describes queued skeleton work with visible generation progress', () => {
@@ -128,6 +144,9 @@ describe('stage summary manager pagination and template', () => {
     expect(template).toContain('aria-label="阶段总结分页"');
     expect(template).toContain('id="story-echo-summary-editor-text"');
     expect(template).toContain('id="story-echo-summary-save"');
+    expect(template).toContain('id="story-echo-summary-regenerate"');
+    expect(template).toContain('重新生成当前总结');
+    expect(template).toContain('成功后原子替换');
     expect(template).toContain('id="story-echo-summary-delete"');
     expect(template).toContain('绝不修改或删除聊天原文');
     expect(template).toContain('删除最新一条会回退覆盖位置');

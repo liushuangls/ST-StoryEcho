@@ -31,6 +31,7 @@ export function buildDebugReport(
     metrics: state.metrics,
     runtimeDiagnostics: {
       taskQueue: storyEchoTaskCoordinator.snapshot(),
+      recentInternalLlmAttempts: state.recentInternalLlmAttempts,
     },
     lastInspection: state.lastInspection ?? null,
     recentDebugTraces: state.debugTraces,

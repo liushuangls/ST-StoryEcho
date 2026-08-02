@@ -1,5 +1,10 @@
 import { logger } from '../core/logger';
-import type { LlmProvider, LlmRequest, StoryEchoSettings } from '../core/types';
+import type {
+  LlmCompletionResult,
+  LlmProvider,
+  LlmRequest,
+  StoryEchoSettings,
+} from '../core/types';
 import { throwIfStoryEchoTaskCancelled } from '../runtime/task-cancellation';
 import {
   BackgroundYieldForForegroundError,
@@ -65,6 +70,69 @@ async function completeNonEmptyWithTimeoutRetry(
   }
 }
 
+async function providerCompleteDetailed(
+  provider: LlmProvider,
+  request: LlmRequest,
+): Promise<LlmCompletionResult> {
+  if (provider.completeDetailed) {
+    return provider.completeDetailed(request);
+  }
+  const text = await provider.complete(request);
+  return {
+    text,
+    metadata: {
+      provider: provider.id,
+      requestedMaxTokens: Math.min(
+        MAX_RETRY_TOKENS,
+        Math.max(16, Math.floor(request.maxTokens ?? 8_192)),
+      ),
+      responseCharacters: Array.from(text).length,
+    },
+  };
+}
+
+async function completeNonEmptyDetailed(
+  provider: LlmProvider,
+  request: LlmRequest,
+): Promise<LlmCompletionResult> {
+  const first = await providerCompleteDetailed(provider, request);
+  if (first.text.trim()) {
+    return first;
+  }
+  throwIfStoryEchoTaskCancelled(request.signal);
+  yieldBackgroundAtRetryBoundary();
+
+  const initialBudget = Math.max(128, Math.floor(request.maxTokens ?? 1_024));
+  const retryBudget = Math.min(MAX_RETRY_TOKENS, initialBudget * 2);
+  logger.warn(`内部LLM返回空内容，使用 ${retryBudget} Token预算重试一次。`);
+  const second = await providerCompleteDetailed(provider, {
+    ...request,
+    maxTokens: retryBudget,
+  });
+  if (!second.text.trim()) {
+    throw new Error('内部LLM连续两次返回空内容。');
+  }
+  return second;
+}
+
+async function completeNonEmptyDetailedWithTimeoutRetry(
+  provider: LlmProvider,
+  request: LlmRequest,
+): Promise<LlmCompletionResult> {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await completeNonEmptyDetailed(provider, request);
+    } catch (error) {
+      throwIfStoryEchoTaskCancelled(request.signal);
+      if (!isLlmRequestTimeoutError(error) || retry >= MAX_LLM_TIMEOUT_RETRIES) {
+        throw error;
+      }
+      yieldBackgroundAtRetryBoundary();
+      logger.warn(`内部LLM请求超时，仅重试当前请求（${retry + 1}/${MAX_LLM_TIMEOUT_RETRIES}）。`);
+    }
+  }
+}
+
 export async function completeWithConfiguredProvider(
   settings: StoryEchoSettings,
   request: LlmRequest,
@@ -81,5 +149,34 @@ export async function completeWithConfiguredProvider(
     yieldBackgroundAtRetryBoundary();
     logger.warn('自定义LLM调用失败，回退到SillyTavern主连接。', error);
     return completeNonEmptyWithTimeoutRetry(new MainLlmProvider(), request);
+  }
+}
+
+export async function completeWithConfiguredProviderDetailed(
+  settings: StoryEchoSettings,
+  request: LlmRequest,
+): Promise<LlmCompletionResult> {
+  request = withActiveTaskSignal(request);
+  const provider = createLlmProvider(settings);
+  try {
+    return await completeNonEmptyDetailedWithTimeoutRetry(provider, request);
+  } catch (error) {
+    throwIfStoryEchoTaskCancelled(request.signal);
+    if (provider.id !== 'openai-compatible' || !settings.llm.custom.fallbackToMain) {
+      throw error;
+    }
+    yieldBackgroundAtRetryBoundary();
+    logger.warn('自定义LLM调用失败，回退到SillyTavern主连接。', error);
+    const result = await completeNonEmptyDetailedWithTimeoutRetry(
+      new MainLlmProvider(),
+      request,
+    );
+    return {
+      ...result,
+      metadata: {
+        ...result.metadata,
+        fallbackFrom: provider.id,
+      },
+    };
   }
 }

@@ -8,11 +8,12 @@ import type {
   TavernChatMessage,
 } from '../core/types';
 import { storyContent } from '../content/story-content';
+import { mergeInternalLlmAttempts } from '../debug/internal-llm-attempts';
 import { recordDebugTrace } from '../debug/metrics';
 import { countCompletedTurns, planNextChunk } from '../history/chunk-planner';
 import { SourceRevisionCache } from '../history/source-revision-cache';
 import { firstStoryPhaseBoundary } from '../history/story-phase';
-import { completeWithConfiguredProvider } from '../llm/complete';
+import { completeObservedInternalRequest } from '../llm/observed-completion';
 import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
 import { estimateTokens } from '../prompt/render';
 import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
@@ -38,6 +39,12 @@ export interface StageSummaryProgress {
 export interface StageSummaryRunResult {
   state: StoryEchoChatState | null;
   updatedChunks: number;
+}
+
+export interface StageSummaryRegenerationResult {
+  state: StoryEchoChatState;
+  entry: StageSummaryEntry;
+  previousCharacterCount: number;
 }
 
 interface StageSummaryRunOptions {
@@ -449,12 +456,17 @@ export class StageSummaryService {
         requestTimeoutSeconds: SUMMARY_LLM_TIMEOUT_MS / 1_000,
       });
     }
-    const raw = await completeWithConfiguredProvider(settings, {
+    const completion = await completeObservedInternalRequest(state, settings, {
       system: STAGE_SUMMARY_SYSTEM_PROMPT,
       prompt,
       maxTokens: settings.summary.maxTokens,
       timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
+    }, {
+      task: 'stage-summary',
+      sourceStartMessageId: chunk.startMessageId,
+      sourceEndMessageId: chunk.endMessageId,
     });
+    const raw = completion.text;
     // Detect a branch/edit before accepting even the summary format, so a
     // stale request is always reported and discarded for the right cause.
     const currentChat = getContext().chat;
@@ -483,6 +495,8 @@ export class StageSummaryService {
     return {
       entry: {
         text,
+        characterCount: Array.from(text).length,
+        generation: completion.metadata,
         sourceStartMessageId: chunk.startMessageId,
         sourceEndMessageId: chunk.endMessageId,
         sourceHash: snapshotHash,
@@ -493,6 +507,167 @@ export class StageSummaryService {
       personaLabelSanitized: text !== withoutPersonaSanitization,
       previousSummaryCharacters: Array.from(boundedPrevious).length,
     };
+  }
+
+  regenerateEntry(
+    sourceStartMessageId: number,
+    expectedUpdatedAt?: string,
+  ): Promise<StageSummaryRegenerationResult> {
+    const requestedChatId = getCurrentChatId();
+    const operation = this.queue.then(
+      () => this.regenerateNow(
+        sourceStartMessageId,
+        requestedChatId,
+        expectedUpdatedAt,
+      ),
+      () => this.regenerateNow(
+        sourceStartMessageId,
+        requestedChatId,
+        expectedUpdatedAt,
+      ),
+    );
+    this.queue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async regenerateNow(
+    sourceStartMessageId: number,
+    requestedChatId: string | null,
+    expectedUpdatedAt?: string,
+  ): Promise<StageSummaryRegenerationResult> {
+    if (
+      !requestedChatId ||
+      getCurrentChatId() !== requestedChatId ||
+      !Number.isInteger(sourceStartMessageId) ||
+      sourceStartMessageId < 0
+    ) {
+      throw new Error('等待重新生成阶段总结期间聊天发生切换或目标无效，已取消任务。');
+    }
+    const settings = this.settingsRepository.get();
+    let state = await this.stateRepository.getOrCreate();
+    if (!state) {
+      throw new Error('当前没有可用聊天。');
+    }
+    state = await this.reconcileHistory(state) ?? state;
+    assertChatOwner(state);
+    const index = state.stageSummary.entries.findIndex(
+      (entry) => entry.sourceStartMessageId === sourceStartMessageId && !entry.deleted,
+    );
+    const current = index >= 0 ? state.stageSummary.entries[index] : undefined;
+    if (!current) {
+      throw new Error('要重新生成的阶段总结不存在，可能已被删除或因历史变化而失效。');
+    }
+    if (expectedUpdatedAt && current.updatedAt !== expectedUpdatedAt) {
+      throw new Error('阶段总结已在其他操作中发生变化，请刷新后重试。');
+    }
+
+    const context = getContext();
+    if (current.sourceEndMessageId >= context.chat.length) {
+      throw new Error('阶段总结来源范围已超出当前聊天，请先刷新状态。');
+    }
+    const snapshot = context.chat
+      .slice(current.sourceStartMessageId, current.sourceEndMessageId + 1)
+      .map((message) => ({
+        is_user: message.is_user,
+        is_system: Boolean(message.is_system),
+        ...(message.name ? { name: message.name } : {}),
+        mes: message.mes,
+      }));
+    const sourceHash = await sha256(sourcePayload(snapshot, current.sourceStartMessageId));
+    if (current.sourceHash && current.sourceHash !== sourceHash) {
+      throw new Error('阶段总结来源消息已经变化，请先刷新并重新处理历史。');
+    }
+    const chunk: PreparedStageSummaryChunk = {
+      startMessageId: current.sourceStartMessageId,
+      endMessageId: current.sourceEndMessageId,
+      snapshot,
+      sourceCharacters: snapshot.reduce((total, message) => total + message.mes.length, 0),
+    };
+    const entriesSnapshot = state.stageSummary.entries.map((entry) => ({ ...entry }));
+    const skeletonSnapshot = { ...state.storySkeleton };
+    const priorAttemptId = state.recentInternalLlmAttempts.at(-1)?.id;
+    const previousSummary = latestActiveSummaryText(entriesSnapshot.slice(0, index));
+
+    try {
+      const generated = await this.generateEntry(
+        context,
+        settings,
+        state,
+        chunk,
+        previousSummary,
+      );
+      const live = this.stateRepository.getExisting();
+      if (!live || live.ownerChatId !== state.ownerChatId) {
+        throw new Error('重新生成阶段总结期间聊天发生切换，已丢弃本次结果。');
+      }
+      if (!sameStageSummaryEntries(live.stageSummary.entries, entriesSnapshot)) {
+        throw new Error('重新生成阶段总结期间已有总结发生变化，已丢弃本次结果。');
+      }
+      if (!sameStorySkeletonRevision(live.storySkeleton, skeletonSnapshot)) {
+        throw new Error('重新生成阶段总结期间全局骨架发生变化，已丢弃本次结果。');
+      }
+      mergeInternalLlmAttempts(live, state);
+      const replacementIndex = live.stageSummary.entries.findIndex(
+        (entry) => entry.sourceStartMessageId === sourceStartMessageId && !entry.deleted,
+      );
+      if (replacementIndex < 0) {
+        throw new Error('要重新生成的阶段总结已失效，已保留原有结果。');
+      }
+      const previousCharacterCount = Array.from(
+        live.stageSummary.entries[replacementIndex]!.text,
+      ).length;
+      live.stageSummary.entries[replacementIndex] = generated.entry;
+      if (
+        live.storySkeleton.text.trim() &&
+        generated.entry.sourceEndMessageId <= live.storySkeleton.coveredThroughMessageId
+      ) {
+        live.storySkeleton = { ...live.storySkeleton, stale: true };
+      }
+      const latest = live.stageSummary.entries.at(-1);
+      live.stageSummary = {
+        entries: live.stageSummary.entries,
+        coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+        coveredThroughHash: latest?.sourceHash ?? '',
+        ...(latest ? { updatedAt: latest.updatedAt } : {}),
+      };
+      live.metrics.summaryUpdates += 1;
+      live.metrics.totalSummaryMs += generated.durationMs;
+      live.metrics.lastSummaryAt = generated.entry.updatedAt;
+      delete live.lastInspection;
+      recordDebugTrace(live, settings.debug, 'summary', '单条阶段总结已原子重新生成。', {
+        range: `${generated.entry.sourceStartMessageId}-${generated.entry.sourceEndMessageId}`,
+        previousCharacters: previousCharacterCount,
+        summaryCharacters: generated.entry.characterCount ?? generated.entry.text.length,
+        finishReason: generated.entry.generation?.finishReason ?? 'unknown',
+        completionTokens: generated.entry.generation?.completionTokens ?? -1,
+        reasoningTokens: generated.entry.generation?.reasoningTokens ?? -1,
+        skeletonMarkedStale: Boolean(live.storySkeleton.stale),
+      });
+      await this.stateRepository.save(live);
+      return {
+        state: live,
+        entry: generated.entry,
+        previousCharacterCount,
+      };
+    } catch (error) {
+      const attemptRecorded = state.recentInternalLlmAttempts.at(-1)?.id !== priorAttemptId;
+      if (!isStoryEchoTaskCancelledError(error) && attemptRecorded) {
+        state.metrics.summaryFailures += 1;
+        recordDebugTrace(state, settings.debug, 'error', '重新生成单条阶段总结失败，已保留原有结果。', {
+          range: `${current.sourceStartMessageId}-${current.sourceEndMessageId}`,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (attemptRecorded) {
+        try {
+          assertChatOwner(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn('保存单条阶段总结重新生成诊断时聊天已切换或元数据不可用。', saveError);
+        }
+      }
+      throw error;
+    }
   }
 
   private async rebuildNow(
@@ -587,6 +762,7 @@ export class StageSummaryService {
       if (!sameStorySkeletonRevision(live.storySkeleton, skeletonSnapshot)) {
         throw new Error('阶段总结重建期间全局骨架发生变化，已丢弃本次结果。');
       }
+      mergeInternalLlmAttempts(live, state);
       const latest = rebuiltEntries.at(-1)!;
       const rebuiltSourceHash = await sha256(sourcePayload(
         chatSnapshot.slice(0, latest.sourceEndMessageId + 1),
@@ -625,6 +801,12 @@ export class StageSummaryService {
       return { state, updatedChunks: rebuiltEntries.length };
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
+        try {
+          assertChatOwner(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn('保存阶段总结重建取消诊断时聊天已切换或元数据不可用。', saveError);
+        }
         throw error;
       }
       state.metrics.summaryFailures += 1;
@@ -697,6 +879,7 @@ export class StageSummaryService {
         if (!sameStageSummaryEntries(live.stageSummary.entries, entriesBeforeRequest)) {
           throw new Error('阶段总结生成期间已有总结发生变化，已丢弃本次结果。');
         }
+        mergeInternalLlmAttempts(live, state);
         state = live;
         assertChatOwner(state);
         state.stageSummary.entries.push(generated.entry);
@@ -728,6 +911,12 @@ export class StageSummaryService {
       }
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
+        try {
+          assertChatOwner(state);
+          await this.stateRepository.save(state);
+        } catch (saveError) {
+          logger.warn('保存阶段总结取消诊断时聊天已切换或元数据不可用。', saveError);
+        }
         throw error;
       }
       state.metrics.summaryFailures += 1;

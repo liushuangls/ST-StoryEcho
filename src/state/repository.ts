@@ -6,7 +6,9 @@ import type {
   StoryEchoChatState,
   StoryEchoDebugTrace,
 } from '../core/types';
+import { normalizeInternalLlmAttempts } from '../debug/internal-llm-attempts';
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
+import { normalizeLlmCompletionMetadata } from '../llm/completion-metadata';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { SettingsRepository } from '../settings/repository';
 import { normalizeStorySkeletonText } from '../summary/skeleton-state';
@@ -48,6 +50,7 @@ function createState(ownerChatId: string): StoryEchoChatState {
     },
     metrics: createMetrics(),
     debugTraces: [],
+    recentInternalLlmAttempts: [],
   };
 }
 
@@ -57,6 +60,7 @@ function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
   }
   const text = typeof value['text'] === 'string' ? value['text'].trim() : '';
   const deleted = value['deleted'] === true;
+  const generation = normalizeLlmCompletionMetadata(value['generation']);
   const sourceStartMessageId = Number(value['sourceStartMessageId']);
   const sourceEndMessageId = Number(value['sourceEndMessageId']);
   if (
@@ -70,6 +74,8 @@ function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
   }
   return {
     text: deleted ? '' : text,
+    characterCount: deleted ? 0 : Array.from(text).length,
+    ...(generation ? { generation } : {}),
     sourceStartMessageId,
     sourceEndMessageId,
     sourceHash: typeof value['sourceHash'] === 'string' ? value['sourceHash'] : '',
@@ -102,6 +108,7 @@ function normalizeStageSummary(value: unknown): StoryEchoChatState['stageSummary
     if (legacyText && legacyEnd >= 0) {
       entries.push({
         text: legacyText,
+        characterCount: Array.from(legacyText).length,
         sourceStartMessageId: 0,
         sourceEndMessageId: legacyEnd,
         sourceHash: typeof stored['coveredThroughHash'] === 'string'
@@ -218,6 +225,9 @@ function normalizeState(stored: Record<string, unknown>): StoryEchoChatState {
     storySkeleton: normalizeStorySkeleton(stored['storySkeleton']),
     metrics: normalizeMetrics(stored['metrics']),
     debugTraces: normalizeDebugTraces(stored['debugTraces']),
+    recentInternalLlmAttempts: normalizeInternalLlmAttempts(
+      stored['recentInternalLlmAttempts'],
+    ),
     ...(inspection ? { lastInspection: inspection } : {}),
   };
 }
@@ -279,6 +289,7 @@ export class StoryStateRepository {
         ownerChatId: currentChatId,
         metrics: createMetrics(),
         debugTraces: [],
+        recentInternalLlmAttempts: [],
       };
       if (state.storySkeleton.text) {
         state.storySkeleton.stale = true;
@@ -342,6 +353,7 @@ export class StoryStateRepository {
     state.stageSummary.entries[index] = {
       ...existing,
       text: normalized.text,
+      characterCount: Array.from(normalized.text).length,
       updatedAt: new Date().toISOString(),
       manuallyEdited: true,
     };
@@ -378,6 +390,7 @@ export class StoryStateRepository {
       entries[index] = {
         ...existing,
         text: '',
+        characterCount: 0,
         deleted: true,
         updatedAt: new Date().toISOString(),
       };

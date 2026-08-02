@@ -54,6 +54,46 @@ describe('OpenAiCompatibleProvider', () => {
     });
   });
 
+  it('returns provider finish and usage metadata for diagnostics', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      model: 'model-name',
+      choices: [{
+        finish_reason: 'length',
+        message: { content: '短总结' },
+      }],
+      usage: {
+        prompt_tokens: 500,
+        completion_tokens: 40,
+        total_tokens: 540,
+        completion_tokens_details: { reasoning_tokens: 10 },
+      },
+    }), { status: 200 }));
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'model-name';
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    await expect(provider.completeDetailed({
+      system: 'system',
+      prompt: 'prompt',
+      maxTokens: 3_000,
+    })).resolves.toEqual({
+      text: '短总结',
+      metadata: {
+        provider: 'openai-compatible',
+        requestedMaxTokens: 3_000,
+        finishReason: 'length',
+        promptTokens: 500,
+        completionTokens: 40,
+        reasoningTokens: 10,
+        totalTokens: 540,
+        responseCharacters: 3,
+        source: 'custom',
+        model: 'model-name',
+      },
+    });
+  });
+
   it('allows a 10000-token skeleton budget but clamps larger custom requests', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: 'OK' } }],

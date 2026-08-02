@@ -20,6 +20,7 @@ export function chatState(
     },
     metrics: createMetrics(),
     debugTraces: [],
+    recentInternalLlmAttempts: [],
     ...overrides,
   };
 }

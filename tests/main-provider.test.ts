@@ -25,6 +25,66 @@ describe('MainLlmProvider', () => {
     });
   });
 
+  it('retains finish and token metadata from SillyTavern 1.18 raw responses', async () => {
+    const payload = {
+      model: 'gpt-test',
+      choices: [{
+        finish_reason: 'length',
+        message: { content: '阶段总结被截断到这里' },
+      }],
+      usage: {
+        prompt_tokens: 900,
+        completion_tokens: 128,
+        total_tokens: 1_028,
+        completion_tokens_details: { reasoning_tokens: 32 },
+      },
+    };
+    const generateRaw = vi.fn();
+    const generateRawData = vi.fn().mockResolvedValue(payload);
+    const extractMessageFromData = vi.fn((data: typeof payload) => (
+      data.choices[0]!.message.content
+    ));
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({
+        generateRaw,
+        generateRawData,
+        extractMessageFromData,
+        mainApi: 'openai',
+        chatCompletionSettings: {
+          chat_completion_source: 'custom',
+          custom_model: 'gpt-test',
+        },
+      }),
+    });
+
+    const result = await new MainLlmProvider().completeDetailed({
+      system: 'system',
+      prompt: 'prompt',
+      maxTokens: 3_000,
+    });
+
+    expect(generateRaw).not.toHaveBeenCalled();
+    expect(generateRawData).toHaveBeenCalledWith(expect.objectContaining({
+      responseLength: 3_000,
+    }));
+    expect(extractMessageFromData).toHaveBeenCalledWith(payload, 'openai');
+    expect(result).toEqual({
+      text: '阶段总结被截断到这里',
+      metadata: {
+        provider: 'main',
+        requestedMaxTokens: 3_000,
+        finishReason: 'length',
+        promptTokens: 900,
+        completionTokens: 128,
+        reasoningTokens: 32,
+        totalTokens: 1_028,
+        responseCharacters: 10,
+        source: 'custom',
+        model: 'gpt-test',
+      },
+    });
+  });
+
   it('honors the request deadline and removes abort listeners', async () => {
     vi.useFakeTimers();
     const generateRaw = vi.fn(() => new Promise<string>(() => undefined));

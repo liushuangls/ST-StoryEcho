@@ -20,6 +20,10 @@ export function stageSummaryKey(entry: StageSummaryEntry): string {
   return `${entry.sourceStartMessageId}:${entry.sourceEndMessageId}`;
 }
 
+export function stageSummaryCharacterCount(entry: StageSummaryEntry): number {
+  return Array.from(entry.text).length;
+}
+
 export function toggleSummarySelection(currentKey: string, clickedKey: string): string {
   return currentKey === clickedKey ? '' : clickedKey;
 }
@@ -65,6 +69,28 @@ export function stageSummaryFullRebuildConfirmation(hasUnsavedChanges: boolean):
     '将依据当前聊天原文重新生成全部可归档阶段总结，再用新总结干净重建全局剧情骨架。',
     '现有阶段总结的人工修改会被替换；聊天原文不会改变。阶段总结会在全部成功后一次性替换，骨架重建失败时新总结仍会保留且旧骨架停止注入。',
     '这可能需要多次 LLM 请求，确定继续吗？',
+  ].join('\n\n');
+}
+
+export function stageSummaryRegenerationConfirmation(
+  entry: StageSummaryEntry,
+  hasUnsavedChanges: boolean,
+  invalidatesSkeleton: boolean,
+): string {
+  return [
+    ...(hasUnsavedChanges
+      ? ['当前编辑框有尚未保存的修改；继续会放弃这些修改。']
+      : []),
+    ...(entry.manuallyEdited
+      ? ['当前总结包含人工编辑；重新生成会用模型结果替换这些修改。']
+      : []),
+    `将只依据消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId} 的当前原文重新生成这一条总结，来源范围不会改变。`,
+    '更早和更晚的阶段总结都不会重新生成。',
+    '模型请求全部成功并通过来源校验后才会一次性替换；失败、中断或聊天切换时保留当前总结。',
+    ...(invalidatesSkeleton
+      ? ['这条总结已经被全局骨架覆盖。替换后旧骨架会标记为待重建，并在重建前停止注入。']
+      : []),
+    '确定继续吗？',
   ].join('\n\n');
 }
 
@@ -115,6 +141,8 @@ function sourceText(entry: StageSummaryEntry): string {
     sourceStartMessageId: entry.sourceStartMessageId,
     sourceEndMessageId: entry.sourceEndMessageId,
     sourceHash: entry.sourceHash,
+    characterCount: stageSummaryCharacterCount(entry),
+    generation: entry.generation ?? null,
     manuallyEdited: Boolean(entry.manuallyEdited),
     updatedAt: entry.updatedAt,
   }, null, 2);
@@ -206,15 +234,18 @@ export function stageSummaryManagerTemplate(): string {
           <textarea id="story-echo-summary-editor-text" class="text_pole" rows="14" maxlength="64000"></textarea>
         </label>
         <div class="story-echo-field story-echo-summary-source-field">
-          <span>只读来源信息</span>
+          <span>只读来源与生成信息</span>
           <pre id="story-echo-summary-source" class="story-echo-summary-source"></pre>
         </div>
         <p class="story-echo-hint">
-          正文可按剧情需要自由分段，保存时只校验非空和长度。删除绝不修改或删除聊天原文：删除最新一条会回退覆盖位置，让该段原文重新参与后续请求；删除更老的条目只停用该总结，不重新发送很老的原文，也不影响后续总结。
+          正文可按剧情需要自由分段，保存时只校验非空和长度。“重新生成当前总结”只重做这一条并在成功后原子替换，失败时保留旧内容。删除绝不修改或删除聊天原文：删除最新一条会回退覆盖位置，让该段原文重新参与后续请求；删除更老的条目只停用该总结，不重新发送很老的原文，也不影响后续总结。
         </p>
         <div class="story-echo-summary-editor-actions">
           <button id="story-echo-summary-save" class="menu_button story-echo-action-primary" type="button">
             <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i><span>保存修改</span>
+          </button>
+          <button id="story-echo-summary-regenerate" class="menu_button" type="button">
+            <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i><span>重新生成当前总结</span>
           </button>
           <button id="story-echo-summary-delete" class="menu_button story-echo-summary-delete" type="button">
             <i class="fa-solid fa-trash" aria-hidden="true"></i><span>删除总结</span>
@@ -251,6 +282,7 @@ export class StageSummaryMetadataManager {
   private skeletonRevision = 0;
   private populatedSkeletonUpdatedAt: string | null = null;
   private skeletonActivityStatus = '';
+  private summaryRegenerationActive = false;
   private readonly settingsRepository = new SettingsRepository();
 
   constructor(private readonly repository: StoryStateRepository) {}
@@ -540,6 +572,9 @@ export class StageSummaryMetadataManager {
       await this.changePage(panel, this.currentPage + 1);
     });
     element<HTMLElement>(panel, '#story-echo-summary-list').addEventListener('click', async (event) => {
+      if (this.summaryRegenerationActive) {
+        return;
+      }
       const target = event.target;
       if (!(target instanceof Element)) {
         return;
@@ -591,6 +626,71 @@ export class StageSummaryMetadataManager {
         notify.error(error instanceof Error ? error.message : '保存阶段总结失败。');
       } finally {
         button.disabled = false;
+      }
+    });
+
+    element<HTMLButtonElement>(panel, '#story-echo-summary-regenerate').addEventListener('click', async (event) => {
+      // Capture the button before awaiting SillyTavern's confirmation popup.
+      const button = event.currentTarget as HTMLButtonElement;
+      const label = button.querySelector<HTMLElement>('span');
+      const idleLabel = label?.textContent ?? '重新生成当前总结';
+      const state = this.repository.getExisting();
+      const current = this.currentSummary(state);
+      if (!state || !current) {
+        this.resetSelection();
+        this.render(panel, state);
+        return;
+      }
+      const invalidatesSkeleton = Boolean(
+        state.storySkeleton.text &&
+        current.sourceEndMessageId <= state.storySkeleton.coveredThroughMessageId,
+      );
+      if (!await showConfirmation(
+        '重新生成当前阶段总结',
+        stageSummaryRegenerationConfirmation(
+          current,
+          this.editorDirty,
+          invalidatesSkeleton,
+        ),
+      )) {
+        return;
+      }
+      const requestedChatId = getCurrentChatId();
+      const sourceStartMessageId = current.sourceStartMessageId;
+      const expectedUpdatedAt = current.updatedAt;
+      this.summaryRegenerationActive = true;
+      if (label) {
+        label.textContent = '正在重新生成…';
+      }
+      this.render(panel, state);
+      try {
+        const result = await storyEchoTaskCoordinator.enqueueManual(
+          '重新生成当前阶段总结',
+          async () => {
+            if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+              throw new Error('等待重新生成阶段总结期间聊天已切换，已取消任务。');
+            }
+            return stageSummaryService.regenerateEntry(
+              sourceStartMessageId,
+              expectedUpdatedAt,
+            );
+          },
+        );
+        this.editorDirty = false;
+        this.populatedSummaryKey = '';
+        this.populatedUpdatedAt = '';
+        await onChanged();
+        notify.success(
+          `阶段总结已重新生成：${result.previousCharacterCount} 字 → ${stageSummaryCharacterCount(result.entry)} 字。`,
+        );
+      } catch (error) {
+        notify.error(error instanceof Error ? error.message : '重新生成阶段总结失败，已保留原有结果。');
+      } finally {
+        this.summaryRegenerationActive = false;
+        if (label) {
+          label.textContent = idleLabel;
+        }
+        this.render(panel, this.repository.getExisting());
       }
     });
 
@@ -659,6 +759,7 @@ export class StageSummaryMetadataManager {
       this.skeletonDirty = false;
       this.populatedSkeletonUpdatedAt = null;
       this.skeletonActivityStatus = '';
+      this.summaryRegenerationActive = false;
     }
 
     const skeleton = state?.storySkeleton;
@@ -668,13 +769,17 @@ export class StageSummaryMetadataManager {
     const skeletonRebuild = element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild');
     const summaryRebuildAll = element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all');
     const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
-    const skeletonBusy = Boolean(this.skeletonActivityStatus);
+    const skeletonBusy = Boolean(this.skeletonActivityStatus) ||
+      this.summaryRegenerationActive;
     skeletonText.disabled = !skeleton?.text || skeletonBusy;
     skeletonSave.disabled = !skeleton?.text || skeletonBusy;
     skeletonUpdate.disabled = !state || skeletonBusy;
     skeletonRebuild.disabled = !state || skeletonBusy;
     summaryRebuildAll.disabled = !state || skeletonBusy;
-    skeletonStatus.classList.toggle('story-echo-skeleton-status-active', skeletonBusy);
+    skeletonStatus.classList.toggle(
+      'story-echo-skeleton-status-active',
+      Boolean(this.skeletonActivityStatus),
+    );
     skeletonStatus.textContent = this.skeletonActivityStatus || (skeleton?.text
       ? [
           skeleton.stale ? '待重建，当前不会注入' : `覆盖到消息 ${skeleton.coveredThroughMessageId}`,
@@ -715,8 +820,8 @@ export class StageSummaryMetadataManager {
       count.textContent = `共 ${entries.length} 条；${pageDescription}`;
     }
     pagination.hidden = filtered.length <= page.pageSize;
-    previous.disabled = page.page <= 1;
-    next.disabled = page.page >= page.totalPages;
+    previous.disabled = page.page <= 1 || skeletonBusy;
+    next.disabled = page.page >= page.totalPages || skeletonBusy;
     pageLabel.textContent = `第 ${page.page} / ${page.totalPages} 页`;
 
     if (filtered.length === 0 && entries.length > 0) {
@@ -730,6 +835,7 @@ export class StageSummaryMetadataManager {
       button.type = 'button';
       button.className = 'menu_button story-echo-summary-row';
       button.dataset.summaryKey = item.key;
+      button.disabled = skeletonBusy;
       button.classList.toggle(
         'story-echo-summary-row-selected',
         item.key === this.selectedSummaryKey,
@@ -744,6 +850,7 @@ export class StageSummaryMetadataManager {
       metadata.textContent = [
         `#${item.index + 1}`,
         `消息 ${item.entry.sourceStartMessageId}～${item.entry.sourceEndMessageId}`,
+        `${stageSummaryCharacterCount(item.entry)} 字`,
         stageSummaryDeliveryStatus(
           item.entry,
           item.index,
@@ -768,6 +875,20 @@ export class StageSummaryMetadataManager {
     }
     const current = this.currentSummary(state);
     editor.hidden = !current;
+    const summaryEditorText = element<HTMLTextAreaElement>(
+      panel,
+      '#story-echo-summary-editor-text',
+    );
+    const summarySave = element<HTMLButtonElement>(panel, '#story-echo-summary-save');
+    const summaryRegenerate = element<HTMLButtonElement>(
+      panel,
+      '#story-echo-summary-regenerate',
+    );
+    const summaryDelete = element<HTMLButtonElement>(panel, '#story-echo-summary-delete');
+    summaryEditorText.disabled = !current || skeletonBusy;
+    summarySave.disabled = !current || skeletonBusy;
+    summaryRegenerate.disabled = !current || skeletonBusy;
+    summaryDelete.disabled = !current || skeletonBusy;
     if (
       current &&
       (stageSummaryKey(current) !== this.populatedSummaryKey ||
@@ -791,7 +912,7 @@ export class StageSummaryMetadataManager {
 
   private setSkeletonActivityStatus(panel: HTMLElement, status: string): void {
     this.skeletonActivityStatus = status;
-    const busy = Boolean(status);
+    const busy = Boolean(status) || this.summaryRegenerationActive;
     const state = this.repository.getExisting();
     const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
     skeletonStatus.classList.toggle('story-echo-skeleton-status-active', busy);
@@ -808,10 +929,19 @@ export class StageSummaryMetadataManager {
       busy || !state;
     element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all').disabled =
       busy || !state;
+    const current = this.currentSummary(state);
+    element<HTMLTextAreaElement>(panel, '#story-echo-summary-editor-text').disabled =
+      busy || !current;
+    element<HTMLButtonElement>(panel, '#story-echo-summary-save').disabled =
+      busy || !current;
+    element<HTMLButtonElement>(panel, '#story-echo-summary-regenerate').disabled =
+      busy || !current;
+    element<HTMLButtonElement>(panel, '#story-echo-summary-delete').disabled =
+      busy || !current;
   }
 
   private async changePage(panel: HTMLElement, requestedPage: number): Promise<void> {
-    if (requestedPage === this.currentPage) {
+    if (requestedPage === this.currentPage || this.summaryRegenerationActive) {
       return;
     }
     if (
@@ -834,7 +964,7 @@ export class StageSummaryMetadataManager {
     index: number,
   ): void {
     element<HTMLElement>(panel, '#story-echo-summary-editor-range').textContent =
-      `#${index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}`;
+      `#${index + 1}｜消息 ${entry.sourceStartMessageId}～${entry.sourceEndMessageId}｜${stageSummaryCharacterCount(entry)} 字`;
     element<HTMLTextAreaElement>(panel, '#story-echo-summary-editor-text').value = entry.text;
     element<HTMLElement>(panel, '#story-echo-summary-source').textContent = sourceText(entry);
   }

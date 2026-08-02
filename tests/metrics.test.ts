@@ -4,6 +4,10 @@ import {
   recordDebugTrace,
   resetDiagnostics,
 } from '../src/debug/metrics';
+import {
+  MAX_INTERNAL_LLM_ATTEMPTS,
+  recordInternalLlmAttempt,
+} from '../src/debug/internal-llm-attempts';
 import { chatState } from './fixtures';
 
 describe('diagnostics metrics', () => {
@@ -40,11 +44,45 @@ describe('diagnostics metrics', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
     });
     state.metrics.summaryUpdates = 5;
+    state.recentInternalLlmAttempts.push({
+      id: 'attempt',
+      task: 'stage-summary',
+      status: 'failed',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: '2026-01-01T00:00:01.000Z',
+      durationMs: 1_000,
+      requestedMaxTokens: 3_000,
+      agentActiveAtStart: false,
+      agentActiveAtEnd: false,
+      error: 'failed',
+    });
     recordDebugTrace(state, true, 'summary', 'trace');
     resetDiagnostics(state);
 
     expect(state.stageSummary.entries).toHaveLength(1);
     expect(state.metrics.summaryUpdates).toBe(0);
     expect(state.debugTraces).toEqual([]);
+    expect(state.recentInternalLlmAttempts).toEqual([]);
+  });
+
+  it('bounds persistent internal-model diagnostics to the latest twenty attempts', () => {
+    const state = chatState();
+    for (let index = 0; index < 25; index += 1) {
+      recordInternalLlmAttempt(state, {
+        id: `attempt-${index}`,
+        task: 'stage-summary',
+        status: 'completed',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        finishedAt: '2026-01-01T00:00:01.000Z',
+        durationMs: 1_000,
+        requestedMaxTokens: 3_000,
+        agentActiveAtStart: false,
+        agentActiveAtEnd: false,
+      });
+    }
+
+    expect(state.recentInternalLlmAttempts).toHaveLength(MAX_INTERNAL_LLM_ATTEMPTS);
+    expect(state.recentInternalLlmAttempts[0]?.id).toBe('attempt-5');
+    expect(state.recentInternalLlmAttempts.at(-1)?.id).toBe('attempt-24');
   });
 });

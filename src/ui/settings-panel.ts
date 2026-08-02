@@ -3,6 +3,7 @@ import { DISPLAY_NAME } from '../core/constants';
 import { logger } from '../core/logger';
 import type { LlmProviderId, StoryEchoChatState, StoryEchoSettings, WindowUnit } from '../core/types';
 import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
+import { MAX_INTERNAL_LLM_ATTEMPTS } from '../debug/internal-llm-attempts';
 import { resetDiagnostics } from '../debug/metrics';
 import { buildDebugReport } from '../debug/report';
 import { fetchCustomLlmModels } from '../llm/model-list';
@@ -629,7 +630,7 @@ function bindSettings(panel: HTMLElement): void {
     const button = event.currentTarget as HTMLButtonElement;
     const confirmed = await showConfirmation(
       '清空 StoryEcho 统计',
-      '将清空当前聊天的运行统计、最近检查记录和调试轨迹；阶段总结与全局骨架不会改变。',
+      '将清空当前聊天的运行统计、最近检查记录、内部模型请求记录和调试轨迹；阶段总结与全局骨架不会改变。',
     );
     if (!confirmed) {
       return;
@@ -682,6 +683,33 @@ function statsText(state: StoryEchoChatState): string {
     metrics.estimatedRemovedTokens - metrics.estimatedInjectedTokens,
   );
   const queue = storyEchoTaskCoordinator.snapshot();
+  const latestInternalRequest = state.recentInternalLlmAttempts.at(-1);
+  const latestCompletion = latestInternalRequest?.completion;
+  const latestInternalRequestText = latestInternalRequest
+    ? [
+        latestInternalRequest.task === 'stage-summary' ? '阶段总结' : '全局骨架',
+        latestInternalRequest.status === 'completed'
+          ? '完成'
+          : latestInternalRequest.status === 'cancelled'
+            ? '取消'
+            : '失败',
+        latestCompletion?.finishReason
+          ? `finish=${latestCompletion.finishReason}`
+          : 'finish=未知',
+        `上限=${latestInternalRequest.requestedMaxTokens} Token`,
+        latestCompletion?.completionTokens !== undefined
+          ? `输出=${latestCompletion.completionTokens} Token`
+          : '输出Token=未知',
+        latestCompletion
+          ? `响应=${latestCompletion.responseCharacters} 字`
+          : '',
+        latestCompletion?.reasoningTokens !== undefined
+          ? `推理=${latestCompletion.reasoningTokens} Token`
+          : '',
+        `Agent=${latestInternalRequest.agentActiveAtStart ? '开' : '关'}→${latestInternalRequest.agentActiveAtEnd ? '开' : '关'}`,
+        `${latestInternalRequest.durationMs}ms`,
+      ].filter(Boolean).join('，')
+    : '无';
   return [
     `全局骨架：更新 ${metrics.skeletonUpdates} 次，失败 ${metrics.skeletonFailures} 次，平均 ${averageSkeleton}ms/次`,
     `阶段总结：更新 ${metrics.summaryUpdates} 次，失败 ${metrics.summaryFailures} 次，覆盖 ${metrics.summaryMessagesCovered} 条消息，平均 ${averageSummary}ms/次`,
@@ -689,6 +717,7 @@ function statsText(state: StoryEchoChatState): string {
     `估算 Token：移除 ${metrics.estimatedRemovedTokens}，注入 ${metrics.estimatedInjectedTokens}，累计净节省 ${estimatedNetSaved}`,
     `任务队列：运行 ${queue.runningKind ?? (queue.foregroundLeaseActive ? '等待角色回复' : '空闲')}，排队前台 ${queue.queuedForeground}/手动 ${queue.queuedManual}/后台 ${queue.queuedBackground}，最长等待 ${queue.maximumQueueWaitMs}ms`,
     `最近：骨架 ${metrics.lastSkeletonAt ?? '无'} / 总结 ${metrics.lastSummaryAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
+    `内部模型请求：${state.recentInternalLlmAttempts.length}/${MAX_INTERNAL_LLM_ATTEMPTS}；最近 ${latestInternalRequestText}`,
     `调试轨迹：${state.debugTraces.length}/50`,
   ].join('\n');
 }

@@ -1,6 +1,28 @@
 export type WindowUnit = 'turns' | 'messages';
 export type LlmProviderId = 'main' | 'openai-compatible';
 
+export interface LlmCompletionMetadata {
+  provider: LlmProviderId;
+  /** Actual output budget sent to the provider after local clamping/retry. */
+  requestedMaxTokens: number;
+  /** Provider-specific completion reason, for example `stop` or `length`. */
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+  /** Unicode code-point count of the raw visible provider response. */
+  responseCharacters: number;
+  source?: string;
+  model?: string;
+  fallbackFrom?: LlmProviderId;
+}
+
+export interface LlmCompletionResult {
+  text: string;
+  metadata: LlmCompletionMetadata;
+}
+
 export interface StoryEchoSettings {
   version: 10;
   enabled: boolean;
@@ -37,6 +59,10 @@ export interface StoryEchoSettings {
 
 export interface StageSummaryEntry {
   text: string;
+  /** Unicode code-point count of the current stored summary text. */
+  characterCount?: number;
+  /** Generation provenance. Manual edits change characterCount but preserve this provenance. */
+  generation?: LlmCompletionMetadata;
   sourceStartMessageId: number;
   sourceEndMessageId: number;
   sourceHash: string;
@@ -108,6 +134,25 @@ export interface StoryEchoDebugTrace {
   details?: DebugDetails;
 }
 
+export type InternalLlmTask = 'stage-summary' | 'story-skeleton';
+export type InternalLlmAttemptStatus = 'completed' | 'cancelled' | 'failed';
+
+export interface InternalLlmAttempt {
+  id: string;
+  task: InternalLlmTask;
+  status: InternalLlmAttemptStatus;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  sourceStartMessageId?: number;
+  sourceEndMessageId?: number;
+  requestedMaxTokens: number;
+  agentActiveAtStart: boolean;
+  agentActiveAtEnd: boolean;
+  completion?: LlmCompletionMetadata;
+  error?: string;
+}
+
 export interface StoryEchoChatState {
   schemaVersion: 2;
   chatUuid: string;
@@ -121,6 +166,8 @@ export interface StoryEchoChatState {
   storySkeleton: StorySkeleton;
   metrics: StoryEchoMetrics;
   debugTraces: StoryEchoDebugTrace[];
+  /** Bounded diagnostic history; never contains prompts, API keys, or response text. */
+  recentInternalLlmAttempts: InternalLlmAttempt[];
   lastInspection?: InspectionRecord;
 }
 
@@ -145,5 +192,6 @@ export interface LlmRequest {
 export interface LlmProvider {
   readonly id: LlmProviderId;
   complete(request: LlmRequest): Promise<string>;
+  completeDetailed?(request: LlmRequest): Promise<LlmCompletionResult>;
   testConnection(): Promise<void>;
 }
