@@ -18,17 +18,15 @@ import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
 import { StoryStateRepository } from '../state/repository';
 import { stageSummaryService } from '../summary/service';
-import { storySkeletonService } from '../summary/skeleton-service';
 import {
-  archivedStageSummaryEntries,
-  pendingArchivedStageSummaryEntries,
-  storySkeletonIsUsable,
-} from '../summary/skeleton-state';
+  configuredSummaryCompactionThresholds,
+  summaryCompactionDue,
+  summaryLevelCounts,
+} from '../summary/compaction-state';
 import {
   estimateMessageTokens,
   estimateTokens,
   renderStoryEchoHistory,
-  renderStorySkeletonBlock,
   renderStageSummaryBlock,
 } from './render';
 import {
@@ -132,7 +130,6 @@ async function prepareStoryEchoPrompt(
       return;
     }
     state = await stageSummaryService.reconcileHistory(state) ?? state;
-    state = await storySkeletonService.reconcile(state) ?? state;
 
     const warnings: string[] = [];
     const desiredCoveredThrough = minimumSourceWindow.retainedStartIndex - 1;
@@ -183,45 +180,41 @@ async function prepareStoryEchoPrompt(
       return;
     }
 
-    const summaryWindowSize = Math.max(1, Math.floor(settings.summary.windowSize));
     const activeStageSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
-    const archivedSummaries = archivedStageSummaryEntries(state, summaryWindowSize);
-    const pendingArchivedSummaries = pendingArchivedStageSummaryEntries(state, summaryWindowSize);
-    const recentSummaryPool = activeStageSummaries.slice(-summaryWindowSize);
     const currentInput = sourceChat[minimumSourceWindow.currentInputIndex]?.mes ?? '';
     const storyPhaseBoundary = currentStoryPhaseStart(
       sourceChat,
       minimumSourceWindow.currentInputIndex,
     );
     const includeEarlierPhase = asksForEarlierStoryPhase(currentInput);
-    const summaryPool = storyPhaseBoundary !== null && !includeEarlierPhase
-      ? recentSummaryPool.filter((entry) => entry.sourceStartMessageId >= storyPhaseBoundary)
-      : recentSummaryPool;
-    if (summaryPool.length < recentSummaryPool.length) {
+    // Higher levels preserve compressed long-term continuity. Only Level 1
+    // scene detail is isolated when a new story phase explicitly begins.
+    const summaryEntries = storyPhaseBoundary !== null && !includeEarlierPhase
+      ? activeStageSummaries.filter((entry) => (
+          entry.level > 1 || entry.sourceStartMessageId >= storyPhaseBoundary
+        ))
+      : activeStageSummaries;
+    if (summaryEntries.length < activeStageSummaries.length) {
       recordDebugTrace(state, settings.debug, 'interceptor', '当前剧情阶段已省略较早阶段总结。', {
         boundaryMessageId: storyPhaseBoundary ?? -1,
-        excludedSummaries: recentSummaryPool.length - summaryPool.length,
+        excludedSummaries: activeStageSummaries.length - summaryEntries.length,
       });
     }
-
-    const summaryEntries = [...pendingArchivedSummaries, ...summaryPool];
-    const skeletonBlock = storySkeletonIsUsable(state)
-      ? renderStorySkeletonBlock(
-          state.storySkeleton.text,
-          state.storySkeleton.coveredThroughMessageId,
-        )
-      : '';
-    if (state.storySkeleton.text && state.storySkeleton.stale) {
-      warnings.push('全局剧情骨架来源已失效，重建成功前改为携带尚未合并的阶段总结。');
+    if (summaryCompactionDue(
+      state.stageSummary.entries,
+      configuredSummaryCompactionThresholds(settings.summary),
+    )) {
+      warnings.push('分层总结尚有待压缩条目，本次先携带当前完整总结。');
     }
     const summaryBlocks = summaryEntries
       .map((entry) => renderStageSummaryBlock(
         entry.text,
         entry.sourceStartMessageId,
         entry.sourceEndMessageId,
+        entry.level,
       ))
       .filter(Boolean);
-    const historyBlock = renderStoryEchoHistory(skeletonBlock, summaryBlocks);
+    const historyBlock = renderStoryEchoHistory(summaryBlocks);
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
     const estimatedSummaryTokens = historyBlock ? estimateTokens(historyBlock) : 0;
 
@@ -236,7 +229,7 @@ async function prepareStoryEchoPrompt(
       );
       tauriTavernAgentBridge.markStoryEchoSummaryInjected(
         requestedChatId,
-        (skeletonBlock ? 1 : 0) + summaryBlocks.length,
+        summaryBlocks.length,
       );
     }
 
@@ -264,10 +257,13 @@ async function prepareStoryEchoPrompt(
       summaryEntriesStored: activeStageSummaries.length,
       summaryEntriesDeleted: state.stageSummary.entries.length - activeStageSummaries.length,
       summaryEntriesInjected: summaryBlocks.length,
-      summaryEntriesArchived: archivedSummaries.length,
-      skeletonInjected: Boolean(skeletonBlock),
-      skeletonCoveredThrough: state.storySkeleton.coveredThroughMessageId,
-      skeletonPendingEntries: pendingArchivedSummaries.length,
+      summaryLevelCounts: [...summaryLevelCounts(state.stageSummary.entries).entries()]
+        .map(([level, count]) => `L${level}:${count}`)
+        .join(','),
+      summaryCompactionPending: summaryCompactionDue(
+        state.stageSummary.entries,
+        configuredSummaryCompactionThresholds(settings.summary),
+      ),
       storyPhaseBoundary: storyPhaseBoundary ?? -1,
       estimatedRemovedTokens,
       estimatedSummaryTokens,

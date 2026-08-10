@@ -73,7 +73,7 @@ beforeEach(() => {
     text: '本阶段中，用户完成行动，角色作出回应。',
     metadata: {
       provider: 'main',
-      requestedMaxTokens: 1_600,
+      requestedMaxTokens: 3_000,
       finishReason: 'stop',
       completionTokens: 42,
       reasoningTokens: 0,
@@ -162,11 +162,12 @@ describe('StageSummaryService', () => {
     expect(result.state?.stageSummary.coveredThroughMessageId).toBe(7);
     expect(mocks.complete).toHaveBeenCalledTimes(2);
     expect(mocks.complete.mock.calls[0]?.[1]).toMatchObject({
-      maxTokens: 1_600,
+      maxTokens: 3_000,
       timeoutMs: 300_000,
     });
     expect(mocks.save).toHaveBeenCalledTimes(2);
     expect(result.state?.stageSummary.entries[0]).toMatchObject({
+      level: 1,
       characterCount: 19,
       generation: {
         finishReason: 'stop',
@@ -176,7 +177,7 @@ describe('StageSummaryService', () => {
     expect(result.state?.recentInternalLlmAttempts).toHaveLength(2);
   });
 
-  it('atomically regenerates only the selected summary and invalidates a covered skeleton', async () => {
+  it('atomically regenerates only the selected Level 1 summary', async () => {
     const chat = completedChat(4);
     install(chat);
     const service = new StageSummaryService();
@@ -184,16 +185,11 @@ describe('StageSummaryService', () => {
     const first = mocks.state!.stageSummary.entries[0]!;
     const secondBefore = structuredClone(mocks.state!.stageSummary.entries[1]!);
     const coveredMessagesBefore = mocks.state!.metrics.summaryMessagesCovered;
-    mocks.state!.storySkeleton = {
-      text: '旧骨架',
-      coveredThroughMessageId: first.sourceEndMessageId,
-      sourceHash: 'old-skeleton-source',
-    };
     mocks.complete.mockResolvedValueOnce({
       text: '重新生成的完整阶段总结。',
       metadata: {
         provider: 'main',
-        requestedMaxTokens: 1_600,
+        requestedMaxTokens: 3_000,
         finishReason: 'length',
         promptTokens: 1_000,
         completionTokens: 50,
@@ -222,7 +218,6 @@ describe('StageSummaryService', () => {
       },
     });
     expect(result.state.stageSummary.entries[1]).toEqual(secondBefore);
-    expect(result.state.storySkeleton.stale).toBe(true);
     expect(result.state.metrics.summaryMessagesCovered).toBe(coveredMessagesBefore);
     expect(result.state.recentInternalLlmAttempts.at(-1)).toMatchObject({
       task: 'stage-summary',
@@ -259,6 +254,51 @@ describe('StageSummaryService', () => {
     });
   });
 
+  it('preserves a concurrent edit when Level 1 regeneration loses its revision race', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    const service = new StageSummaryService();
+    await service.processAllThrough(chat.length - 1);
+    const previous = structuredClone(mocks.state!.stageSummary.entries[0]!);
+    const concurrentText = '另一操作刚刚保存的人工编辑。';
+    mocks.complete.mockImplementationOnce(async () => {
+      const concurrent = structuredClone(mocks.state!);
+      concurrent.stageSummary.entries[0] = {
+        ...concurrent.stageSummary.entries[0]!,
+        text: concurrentText,
+        characterCount: Array.from(concurrentText).length,
+        manuallyEdited: true,
+        updatedAt: '2026-08-10T12:00:00.000Z',
+      };
+      mocks.state = concurrent;
+      return {
+        text: '已经失去写入资格的模型结果。',
+        metadata: {
+          provider: 'main' as const,
+          requestedMaxTokens: 3_000,
+          finishReason: 'stop',
+          responseCharacters: 14,
+        },
+      };
+    });
+
+    await expect(service.regenerateEntry(
+      previous.sourceStartMessageId,
+      previous.updatedAt,
+    )).rejects.toThrow('已有总结发生变化');
+
+    expect(mocks.state!.stageSummary.entries[0]).toMatchObject({
+      text: concurrentText,
+      manuallyEdited: true,
+      updatedAt: '2026-08-10T12:00:00.000Z',
+    });
+    expect(mocks.state!.metrics.summaryFailures).toBe(1);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      task: 'stage-summary',
+      status: 'completed',
+    });
+  });
+
   it('records both failures from a bounded timeout retry', async () => {
     const chat = completedChat(2);
     install(chat);
@@ -284,6 +324,7 @@ describe('StageSummaryService', () => {
     install(chat);
     const oldEntry = {
       text: '旧总结保持可用。',
+      level: 1,
       sourceStartMessageId: 0,
       sourceEndMessageId: 3,
       sourceHash: 'old-source',
@@ -298,11 +339,11 @@ describe('StageSummaryService', () => {
     mocks.complete
       .mockResolvedValueOnce({
         text: '重建草稿一。',
-        metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+        metadata: { provider: 'main', requestedMaxTokens: 3_000, responseCharacters: 6 },
       })
       .mockResolvedValueOnce({
         text: '重建草稿二。',
-        metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+        metadata: { provider: 'main', requestedMaxTokens: 3_000, responseCharacters: 6 },
       })
       .mockRejectedValueOnce(new Error('third batch failed'));
     const service = new StageSummaryService();
@@ -322,7 +363,7 @@ describe('StageSummaryService', () => {
 
     mocks.complete.mockResolvedValueOnce({
       text: '重建草稿三。',
-      metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+      metadata: { provider: 'main', requestedMaxTokens: 3_000, responseCharacters: 6 },
     });
     const progress = vi.fn();
     const result = await service.rebuildAllThrough(chat.length - 1, progress);
@@ -348,7 +389,7 @@ describe('StageSummaryService', () => {
     mocks.complete
       .mockResolvedValueOnce({
         text: '旧原文草稿。',
-        metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+        metadata: { provider: 'main', requestedMaxTokens: 3_000, responseCharacters: 6 },
       })
       .mockRejectedValueOnce(new Error('second batch failed'));
     const service = new StageSummaryService();
@@ -358,7 +399,7 @@ describe('StageSummaryService', () => {
     chat[0]!.mes = '原文已经修改';
     mocks.complete.mockResolvedValue({
       text: '新原文总结。',
-      metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+      metadata: { provider: 'main', requestedMaxTokens: 3_000, responseCharacters: 6 },
     });
     const progress = vi.fn();
     await service.rebuildAllThrough(chat.length - 1, progress);
@@ -383,7 +424,7 @@ describe('StageSummaryService', () => {
     expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
       task: 'stage-summary',
       status: 'cancelled',
-      requestedMaxTokens: 1_600,
+      requestedMaxTokens: 3_000,
       agentActiveAtStart: false,
       agentActiveAtEnd: false,
       error: expect.stringContaining('Agent前台请求开始'),
@@ -435,6 +476,22 @@ describe('StageSummaryService', () => {
     expect(reconciled?.stageSummary.coveredThroughMessageId).toBe(-1);
   });
 
+  it('fails open when history changes during asynchronous source reconciliation', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    const service = new StageSummaryService();
+    await service.processAllThrough(3);
+
+    const reconciliation = service.reconcileHistory(mocks.state ?? undefined);
+    queueMicrotask(() => {
+      chat[0]!.mes = 'edited while source hashes are being checked';
+    });
+
+    await expect(reconciliation).rejects.toThrow(
+      '校验阶段总结期间聊天历史发生变化',
+    );
+  });
+
   it('does not commit a result if source messages change during the request', async () => {
     const chat = completedChat(2);
     install(chat);
@@ -444,7 +501,7 @@ describe('StageSummaryService', () => {
         text: 'stale summary',
         metadata: {
           provider: 'main',
-          requestedMaxTokens: 1_600,
+          requestedMaxTokens: 3_000,
           finishReason: 'stop',
           responseCharacters: 13,
         },
@@ -454,5 +511,48 @@ describe('StageSummaryService', () => {
       .rejects.toThrow('源消息发生变化');
     expect(mocks.state?.stageSummary.entries).toEqual([]);
     expect(mocks.state?.metrics.summaryFailures).toBe(1);
+  });
+
+  it('preserves concurrently committed summaries when a new Level 1 write loses its race', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    const concurrentEntry = {
+      text: '另一任务先提交的总结。',
+      level: 1,
+      characterCount: 10,
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 3,
+      sourceHash: 'concurrent-source-hash',
+      updatedAt: '2026-08-10T12:30:00.000Z',
+    };
+    mocks.complete.mockImplementationOnce(async () => {
+      const concurrent = structuredClone(mocks.state!);
+      concurrent.stageSummary = {
+        entries: [concurrentEntry],
+        coveredThroughMessageId: concurrentEntry.sourceEndMessageId,
+        coveredThroughHash: concurrentEntry.sourceHash,
+        updatedAt: concurrentEntry.updatedAt,
+      };
+      mocks.state = concurrent;
+      return {
+        text: '稍后完成但已经过期的总结。',
+        metadata: {
+          provider: 'main' as const,
+          requestedMaxTokens: 3_000,
+          finishReason: 'stop',
+          responseCharacters: 13,
+        },
+      };
+    });
+
+    await expect(new StageSummaryService().processAllThrough(chat.length - 1))
+      .rejects.toThrow('已有总结发生变化');
+
+    expect(mocks.state!.stageSummary.entries).toEqual([concurrentEntry]);
+    expect(mocks.state!.metrics.summaryFailures).toBe(1);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      task: 'stage-summary',
+      status: 'completed',
+    });
   });
 });

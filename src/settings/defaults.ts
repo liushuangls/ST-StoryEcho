@@ -11,12 +11,13 @@ export const DEFAULT_SETTINGS = Object.freeze({
   },
   summary: {
     targetTurnsPerUpdate: 10,
-    windowSize: 4,
-    maxTokens: 1_600,
-    skeletonMaxTokens: 5_000,
+    level1EntriesPerGroup: 10,
+    higherLevelEntriesPerGroup: 5,
+    level1MaxTokens: 3_000,
+    higherLevelMaxTokens: 8_000,
     reference: {
       enabled: true,
-      maxWorldInfoEntries: 5,
+      maxWorldInfoEntries: 20,
     },
   },
   llm: {

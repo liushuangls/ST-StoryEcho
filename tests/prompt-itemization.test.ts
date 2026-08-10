@@ -30,7 +30,7 @@ function tokenSum(value: Awaited<ReturnType<PromptItemizationService['latest']>>
 
 describe('latest SillyTavern prompt itemization', () => {
   it('uses the latest completed chat message and separates StoryEcho payloads', async () => {
-    const skeleton = '<story_echo_skeleton>SKELETON</story_echo_skeleton>';
+    const higherSummary = '<story_echo_summary>HIGHER</story_echo_summary>';
     const summary = '<story_echo_summary>SUM</story_echo_summary>';
     const historyNotice = 'StoryEcho historical data precedence notice';
     const record = {
@@ -39,7 +39,7 @@ describe('latest SillyTavern prompt itemization', () => {
       tokenizer: 'DeepSeek tokenizer',
       presetName: 'default',
       rawPrompt: [
-        { role: 'system', content: `${historyNotice}\n${skeleton}\n${summary}` },
+        { role: 'system', content: `${historyNotice}\n${higherSummary}\n${summary}` },
         { role: 'user', content: 'continue' },
       ],
       charDescription: 'character description',
@@ -67,9 +67,9 @@ describe('latest SillyTavern prompt itemization', () => {
     expect(result?.messageId).toBe(4);
     expect(result?.totalTokens).toBe(1_000);
     expect(tokenSum(result)).toBe(1_000);
-    expect(result?.storyEcho.summaryTokens).toBe(`${skeleton}\n${summary}`.length);
+    expect(result?.storyEcho.summaryTokens).toBe(`${higherSummary}\n${summary}`.length);
     expect(result?.storyEcho.contextTokens).toBe(
-      500 - `${skeleton}\n${summary}`.length,
+      500 - `${higherSummary}\n${summary}`.length,
     );
     expect(result?.model).toBe('deepseek-v4-flash');
     expect(result?.tokenizer).toBe('DeepSeek tokenizer');

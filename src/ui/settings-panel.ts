@@ -19,8 +19,10 @@ import { selectRecentWindow } from '../prompt/window';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
 import { StoryStateRepository } from '../state/repository';
+import { summaryCompactionService } from '../summary/compaction-service';
+import { summaryLevelCounts } from '../summary/compaction-state';
+import { MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES } from '../summary/constants';
 import { stageSummaryService } from '../summary/service';
-import { storySkeletonService } from '../summary/skeleton-service';
 import { EventSubscriptionScope } from './event-subscriptions';
 import { notify } from './notifications';
 import { promptStatsCardTemplate, promptTokenStatsCard } from './prompt-stats-card';
@@ -33,7 +35,7 @@ import { isElementRendered, observeElementVisibility } from './visibility';
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
 const stateRepository = new StoryStateRepository();
-const stageSummaryMetadataManager = new StageSummaryMetadataManager(stateRepository);
+let stageSummaryMetadataManager: StageSummaryMetadataManager | undefined;
 
 let registeredPanel: HTMLElement | undefined;
 let settingsPanelCleanup: (() => void) | undefined;
@@ -184,7 +186,7 @@ function panelTemplate(): HTMLElement {
         <div class="story-echo-switch-row story-echo-switch-primary">
           <div class="story-echo-switch-copy">
             <span class="story-echo-switch-title">启用 StoryEcho 上下文管理</span>
-            <p class="story-echo-hint">用最近原文、阶段总结与全局剧情骨架管理长对话上下文。</p>
+            <p class="story-echo-hint">用最近原文与递归分层总结管理长对话上下文。</p>
           </div>
           <span class="story-echo-toggle">
             <input id="story-echo-enabled" class="story-echo-toggle-input" type="checkbox">
@@ -198,7 +200,7 @@ function panelTemplate(): HTMLElement {
               <i class="fa-solid fa-sliders" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
                 <span class="story-echo-section-summary-title">窗口与总结设置</span>
-                <span class="story-echo-section-summary-description">最近原文、阶段总结窗口与输出预算</span>
+                <span class="story-echo-section-summary-description">最近原文、分层阈值与输出预算</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -220,16 +222,20 @@ function panelTemplate(): HTMLElement {
               <input id="story-echo-summary-batch" class="text_pole" type="number" min="1" max="100" step="1">
             </label>
             <label class="story-echo-field">
-              <span>随请求保留总结数</span>
-              <input id="story-echo-summary-window" class="text_pole" type="number" min="1" max="100" step="1">
+              <span>L1 每组合并条数</span>
+              <input id="story-echo-summary-window" class="text_pole" type="number" min="2" max="100" step="1">
             </label>
             <label class="story-echo-field">
-              <span>阶段总结输出上限</span>
-              <input id="story-echo-summary-tokens" class="text_pole" type="number" min="128" max="8192" step="1">
+              <span>L2+ 每组合并条数</span>
+              <input id="story-echo-higher-summary-window" class="text_pole" type="number" min="2" max="100" step="1">
             </label>
             <label class="story-echo-field">
-              <span>全局骨架输出上限</span>
-              <input id="story-echo-skeleton-tokens" class="text_pole" type="number" min="512" max="10000" step="1">
+              <span>L1 总结输出上限</span>
+              <input id="story-echo-summary-tokens" class="text_pole" type="number" min="128" max="16000" step="1">
+            </label>
+            <label class="story-echo-field">
+              <span>L2+ 高层总结输出上限</span>
+              <input id="story-echo-higher-summary-tokens" class="text_pole" type="number" min="512" max="16000" step="1">
             </label>
           </div>
         </details>
@@ -240,7 +246,7 @@ function panelTemplate(): HTMLElement {
               <i class="fa-solid fa-book-atlas" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
                 <span class="story-echo-section-summary-title">世界书参考</span>
-                <span class="story-echo-section-summary-description">为阶段总结与全局骨架补充设定</span>
+                <span class="story-echo-section-summary-description">为 L1 与高层总结补充设定</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -249,7 +255,7 @@ function panelTemplate(): HTMLElement {
             <div class="story-echo-switch-row">
               <div class="story-echo-switch-copy">
                 <span class="story-echo-switch-title">总结时参考世界书</span>
-                <p class="story-echo-hint">读取蓝灯常驻条目，以及由当前总结批次命中的绿灯条目。</p>
+                <p class="story-echo-hint">蓝灯优先，剩余容量再用于当前批次命中的绿灯；两者合计最多 50000 字符，绿灯默认最多 20 条。</p>
               </div>
               <span class="story-echo-toggle">
                 <input id="story-echo-world-info-reference" class="story-echo-toggle-input" type="checkbox">
@@ -258,7 +264,7 @@ function panelTemplate(): HTMLElement {
             </div>
             <label class="story-echo-field">
               <span>每批最多匹配绿灯条目</span>
-              <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="20" step="1">
+              <input id="story-echo-reference-world-info" class="text_pole" type="number" min="0" max="${MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES}" step="1">
             </label>
           </div>
         </details>
@@ -268,7 +274,7 @@ function panelTemplate(): HTMLElement {
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-brain" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">阶段总结与骨架模型</span>
+                <span class="story-echo-section-summary-title">阶段总结与高层压缩模型</span>
                 <span class="story-echo-section-summary-description">默认复用当前主连接</span>
               </span>
             </span>
@@ -324,8 +330,8 @@ function panelTemplate(): HTMLElement {
             <span class="story-echo-section-summary-main">
               <i class="fa-solid fa-book-open" aria-hidden="true"></i>
               <span class="story-echo-section-summary-copy">
-                <span class="story-echo-section-summary-title">全局骨架与阶段总结</span>
-                <span class="story-echo-section-summary-description">查看、编辑或重建当前聊天的派生上下文</span>
+                <span class="story-echo-section-summary-title">分层剧情总结</span>
+                <span class="story-echo-section-summary-description">查看、编辑、压缩或重建当前聊天的总结层级</span>
               </span>
             </span>
             <i class="fa-solid fa-chevron-right story-echo-section-chevron" aria-hidden="true"></i>
@@ -396,11 +402,13 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
   element<HTMLInputElement>(panel, '#story-echo-summary-batch').value =
     String(settings.summary.targetTurnsPerUpdate);
   element<HTMLInputElement>(panel, '#story-echo-summary-window').value =
-    String(settings.summary.windowSize);
+    String(settings.summary.level1EntriesPerGroup);
+  element<HTMLInputElement>(panel, '#story-echo-higher-summary-window').value =
+    String(settings.summary.higherLevelEntriesPerGroup);
   element<HTMLInputElement>(panel, '#story-echo-summary-tokens').value =
-    String(settings.summary.maxTokens);
-  element<HTMLInputElement>(panel, '#story-echo-skeleton-tokens').value =
-    String(settings.summary.skeletonMaxTokens);
+    String(settings.summary.level1MaxTokens);
+  element<HTMLInputElement>(panel, '#story-echo-higher-summary-tokens').value =
+    String(settings.summary.higherLevelMaxTokens);
   element<HTMLInputElement>(panel, '#story-echo-world-info-reference').checked =
     settings.summary.reference.enabled;
   element<HTMLInputElement>(panel, '#story-echo-reference-world-info').value =
@@ -465,17 +473,22 @@ function bindSettings(panel: HTMLElement): void {
   });
   element<HTMLInputElement>(panel, '#story-echo-summary-window').addEventListener('change', (event) => {
     update(panel, (settings) => {
-      settings.summary.windowSize = numberValue(event.currentTarget as HTMLInputElement, 4);
+      settings.summary.level1EntriesPerGroup = numberValue(event.currentTarget as HTMLInputElement, 10);
+    });
+  });
+  element<HTMLInputElement>(panel, '#story-echo-higher-summary-window').addEventListener('change', (event) => {
+    update(panel, (settings) => {
+      settings.summary.higherLevelEntriesPerGroup = numberValue(event.currentTarget as HTMLInputElement, 5);
     });
   });
   element<HTMLInputElement>(panel, '#story-echo-summary-tokens').addEventListener('change', (event) => {
     update(panel, (settings) => {
-      settings.summary.maxTokens = numberValue(event.currentTarget as HTMLInputElement, 1_600);
+      settings.summary.level1MaxTokens = numberValue(event.currentTarget as HTMLInputElement, 3_000);
     });
   });
-  element<HTMLInputElement>(panel, '#story-echo-skeleton-tokens').addEventListener('change', (event) => {
+  element<HTMLInputElement>(panel, '#story-echo-higher-summary-tokens').addEventListener('change', (event) => {
     update(panel, (settings) => {
-      settings.summary.skeletonMaxTokens = numberValue(event.currentTarget as HTMLInputElement, 5_000);
+      settings.summary.higherLevelMaxTokens = numberValue(event.currentTarget as HTMLInputElement, 8_000);
     });
   });
   element<HTMLInputElement>(panel, '#story-echo-world-info-reference').addEventListener('change', (event) => {
@@ -486,7 +499,7 @@ function bindSettings(panel: HTMLElement): void {
   element<HTMLInputElement>(panel, '#story-echo-reference-world-info').addEventListener('change', (event) => {
     update(panel, (settings) => {
       settings.summary.reference.maxWorldInfoEntries =
-        numberValue(event.currentTarget as HTMLInputElement, 5);
+        numberValue(event.currentTarget as HTMLInputElement, 20);
     });
   });
   element<HTMLSelectElement>(panel, '#story-echo-llm-provider').addEventListener('change', (event) => {
@@ -521,7 +534,7 @@ function bindSettings(panel: HTMLElement): void {
   });
   element<HTMLInputElement>(panel, '#story-echo-llm-timeout').addEventListener('change', (event) => {
     update(panel, (settings) => {
-      settings.llm.custom.timeoutMs = numberValue(event.currentTarget as HTMLInputElement, 180_000);
+      settings.llm.custom.timeoutMs = numberValue(event.currentTarget as HTMLInputElement, 300_000);
     });
   });
   element<HTMLInputElement>(panel, '#story-echo-llm-http').addEventListener('change', (event) => {
@@ -598,12 +611,11 @@ function bindSettings(panel: HTMLElement): void {
         }
         let state = await stateRepository.getOrCreate();
         state = await stageSummaryService.reconcileHistory(state ?? undefined);
-        state = await storySkeletonService.reconcile(state ?? undefined);
         const summary = await stageSummaryService.processAllThrough(target);
-        const skeleton = await storySkeletonService.processAllPending();
-        return { summary, skeleton };
+        const compaction = await summaryCompactionService.processAllPending();
+        return { summary, compaction };
       });
-      const updates = result.summary.updatedChunks + result.skeleton.updatedChunks;
+      const updates = result.summary.updatedChunks + result.compaction.compactedChunks;
       notify.success(updates > 0 ? `处理完成，共写入 ${updates} 次更新。` : '已检查，暂时没有达到更新条件。');
       await refreshStatus(panel);
     } catch (error) {
@@ -645,18 +657,24 @@ function bindSettings(panel: HTMLElement): void {
     const button = event.currentTarget as HTMLButtonElement;
     const confirmed = await showConfirmation(
       '清空 StoryEcho 统计',
-      '将清空当前聊天的运行统计、最近检查记录、内部模型请求记录和调试轨迹；阶段总结与全局骨架不会改变。',
+      '将清空当前聊天的运行统计、最近检查记录、内部模型请求记录和调试轨迹；分层总结不会改变。',
     );
     if (!confirmed) {
       return;
     }
     button.disabled = true;
+    const requestedChatId = getCurrentChatId();
     try {
-      const state = stateRepository.getExisting();
-      if (state) {
-        resetDiagnostics(state);
-        await stateRepository.save(state);
-      }
+      await storyEchoTaskCoordinator.enqueueManual('清空统计与轨迹', async () => {
+        if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
+          throw new Error('等待清空统计期间聊天已切换，已取消操作。');
+        }
+        const state = stateRepository.getExisting();
+        if (state) {
+          resetDiagnostics(state);
+          await stateRepository.save(state);
+        }
+      });
       await refreshStatus(panel);
       notify.success('统计与调试轨迹已清空。');
     } catch (error) {
@@ -690,8 +708,8 @@ function statsText(state: StoryEchoChatState): string {
   const averageSummary = metrics.summaryUpdates > 0
     ? Math.round(metrics.totalSummaryMs / metrics.summaryUpdates)
     : 0;
-  const averageSkeleton = metrics.skeletonUpdates > 0
-    ? Math.round(metrics.totalSkeletonMs / metrics.skeletonUpdates)
+  const averageCompaction = metrics.summaryCompactions > 0
+    ? Math.round(metrics.totalSummaryCompactionMs / metrics.summaryCompactions)
     : 0;
   const estimatedNetSaved = Math.max(
     0,
@@ -702,7 +720,7 @@ function statsText(state: StoryEchoChatState): string {
   const latestCompletion = latestInternalRequest?.completion;
   const latestInternalRequestText = latestInternalRequest
     ? [
-        latestInternalRequest.task === 'stage-summary' ? '阶段总结' : '全局骨架',
+        latestInternalRequest.task === 'stage-summary' ? 'L1 总结' : '高层压缩',
         latestInternalRequest.status === 'completed'
           ? '完成'
           : latestInternalRequest.status === 'cancelled'
@@ -726,12 +744,12 @@ function statsText(state: StoryEchoChatState): string {
       ].filter(Boolean).join('，')
     : '无';
   return [
-    `全局骨架：更新 ${metrics.skeletonUpdates} 次，失败 ${metrics.skeletonFailures} 次，平均 ${averageSkeleton}ms/次`,
-    `阶段总结：更新 ${metrics.summaryUpdates} 次，失败 ${metrics.summaryFailures} 次，覆盖 ${metrics.summaryMessagesCovered} 条消息，平均 ${averageSummary}ms/次`,
+    `高层压缩：更新 ${metrics.summaryCompactions} 次，失败 ${metrics.summaryCompactionFailures} 次，平均 ${averageCompaction}ms/次`,
+    `L1 总结：更新 ${metrics.summaryUpdates} 次，失败 ${metrics.summaryFailures} 次，覆盖 ${metrics.summaryMessagesCovered} 条消息，平均 ${averageSummary}ms/次`,
     `上下文：尝试 ${metrics.generationAttempts} 次，裁剪 ${metrics.generationsTrimmed} 次，延迟裁剪 ${metrics.generationsDeferred} 次，移除 ${metrics.messagesRemoved} 条原文`,
     `估算 Token：移除 ${metrics.estimatedRemovedTokens}，注入 ${metrics.estimatedInjectedTokens}，累计净节省 ${estimatedNetSaved}`,
     `任务队列：运行 ${queue.runningKind ?? (queue.foregroundLeaseActive ? '等待角色回复' : '空闲')}，排队前台 ${queue.queuedForeground}/手动 ${queue.queuedManual}/后台 ${queue.queuedBackground}，最长等待 ${queue.maximumQueueWaitMs}ms`,
-    `最近：骨架 ${metrics.lastSkeletonAt ?? '无'} / 总结 ${metrics.lastSummaryAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
+    `最近：高层压缩 ${metrics.lastSummaryCompactionAt ?? '无'} / L1 总结 ${metrics.lastSummaryAt ?? '无'} / 生成 ${metrics.lastGenerationAt ?? '无'}`,
     `内部模型请求：${state.recentInternalLlmAttempts.length}/${MAX_INTERNAL_LLM_ATTEMPTS}；最近 ${latestInternalRequestText}`,
     `调试轨迹：${state.debugTraces.length}/50`,
   ].join('\n');
@@ -779,6 +797,9 @@ function runtimeStatusText(): string {
 }
 
 async function refreshStatus(panel: HTMLElement): Promise<void> {
+  if (panel !== registeredPanel || !panel.isConnected) {
+    return;
+  }
   const status = element<HTMLElement>(panel, '#story-echo-status');
   try {
     const settings = settingsRepository.get();
@@ -793,19 +814,18 @@ async function refreshStatus(panel: HTMLElement): Promise<void> {
       element<HTMLElement>(panel, '#story-echo-inspection').textContent = '尚无生成记录。';
       element<HTMLElement>(panel, '#story-echo-traces').textContent = '调试模式关闭或尚无轨迹。';
       if (element<HTMLDetailsElement>(panel, '#story-echo-summary-settings').open) {
-        stageSummaryMetadataManager.render(panel, null);
+        stageSummaryMetadataManager?.render(panel, null);
       }
       return;
     }
     const activeSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
+    const levelText = [...summaryLevelCounts(state.stageSummary.entries).entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([level, count]) => `L${level} ${count}`)
+      .join(' / ') || '无';
     status.textContent = [
       settings.enabled ? '上下文管理：已启用' : '上下文管理：已关闭',
-      `阶段总结：${activeSummaries.length} 条 / 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
-      `全局骨架：${state.storySkeleton.text
-        ? state.storySkeleton.stale
-          ? '待重建（当前不注入）'
-          : `覆盖到消息 ${state.storySkeleton.coveredThroughMessageId}`
-        : '尚未生成'}`,
+      `分层总结：${activeSummaries.length} 条（${levelText}）/ 覆盖到消息 ${state.stageSummary.coveredThroughMessageId}`,
       runtimeStatusText(),
     ].join('｜');
     if (element<HTMLDetailsElement>(panel, '#story-echo-stats-diagnostics').open) {
@@ -818,7 +838,7 @@ async function refreshStatus(panel: HTMLElement): Promise<void> {
       element<HTMLElement>(panel, '#story-echo-traces').textContent = tracesText(state);
     }
     if (element<HTMLDetailsElement>(panel, '#story-echo-summary-settings').open) {
-      stageSummaryMetadataManager.render(panel, state);
+      stageSummaryMetadataManager?.render(panel, state);
     }
   } catch (error) {
     logger.warn('刷新 StoryEcho 设置状态失败。', error);
@@ -873,6 +893,8 @@ async function registerSettingsPanelOnce(generation: number): Promise<void> {
   const panel = panelTemplate();
   host.append(panel);
   registeredPanel = panel;
+  const summaryManager = new StageSummaryMetadataManager(stateRepository);
+  stageSummaryMetadataManager = summaryManager;
   const subscriptions = new EventSubscriptionScope();
   let visibilityObserver: IntersectionObserver | undefined;
   const cleanup = (): void => {
@@ -882,13 +904,16 @@ async function registerSettingsPanelOnce(generation: number): Promise<void> {
     if (registeredPanel === panel) {
       registeredPanel = undefined;
     }
+    if (stageSummaryMetadataManager === summaryManager) {
+      stageSummaryMetadataManager = undefined;
+    }
   };
   settingsPanelCleanup = cleanup;
 
   try {
     syncForm(panel, settingsRepository.get());
     bindSettings(panel);
-    stageSummaryMetadataManager.bind(panel, async () => refreshStatus(panel));
+    summaryManager.bind(panel, async () => refreshStatus(panel));
     bindSummaryLayoutLock(panel, subscriptions);
     subscriptions.listen(globalThis, DIAGNOSTICS_UPDATED_EVENT, () => requestRefresh(panel));
     panel.querySelector<HTMLElement>('.inline-drawer-toggle')?.addEventListener('click', () => {

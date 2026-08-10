@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mergeDebugTraces,
   normalizeMetrics,
   recordDebugTrace,
   resetDiagnostics,
@@ -20,7 +21,7 @@ describe('diagnostics metrics', () => {
     });
     expect(metrics.summaryUpdates).toBe(3);
     expect(metrics.generationsTrimmed).toBe(2);
-    expect(metrics.skeletonUpdates).toBe(0);
+    expect(metrics.summaryCompactions).toBe(0);
     expect(metrics).not.toHaveProperty('extractionChunks');
   });
 
@@ -35,10 +36,29 @@ describe('diagnostics metrics', () => {
     expect(state.debugTraces.at(-1)?.message).toBe('trace-54');
   });
 
-  it('resets diagnostics without deleting summaries or the skeleton', () => {
+  it('merges operation-snapshot traces by id and keeps the latest fifty', () => {
+    const target = chatState();
+    const source = chatState();
+    for (let index = 0; index < 40; index += 1) {
+      recordDebugTrace(target, true, 'summary', `target-${index}`);
+    }
+    source.debugTraces = structuredClone(target.debugTraces.slice(-5));
+    for (let index = 0; index < 20; index += 1) {
+      recordDebugTrace(source, true, 'summary', `source-${index}`);
+    }
+
+    const merged = mergeDebugTraces(target.debugTraces, source.debugTraces);
+
+    expect(merged).toHaveLength(50);
+    expect(new Set(merged.map((trace) => trace.id)).size).toBe(50);
+    expect(merged.at(-1)?.message).toBe('source-19');
+  });
+
+  it('resets diagnostics without deleting summaries', () => {
     const state = chatState();
     state.stageSummary.entries.push({
       text: '阶段总结',
+      level: 1,
       sourceStartMessageId: 0,
       sourceEndMessageId: 1,
       sourceHash: 'hash',

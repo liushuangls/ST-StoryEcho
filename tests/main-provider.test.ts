@@ -21,7 +21,7 @@ describe('MainLlmProvider', () => {
     expect(generateRaw).toHaveBeenCalledWith({
       systemPrompt: expect.stringMatching(/^\[story_echo_internal_.+\]\nsystem$/),
       prompt: expect.stringMatching(/^prompt\n\[story_echo_internal_.+\]$/),
-      responseLength: 10_000,
+      responseLength: 16_000,
     });
   });
 

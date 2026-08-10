@@ -24,14 +24,11 @@ function expectButtonCapturedBeforeConfirmation(source: string, selector: string
 
 describe('asynchronous confirmation handlers', () => {
   it('captures each action button before awaiting confirmation', () => {
-    for (const selector of [
-      '#story-echo-skeleton-update',
-      '#story-echo-skeleton-rebuild',
-      '#story-echo-summary-rebuild-all',
-      '#story-echo-summary-delete',
-    ]) {
-      expectButtonCapturedBeforeConfirmation(summaryManager, selector);
-    }
+    expect(summaryManager).not.toContain('story-echo-skeleton');
+    expect(summaryManager).toContain("'#story-echo-summary-rebuild-all'");
+    expect(summaryManager).toContain("'#story-echo-summary-delete'");
+    // Summary handlers no longer read event.currentTarget across an await.
+    expect(summaryManager).not.toContain('event.currentTarget as HTMLButtonElement');
     expectButtonCapturedBeforeConfirmation(settingsPanel, '#story-echo-reset-stats');
   });
 });

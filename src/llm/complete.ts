@@ -14,7 +14,7 @@ import { isLlmRequestTimeoutError, LlmRequestRetryError } from './errors';
 import { MainLlmProvider } from './main-provider';
 import { createLlmProvider } from './provider-factory';
 
-const MAX_RETRY_TOKENS = 10_000;
+const MAX_RETRY_TOKENS = 16_000;
 export const MAX_LLM_TIMEOUT_RETRIES = 1;
 
 function withActiveTaskSignal(request: LlmRequest): LlmRequest {
@@ -89,7 +89,7 @@ async function providerCompleteDetailed(
       provider: provider.id,
       requestedMaxTokens: Math.min(
         MAX_RETRY_TOKENS,
-        Math.max(16, Math.floor(request.maxTokens ?? 8_192)),
+        Math.min(16_000, Math.max(16, Math.floor(request.maxTokens ?? 8_192))),
       ),
       responseCharacters: Array.from(text).length,
     },

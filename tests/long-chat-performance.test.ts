@@ -70,6 +70,7 @@ describe('context-only long-chat performance', () => {
         stageSummary: {
           entries: Array.from({ length: summaryCount }, (_, index) => ({
             text: `阶段 ${index + 1}：${'关键剧情与因果。'.repeat(20)}`,
+            level: 1,
             sourceStartMessageId: index * 20,
             sourceEndMessageId: index * 20 + 19,
             sourceHash: `summary-source-${index}`,

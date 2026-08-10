@@ -14,12 +14,12 @@ import {
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { SettingsRepository } from '../settings/repository';
 import { StoryStateRepository } from '../state/repository';
-import { stageSummaryService } from '../summary/service';
-import { storySkeletonService } from '../summary/skeleton-service';
+import { summaryCompactionService } from '../summary/compaction-service';
 import {
-  pendingArchivedStageSummaryEntries,
-  storySkeletonUpdateDue,
-} from '../summary/skeleton-state';
+  configuredSummaryCompactionThresholds,
+  summaryCompactionDue,
+} from '../summary/compaction-state';
+import { stageSummaryService } from '../summary/service';
 
 const BACKGROUND_DELAY_MS = 3_000;
 
@@ -342,11 +342,12 @@ export class BackgroundProcessingScheduler {
     ) {
       state = (await stageSummaryService.processNextThrough(targetEndMessageId)).state ?? state;
     }
-    state = await storySkeletonService.reconcile(state) ?? state;
-    const skeletonResult = await storySkeletonService.processNextIfNeeded();
-    state = skeletonResult.state ?? state;
-    const remaining = pendingArchivedStageSummaryEntries(state, settings.summary.windowSize);
-    if (storySkeletonUpdateDue(state, remaining)) {
+    const compactionResult = await summaryCompactionService.processNextIfNeeded();
+    state = compactionResult.state ?? state;
+    if (summaryCompactionDue(
+      state.stageSummary.entries,
+      configuredSummaryCompactionThresholds(settings.summary),
+    )) {
       this.schedule();
     }
     emitDiagnosticsUpdated();

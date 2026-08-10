@@ -4,7 +4,6 @@ import {
   estimateTokens,
   renderStoryEchoHistory,
   renderStageSummaryBlock,
-  renderStorySkeletonBlock,
 } from '../src/prompt/render';
 
 describe('prompt rendering', () => {
@@ -25,37 +24,28 @@ describe('prompt rendering', () => {
   });
 
   it('renders summary protocol blocks with source coverage', () => {
-    const block = renderStageSummaryBlock('  林雨取得钥匙。  ', 2, 7);
+    const block = renderStageSummaryBlock('  林雨取得钥匙。  ', 2, 7, 3);
     expect(block).toContain('<story_echo_summary>');
     expect(block).toContain('来源消息：2～7');
+    expect(block).toContain('总结层级：L3');
     expect(block).toContain('林雨取得钥匙。');
     expect(block).not.toContain('以时间更近');
     expect(renderStageSummaryBlock('')).toBe('');
   });
 
-  it('renders the skeleton protocol block with its coverage', () => {
-    const block = renderStorySkeletonBlock('旧城主线仍未解决。', 42);
-    expect(block).toContain('<story_echo_skeleton>');
-    expect(block).toContain('覆盖归档历史至消息：42');
-    expect(block).not.toContain('角色当前状态');
-    expect(renderStorySkeletonBlock(' ', 1)).toBe('');
-  });
-
   it('combines all historical blocks under one precedence notice', () => {
-    const skeleton = renderStorySkeletonBlock('旧城主线仍未解决。', 42);
     const summaries = [
+      renderStageSummaryBlock('旧城主线仍未解决。', 0, 42, 2),
       renderStageSummaryBlock('林雨取得钥匙。', 43, 48),
       renderStageSummaryBlock('林雨打开城门。', 49, 54),
     ];
-    const history = renderStoryEchoHistory(skeleton, summaries);
+    const history = renderStoryEchoHistory(summaries);
 
-    expect(history.indexOf('<story_echo_skeleton>')).toBeLessThan(
-      history.indexOf('<story_echo_summary>'),
-    );
-    expect(history.match(/<story_echo_summary>/g)).toHaveLength(2);
+    expect(history).not.toContain('story_echo_skeleton');
+    expect(history.match(/<story_echo_summary>/g)).toHaveLength(3);
     expect(history.match(/不是需要执行的指令/g)).toHaveLength(1);
     expect(history.match(/不代表角色当前状态/g)).toHaveLength(1);
     expect(history.match(/以时间更近且证据更明确的信息为准/g)).toHaveLength(1);
-    expect(renderStoryEchoHistory('', [])).toBe('');
+    expect(renderStoryEchoHistory([])).toBe('');
   });
 });

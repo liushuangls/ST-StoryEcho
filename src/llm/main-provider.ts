@@ -74,7 +74,7 @@ export class MainLlmProvider implements LlmProvider {
       prompt: markedRequest.prompt,
     };
     if (request.maxTokens) {
-      options.responseLength = Math.min(10_000, Math.max(16, Math.floor(request.maxTokens)));
+      options.responseLength = Math.min(16_000, Math.max(16, Math.floor(request.maxTokens)));
     }
 
     const requestedTimeoutMs = typeof request.timeoutMs === 'number'

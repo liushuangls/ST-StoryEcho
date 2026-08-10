@@ -239,7 +239,7 @@ function storyEchoSummaryCount(messages: readonly unknown[]): number {
     } catch {
       return total;
     }
-    const matches = serialized.match(/<story_echo_(?:skeleton|summary)>/giu);
+    const matches = serialized.match(/<story_echo_summary>/giu);
     return total + (matches?.length ?? 0);
   }, 0);
 }
@@ -601,7 +601,7 @@ export class TauriTavernAgentBridge {
     this.pruneSnapshots();
     if (storyEchoTrimmedByAgentAssembly) {
       logger.warn(
-        'TauriTavern Agent 启动前的二次组装移除了StoryEcho骨架与阶段总结；若Profile限制了初始历史，请将“初始聊天历史楼数”设为 -1。',
+        'TauriTavern Agent 启动前的二次组装移除了StoryEcho分层总结；若Profile限制了初始历史，请将“初始聊天历史楼数”设为 -1。',
       );
     }
     emitDiagnosticsUpdated();

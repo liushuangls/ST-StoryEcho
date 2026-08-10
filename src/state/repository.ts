@@ -6,21 +6,22 @@ import type {
   StageSummaryRebuildCheckpoint,
   StoryEchoChatState,
   StoryEchoDebugTrace,
+  SummaryCompactionProvenance,
+  SummaryCompactionSource,
 } from '../core/types';
 import { normalizeInternalLlmAttempts } from '../debug/internal-llm-attempts';
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { normalizeLlmCompletionMetadata } from '../llm/completion-metadata';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
-import { SettingsRepository } from '../settings/repository';
-import { normalizeStorySkeletonText } from '../summary/skeleton-state';
 
 export interface StageSummaryEdit {
   text: string;
 }
 
-export interface StorySkeletonEdit {
-  text: string;
-}
+export type StageSummaryTarget = Pick<
+  StageSummaryEntry,
+  'level' | 'sourceStartMessageId' | 'sourceEndMessageId' | 'updatedAt'
+>;
 
 const MAX_EDITED_SUMMARY_CHARACTERS = 64_000;
 const LEGACY_SUMMARY_UPDATED_AT = '1970-01-01T00:00:00.000Z';
@@ -34,6 +35,11 @@ function finiteInteger(value: unknown, fallback: number): number {
   return Number.isFinite(number) ? Math.floor(number) : fallback;
 }
 
+function positiveLevel(value: unknown, fallback = 1): number {
+  const level = finiteInteger(value, fallback);
+  return Math.min(32, Math.max(1, level));
+}
+
 function createState(ownerChatId: string): StoryEchoChatState {
   return {
     schemaVersion: CHAT_STATE_VERSION,
@@ -44,14 +50,79 @@ function createState(ownerChatId: string): StoryEchoChatState {
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
     },
-    storySkeleton: {
-      text: '',
-      coveredThroughMessageId: -1,
-      sourceHash: '',
-    },
     metrics: createMetrics(),
     debugTraces: [],
     recentInternalLlmAttempts: [],
+  };
+}
+
+function normalizeCompactionSource(value: unknown): SummaryCompactionSource | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const deleted = value['deleted'] === true;
+  const text = typeof value['text'] === 'string' ? value['text'].trim() : '';
+  const sourceStartMessageId = finiteInteger(value['sourceStartMessageId'], -1);
+  const sourceEndMessageId = finiteInteger(value['sourceEndMessageId'], -1);
+  if (
+    (!text && !deleted) ||
+    sourceStartMessageId < 0 ||
+    sourceEndMessageId < sourceStartMessageId
+  ) {
+    return null;
+  }
+  return {
+    text: deleted ? '' : text,
+    level: positiveLevel(value['level']),
+    sourceStartMessageId,
+    sourceEndMessageId,
+    sourceHash: typeof value['sourceHash'] === 'string' ? value['sourceHash'] : '',
+    updatedAt: typeof value['updatedAt'] === 'string'
+      ? value['updatedAt']
+      : LEGACY_SUMMARY_UPDATED_AT,
+    ...(value['manuallyEdited'] === true ? { manuallyEdited: true } : {}),
+    ...(deleted ? { deleted: true } : {}),
+  };
+}
+
+function normalizeCompaction(
+  value: unknown,
+  parentLevel: number,
+  parentStart: number,
+  parentEnd: number,
+): SummaryCompactionProvenance | undefined {
+  if (!isRecord(value) || parentLevel < 2 || !Array.isArray(value['sources'])) {
+    return undefined;
+  }
+  const sourceLevel = positiveLevel(value['sourceLevel']);
+  const inputHash = typeof value['inputHash'] === 'string' ? value['inputHash'] : '';
+  const sources = value['sources'].map(normalizeCompactionSource);
+  if (
+    sourceLevel !== parentLevel - 1 ||
+    !inputHash ||
+    sources.length < 2 ||
+    sources.some((source) => !source)
+  ) {
+    return undefined;
+  }
+  const normalized = sources as SummaryCompactionSource[];
+  if (
+    normalized.some((source) => source.level !== sourceLevel) ||
+    normalized[0]!.sourceStartMessageId !== parentStart ||
+    normalized.at(-1)!.sourceEndMessageId !== parentEnd
+  ) {
+    return undefined;
+  }
+  for (let index = 1; index < normalized.length; index += 1) {
+    if (normalized[index - 1]!.sourceEndMessageId + 1 !== normalized[index]!.sourceStartMessageId) {
+      return undefined;
+    }
+  }
+  return {
+    sourceLevel,
+    sourceEntryCount: normalized.length,
+    inputHash,
+    sources: normalized,
   };
 }
 
@@ -62,19 +133,25 @@ function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
   const text = typeof value['text'] === 'string' ? value['text'].trim() : '';
   const deleted = value['deleted'] === true;
   const generation = normalizeLlmCompletionMetadata(value['generation']);
-  const sourceStartMessageId = Number(value['sourceStartMessageId']);
-  const sourceEndMessageId = Number(value['sourceEndMessageId']);
+  const sourceStartMessageId = finiteInteger(value['sourceStartMessageId'], -1);
+  const sourceEndMessageId = finiteInteger(value['sourceEndMessageId'], -1);
   if (
     (!text && !deleted) ||
-    !Number.isInteger(sourceStartMessageId) ||
-    !Number.isInteger(sourceEndMessageId) ||
     sourceStartMessageId < 0 ||
     sourceEndMessageId < sourceStartMessageId
   ) {
     return null;
   }
+  const level = positiveLevel(value['level']);
+  const compaction = normalizeCompaction(
+    value['compaction'],
+    level,
+    sourceStartMessageId,
+    sourceEndMessageId,
+  );
   return {
     text: deleted ? '' : text,
+    level,
     characterCount: deleted ? 0 : Array.from(text).length,
     ...(generation ? { generation } : {}),
     sourceStartMessageId,
@@ -84,6 +161,7 @@ function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
       ? value['updatedAt']
       : LEGACY_SUMMARY_UPDATED_AT,
     ...(value['manuallyEdited'] === true ? { manuallyEdited: true } : {}),
+    ...(compaction ? { compaction } : {}),
     ...(deleted ? { deleted: true } : {}),
   };
 }
@@ -117,6 +195,7 @@ function normalizeStageSummaryRebuildCheckpoint(
     const entry = normalizeStageSummaryEntry(candidate);
     if (
       !entry ||
+      entry.level !== 1 ||
       entry.deleted ||
       entry.sourceStartMessageId !== expectedStartMessageId ||
       entry.sourceEndMessageId > targetEndMessageId
@@ -161,6 +240,7 @@ function normalizeStageSummary(value: unknown): StoryEchoChatState['stageSummary
     if (legacyText && legacyEnd >= 0) {
       entries.push({
         text: legacyText,
+        level: 1,
         characterCount: Array.from(legacyText).length,
         sourceStartMessageId: 0,
         sourceEndMessageId: legacyEnd,
@@ -175,37 +255,13 @@ function normalizeStageSummary(value: unknown): StoryEchoChatState['stageSummary
   }
 
   const latest = entries.at(-1);
-  const rebuildCheckpoint = normalizeStageSummaryRebuildCheckpoint(
-    stored['rebuildCheckpoint'],
-  );
+  const rebuildCheckpoint = normalizeStageSummaryRebuildCheckpoint(stored['rebuildCheckpoint']);
   return {
     entries,
     coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
     coveredThroughHash: latest?.sourceHash ?? '',
     ...(latest ? { updatedAt: latest.updatedAt } : {}),
     ...(rebuildCheckpoint ? { rebuildCheckpoint } : {}),
-  };
-}
-
-function normalizeStorySkeleton(value: unknown): StoryEchoChatState['storySkeleton'] {
-  const stored = isRecord(value) ? value : {};
-  const text = typeof stored['text'] === 'string' ? stored['text'].trim() : '';
-  const coveredThroughMessageId = finiteInteger(stored['coveredThroughMessageId'], -1);
-  if (!text || coveredThroughMessageId < 0) {
-    return {
-      text: '',
-      coveredThroughMessageId: -1,
-      sourceHash: '',
-    };
-  }
-  const sourceHash = typeof stored['sourceHash'] === 'string' ? stored['sourceHash'] : '';
-  return {
-    text,
-    coveredThroughMessageId,
-    sourceHash,
-    ...(typeof stored['updatedAt'] === 'string' ? { updatedAt: stored['updatedAt'] } : {}),
-    ...(stored['manuallyEdited'] === true ? { manuallyEdited: true } : {}),
-    ...(stored['stale'] === true || !sourceHash ? { stale: true } : {}),
   };
 }
 
@@ -267,7 +323,7 @@ function normalizeDebugTraces(value: unknown): StoryEchoDebugTrace[] {
 
 function isStoredState(value: unknown): value is Record<string, unknown> {
   return isRecord(value) &&
-    (value['schemaVersion'] === 1 || value['schemaVersion'] === CHAT_STATE_VERSION) &&
+    [1, 2, CHAT_STATE_VERSION].includes(Number(value['schemaVersion'])) &&
     typeof value['chatUuid'] === 'string' &&
     typeof value['ownerChatId'] === 'string';
 }
@@ -279,12 +335,9 @@ function normalizeState(stored: Record<string, unknown>): StoryEchoChatState {
     chatUuid: stored['chatUuid'] as string,
     ownerChatId: stored['ownerChatId'] as string,
     stageSummary: normalizeStageSummary(stored['stageSummary']),
-    storySkeleton: normalizeStorySkeleton(stored['storySkeleton']),
     metrics: normalizeMetrics(stored['metrics']),
     debugTraces: normalizeDebugTraces(stored['debugTraces']),
-    recentInternalLlmAttempts: normalizeInternalLlmAttempts(
-      stored['recentInternalLlmAttempts'],
-    ),
+    recentInternalLlmAttempts: normalizeInternalLlmAttempts(stored['recentInternalLlmAttempts']),
     ...(inspection ? { lastInspection: inspection } : {}),
   };
 }
@@ -300,21 +353,17 @@ function normalizeStageSummaryEdit(edit: StageSummaryEdit): StageSummaryEdit {
   return { text };
 }
 
-function markSkeletonStaleForSummary(
-  state: StoryEchoChatState,
-  sourceEndMessageId: number,
-): void {
-  if (
-    state.storySkeleton.text &&
-    sourceEndMessageId <= state.storySkeleton.coveredThroughMessageId
-  ) {
-    state.storySkeleton.stale = true;
-  }
+function updateCoverage(state: StoryEchoChatState): void {
+  const latest = state.stageSummary.entries.at(-1);
+  state.stageSummary = {
+    entries: state.stageSummary.entries,
+    coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
+    coveredThroughHash: latest?.sourceHash ?? '',
+    ...(latest ? { updatedAt: latest.updatedAt } : {}),
+  };
 }
 
 export class StoryStateRepository {
-  private readonly settingsRepository = new SettingsRepository();
-
   getExisting(): StoryEchoChatState | null {
     const context = getContext();
     const stored = context.chatMetadata[MODULE_ID];
@@ -348,9 +397,6 @@ export class StoryStateRepository {
         debugTraces: [],
         recentInternalLlmAttempts: [],
       };
-      if (state.storySkeleton.text) {
-        state.storySkeleton.stale = true;
-      }
       delete state.stageSummary.rebuildCheckpoint;
       delete state.lastInspection;
       context.chatMetadata[MODULE_ID] = state;
@@ -358,7 +404,7 @@ export class StoryStateRepository {
       return state;
     }
 
-    // Version 2 intentionally drops all obsolete memory/vector fields.
+    // Version 3 drops the global skeleton and upgrades legacy entries to Level 1.
     if (stored['schemaVersion'] !== CHAT_STATE_VERSION) {
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
@@ -393,7 +439,7 @@ export class StoryStateRepository {
   }
 
   async updateStageSummaryEntry(
-    sourceStartMessageId: number,
+    target: StageSummaryTarget,
     edit: StageSummaryEdit,
   ): Promise<StoryEchoChatState> {
     const state = await this.getOrCreate();
@@ -401,11 +447,14 @@ export class StoryStateRepository {
       throw new Error('当前没有可用聊天。');
     }
     const index = state.stageSummary.entries.findIndex(
-      (entry) => entry.sourceStartMessageId === sourceStartMessageId,
+      (entry) =>
+        entry.level === target.level &&
+        entry.sourceStartMessageId === target.sourceStartMessageId &&
+        entry.sourceEndMessageId === target.sourceEndMessageId,
     );
     const existing = index >= 0 ? state.stageSummary.entries[index] : undefined;
-    if (!existing || existing.deleted) {
-      throw new Error('要修改的阶段总结不存在，可能已在其他页面删除或失效。');
+    if (!existing || existing.deleted || existing.updatedAt !== target.updatedAt) {
+      throw new Error('要修改的阶段总结不存在或已发生变化，请刷新后重试。');
     }
     const normalized = normalizeStageSummaryEdit(edit);
     state.stageSummary.entries[index] = {
@@ -416,34 +465,29 @@ export class StoryStateRepository {
       manuallyEdited: true,
     };
     delete state.stageSummary.rebuildCheckpoint;
-    markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
-    const latest = state.stageSummary.entries.at(-1);
-    state.stageSummary = {
-      entries: state.stageSummary.entries,
-      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
-      coveredThroughHash: latest?.sourceHash ?? '',
-      ...(latest ? { updatedAt: latest.updatedAt } : {}),
-    };
+    updateCoverage(state);
     delete state.lastInspection;
     await this.save(state);
     return state;
   }
 
-  async deleteStageSummaryEntry(sourceStartMessageId: number): Promise<StoryEchoChatState> {
+  async deleteStageSummaryEntry(target: StageSummaryTarget): Promise<StoryEchoChatState> {
     const state = await this.getOrCreate();
     if (!state) {
       throw new Error('当前没有可用聊天。');
     }
     const index = state.stageSummary.entries.findIndex(
-      (entry) => entry.sourceStartMessageId === sourceStartMessageId,
+      (entry) =>
+        entry.level === target.level &&
+        entry.sourceStartMessageId === target.sourceStartMessageId &&
+        entry.sourceEndMessageId === target.sourceEndMessageId,
     );
     const existing = index >= 0 ? state.stageSummary.entries[index] : undefined;
-    if (!existing || existing.deleted) {
-      throw new Error('要删除的阶段总结不存在，可能已在其他页面删除或失效。');
+    if (!existing || existing.deleted || existing.updatedAt !== target.updatedAt) {
+      throw new Error('要删除的阶段总结不存在或已发生变化，请刷新后重试。');
     }
     const entries = [...state.stageSummary.entries];
     delete state.stageSummary.rebuildCheckpoint;
-    markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
     if (index === entries.length - 1) {
       entries.pop();
     } else {
@@ -455,30 +499,8 @@ export class StoryStateRepository {
         updatedAt: new Date().toISOString(),
       };
     }
-    const latest = entries.at(-1);
-    state.stageSummary = {
-      entries,
-      coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
-      coveredThroughHash: latest?.sourceHash ?? '',
-      ...(latest ? { updatedAt: latest.updatedAt } : {}),
-    };
-    delete state.lastInspection;
-    await this.save(state);
-    return state;
-  }
-
-  async updateStorySkeleton(edit: StorySkeletonEdit): Promise<StoryEchoChatState> {
-    const state = await this.getOrCreate();
-    if (!state || !state.storySkeleton.text) {
-      throw new Error('当前还没有可编辑的全局剧情骨架。');
-    }
-    const maxTokens = this.settingsRepository.get().summary.skeletonMaxTokens;
-    state.storySkeleton = {
-      ...state.storySkeleton,
-      text: normalizeStorySkeletonText(edit.text, maxTokens),
-      updatedAt: new Date().toISOString(),
-      manuallyEdited: true,
-    };
+    state.stageSummary.entries = entries;
+    updateCoverage(state);
     delete state.lastInspection;
     await this.save(state);
     return state;

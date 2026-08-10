@@ -341,9 +341,8 @@ async function buildBreakdown(
   if (!rawText.trim()) {
     return null;
   }
-  const skeletonText = taggedBlocks(rawText, 'story_echo_skeleton');
   const stageSummaryText = taggedBlocks(rawText, 'story_echo_summary');
-  const summaryText = [skeletonText, stageSummaryText].filter(Boolean).join('\n');
+  const summaryText = stageSummaryText;
   const characterText = [
     stringValue(record['charDescription']),
     stringValue(record['charPersonality']),
@@ -354,7 +353,6 @@ async function buildBreakdown(
   const examplesText = stringValue(record['examplesString']);
   const anchorsText = stringValue(record['allAnchors']);
   const anchorsWithoutKnown = removeExactBlocks(anchorsText, [
-    skeletonText,
     stageSummaryText,
     ...(worldInfoText && anchorsText.includes(worldInfoText) ? [worldInfoText] : []),
   ]);
@@ -571,13 +569,12 @@ async function buildTauriBreakdown(
     if (!text.trim()) {
       continue;
     }
-    const skeleton = taggedBlocks(text, 'story_echo_skeleton');
     const summary = taggedBlocks(text, 'story_echo_summary');
-    const storyEcho = [skeleton, summary].filter(Boolean).join('\n');
+    const storyEcho = summary;
     if (storyEcho) {
       texts['story-echo-summary'].push(storyEcho);
     }
-    const remainder = removeExactBlocks(text, [skeleton, summary]).trim();
+    const remainder = removeExactBlocks(text, [summary]).trim();
     if (!remainder) {
       continue;
     }

@@ -126,7 +126,7 @@ describe('completeWithConfiguredProvider', () => {
       maxTokens: 8_192,
     })).rejects.toThrow(/连续两次返回空内容/);
     expect(generateRaw).toHaveBeenCalledTimes(2);
-    expect(generateRaw).toHaveBeenLastCalledWith(expect.objectContaining({ responseLength: 10_000 }));
+    expect(generateRaw).toHaveBeenLastCalledWith(expect.objectContaining({ responseLength: 16_000 }));
   });
 
   it('retries only the current LLM request after a timeout', async () => {

@@ -3,6 +3,7 @@ import type { StageSummaryEntry } from '../src/core/types';
 import { paginateItems } from '../src/ui/pagination';
 import {
   SUMMARY_PAGE_SIZE,
+  stageSummaryDraftConflict,
   stageSummaryDeliveryStatus,
   stageSummaryDeletionMode,
   stageSummaryCharacterCount,
@@ -11,13 +12,13 @@ import {
   stageSummaryManagerTemplate,
   stageSummaryRebuildCheckpointText,
   stageSummaryRegenerationConfirmation,
-  storySkeletonGenerationStatusText,
   toggleSummarySelection,
 } from '../src/ui/summary-manager';
 
 function summary(index: number): StageSummaryEntry {
   return {
     text: `阶段${index}的关键剧情与当前状态。`,
+    level: 1,
     sourceStartMessageId: index * 10,
     sourceEndMessageId: index * 10 + 9,
     sourceHash: `hash-${index}`,
@@ -27,7 +28,7 @@ function summary(index: number): StageSummaryEntry {
 
 describe('stage summary manager selection', () => {
   it('uses the immutable source range as its UI key', () => {
-    expect(stageSummaryKey(summary(2))).toBe('20:29');
+    expect(stageSummaryKey(summary(2))).toBe('1:20:29');
     expect(stageSummaryCharacterCount({ ...summary(2), text: '剧情🎭' })).toBe(3);
   });
 
@@ -44,24 +45,27 @@ describe('stage summary manager selection', () => {
     expect(stageSummaryDeletionMode(entries, entries[0]!)).toBe('keep-covered-tombstone');
   });
 
-  it('labels recent, absorbed, and pending summaries by their real request path', () => {
-    const entries = Array.from({ length: 6 }, (_, index) => summary(index));
+  it('labels every active frontier entry as request-carried', () => {
+    expect(stageSummaryDeliveryStatus()).toBe('随请求携带');
+  });
 
-    expect(stageSummaryDeliveryStatus(entries[0]!, 0, entries.length, 4, 19, true))
-      .toBe('已汇入骨架');
-    expect(stageSummaryDeliveryStatus(entries[1]!, 1, entries.length, 4, 9, true))
-      .toBe('随请求携带（待汇入骨架）');
-    expect(stageSummaryDeliveryStatus(entries[2]!, 2, entries.length, 4, 59, true))
-      .toBe('随请求携带');
-    expect(stageSummaryDeliveryStatus(entries[0]!, 0, entries.length, 4, 59, false))
-      .toBe('随请求携带（待汇入骨架）');
+  it('detects when a dirty editor target was replaced or updated', () => {
+    const populated = summary(1);
+
+    expect(stageSummaryDraftConflict(populated, populated, false)).toBe(false);
+    expect(stageSummaryDraftConflict(populated, populated, true)).toBe(false);
+    expect(stageSummaryDraftConflict(undefined, populated, true)).toBe(true);
+    expect(stageSummaryDraftConflict({
+      ...populated,
+      updatedAt: '2026-01-02T00:00:00.000Z',
+    }, populated, true)).toBe(true);
   });
 
   it('warns before a full rebuild discards unsaved editor changes', () => {
     expect(stageSummaryFullRebuildConfirmation(true))
-      .toContain('尚未保存的阶段总结或骨架修改');
+      .toContain('尚未保存的总结修改');
     expect(stageSummaryFullRebuildConfirmation(false))
-      .not.toContain('尚未保存的阶段总结或骨架修改');
+      .not.toContain('尚未保存的总结修改');
     expect(stageSummaryFullRebuildConfirmation(false, {
       targetEndMessageId: 29,
       targetSourceHash: 'target-source',
@@ -70,11 +74,11 @@ describe('stage summary manager selection', () => {
       totalDurationMs: 100,
       totalMessagesCovered: 20,
       updatedAt: '2026-01-01T00:00:00.000Z',
-    })).toContain('检测到 2 批已保存的重建草稿');
+    })).toContain('检测到 2 批已保存的 L1 重建草稿');
   });
 
   it('describes resumable full-rebuild drafts without presenting them as active', () => {
-    expect(stageSummaryRebuildCheckpointText()).toContain('正式总结仍在全部成功后一次性替换');
+    expect(stageSummaryRebuildCheckpointText()).toContain('全部 L1 成功后一次性替换');
     expect(stageSummaryRebuildCheckpointText({
       targetEndMessageId: 29,
       targetSourceHash: 'target-source',
@@ -83,33 +87,19 @@ describe('stage summary manager selection', () => {
       totalDurationMs: 100,
       totalMessagesCovered: 20,
       updatedAt: '2026-01-01T00:00:00.000Z',
-    })).toBe('已保留 2 批重建草稿，覆盖消息 0～19；再次重建会校验后继续。');
+    })).toBe('已保留 2 批 L1 重建草稿，覆盖消息 0～19；再次重建会校验后继续。');
   });
 
   it('explains the atomic single-summary regeneration consequences', () => {
     const entry = { ...summary(1), manuallyEdited: true };
-    const confirmation = stageSummaryRegenerationConfirmation(entry, true, true);
+    const confirmation = stageSummaryRegenerationConfirmation(entry, true);
 
     expect(confirmation).toContain('尚未保存的修改');
     expect(confirmation).toContain('包含人工编辑');
     expect(confirmation).toContain('消息 10～19');
-    expect(confirmation).toContain('更早和更晚的阶段总结都不会重新生成');
-    expect(confirmation).toContain('一次性替换');
+    expect(confirmation).toContain('更早和更晚的总结都不会重新生成');
+    expect(confirmation).toContain('原子替换');
     expect(confirmation).toContain('失败、中断或聊天切换时保留当前总结');
-    expect(confirmation).toContain('旧骨架会标记为待重建');
-  });
-
-  it('describes queued skeleton work with visible generation progress', () => {
-    expect(storySkeletonGenerationStatusText('rebuild'))
-      .toBe('正在重新生成全局剧情骨架…');
-    expect(storySkeletonGenerationStatusText('rebuild', {
-      sourceEndMessageId: 120,
-      pendingEntries: 3,
-    })).toBe('正在重新生成全局剧情骨架：已处理到消息 120，剩余 3 条阶段总结…');
-    expect(storySkeletonGenerationStatusText('update', {
-      sourceEndMessageId: 140,
-      pendingEntries: 0,
-    })).toBe('全局剧情骨架内容已生成，正在保存并刷新界面…');
   });
 });
 
@@ -136,45 +126,25 @@ describe('stage summary manager pagination and template', () => {
     });
   });
 
-  it('renders an editable but non-deletable skeleton plus safe stage-summary controls', () => {
+  it('renders hierarchy maintenance and safe summary controls without skeleton UI', () => {
     const template = stageSummaryManagerTemplate();
 
-    expect(template).toContain('<details id="story-echo-skeleton-details"');
-    expect(template).not.toMatch(/<details[^>]*id="story-echo-skeleton-details"[^>]*\sopen(?:\s|=|>)/u);
-    expect(template).toContain('<summary class="story-echo-summary-editor-heading story-echo-skeleton-summary">');
-    expect(template).toContain('id="story-echo-skeleton-status"');
+    expect(template).not.toContain('story-echo-skeleton');
     expect(template).toContain('role="status" aria-live="polite"');
-    expect(template).toContain('点击展开正文');
-    expect(template).toContain('点击收起正文');
-    expect(template).toContain('id="story-echo-skeleton-text"');
-    expect(template).toContain('id="story-echo-skeleton-save"');
-    expect(template).toContain('id="story-echo-skeleton-update"');
-    expect(template).toContain('id="story-echo-skeleton-rebuild"');
-    expect(template).not.toContain('id="story-echo-skeleton-delete"');
-    expect(template).toContain('可编辑、不可删除');
-    expect(template).toContain('长期重要事件、剧情大纲、关键因果与未决主线');
-    expect(template).toContain('不维护角色当前状态或 NPC 档案');
-    expect(template).toContain('每有一条尚未覆盖的总结首次进入归档');
-    expect(template).toContain('从全部有效阶段总结干净重建');
-    expect(template).toContain('每批最多 80000 字符');
-    expect(template).toContain('正文可按剧情需要自由分段');
-    expect(template).not.toContain('必须保留六个分级标题');
+    expect(template).toContain('L1 与 L2+ 分别使用各自的合并条数');
     expect(template).toContain('id="story-echo-summary-search"');
+    expect(template).toContain('id="story-echo-summary-compact"');
     expect(template).toContain('id="story-echo-summary-rebuild-all"');
     expect(template).toContain('id="story-echo-summary-rebuild-status"');
-    expect(template).toContain('重建全部阶段总结与骨架');
-    expect(template).toContain('全部成功后一次性替换');
+    expect(template).toContain('重建全部分层总结');
     expect(template).toContain('id="story-echo-summary-list"');
-    expect(template).toContain('aria-label="阶段总结分页"');
+    expect(template).toContain('aria-label="分层总结分页"');
     expect(template).toContain('id="story-echo-summary-editor-text"');
     expect(template).toContain('id="story-echo-summary-save"');
     expect(template).toContain('id="story-echo-summary-regenerate"');
     expect(template).toContain('重新生成当前总结');
-    expect(template).toContain('成功后原子替换');
     expect(template).toContain('id="story-echo-summary-delete"');
-    expect(template).toContain('绝不修改或删除聊天原文');
-    expect(template).toContain('删除最新一条会回退覆盖位置');
-    expect(template).toContain('删除更老的条目只停用该总结');
-    expect(template).not.toContain('请保留五个分级标题');
+    expect(template).toContain('删除最新条目会回退覆盖位置');
+    expect(template).toContain('删除较老条目只停用该总结');
   });
 });

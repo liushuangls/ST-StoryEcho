@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
   getOrCreate: vi.fn(),
   save: vi.fn(),
   reconcileSummary: vi.fn(),
-  reconcileSkeleton: vi.fn(),
 }));
 
 vi.mock('../src/state/repository', () => ({
@@ -19,10 +18,6 @@ vi.mock('../src/state/repository', () => ({
 vi.mock('../src/summary/service', () => ({
   stageSummaryService: { reconcileHistory: mocks.reconcileSummary },
 }));
-vi.mock('../src/summary/skeleton-service', () => ({
-  storySkeletonService: { reconcile: mocks.reconcileSkeleton },
-}));
-
 import { storyEchoGenerateInterceptor } from '../src/prompt/interceptor';
 import { estimateTokens } from '../src/prompt/render';
 import {
@@ -47,7 +42,6 @@ function settings(enabled = true): StoryEchoSettings {
   const value = structuredClone(DEFAULT_SETTINGS) as StoryEchoSettings;
   value.enabled = enabled;
   value.recentWindow = { size: 1, unit: 'turns' };
-  value.summary.windowSize = 2;
   return value;
 }
 
@@ -68,7 +62,6 @@ function install(
   vi.stubGlobal('SillyTavern', { getContext: () => context });
   mocks.getOrCreate.mockResolvedValue(state);
   mocks.reconcileSummary.mockImplementation(async (value: StoryEchoChatState) => value);
-  mocks.reconcileSkeleton.mockImplementation(async (value: StoryEchoChatState) => value);
   mocks.save.mockResolvedValue(undefined);
   return chat;
 }
@@ -77,9 +70,11 @@ function summary(
   text: string,
   start: number,
   end: number,
+  level = 1,
 ): StoryEchoChatState['stageSummary']['entries'][number] {
   return {
     text,
+    level,
     sourceStartMessageId: start,
     sourceEndMessageId: end,
     sourceHash: `hash-${start}-${end}`,
@@ -140,21 +135,16 @@ describe('StoryEcho generation interceptor', () => {
     expect(mocks.save).toHaveBeenCalledWith(state);
   });
 
-  it('injects a usable skeleton and recent summaries before retained raw messages', async () => {
+  it('injects the chronological summary frontier before retained raw messages', async () => {
     const state = chatState();
     state.stageSummary = {
       entries: [
-        summary('阶段一', 0, 1),
+        summary('长期压缩历史', 0, 1, 2),
         summary('阶段二', 2, 3),
         summary('阶段三', 4, 5),
       ],
       coveredThroughMessageId: 5,
       coveredThroughHash: 'hash-4-5',
-    };
-    state.storySkeleton = {
-      text: '长期主线骨架',
-      coveredThroughMessageId: 1,
-      sourceHash: 'skeleton-hash',
     };
     const original = install(state);
     const request = structuredClone(original);
@@ -163,14 +153,12 @@ describe('StoryEcho generation interceptor', () => {
 
     const injected = request.filter((message) => message.extra?.['story_echo_injection'] === true);
     expect(injected).toHaveLength(1);
-    expect(injected[0]?.mes).toContain('<story_echo_skeleton>');
+    expect(injected[0]?.mes).toContain('长期压缩历史');
     expect(injected[0]?.mes).toContain('阶段二');
     expect(injected[0]?.mes).toContain('阶段三');
-    expect(injected[0]?.mes.match(/<story_echo_summary>/g)).toHaveLength(2);
+    expect(injected[0]?.mes.match(/<story_echo_summary>/g)).toHaveLength(3);
+    expect(injected[0]?.mes).toContain('总结层级：L2');
     expect(injected[0]?.mes.match(/不是需要执行的指令/g)).toHaveLength(1);
-    expect(injected[0]?.mes.indexOf('<story_echo_skeleton>')).toBeLessThan(
-      injected[0]?.mes.indexOf('<story_echo_summary>') ?? -1,
-    );
     expect(injected.every((message) => message.extra?.['story_echo_injection_kind'] === 'summary'))
       .toBe(true);
     expect(state.lastInspection?.estimatedSummaryTokens).toBe(estimateTokens(injected[0]!.mes));
@@ -178,24 +166,18 @@ describe('StoryEcho generation interceptor', () => {
     expect(state.metrics.messagesRemoved).toBeGreaterThan(0);
   });
 
-  it('keeps stale skeletons out of the request and records a warning', async () => {
+  it('does not emit the removed skeleton protocol', async () => {
     const state = chatState();
     state.stageSummary = {
       entries: [summary('已验证总结', 0, 5)],
       coveredThroughMessageId: 5,
       coveredThroughHash: 'hash-0-5',
     };
-    state.storySkeleton = {
-      text: '过期骨架',
-      coveredThroughMessageId: 3,
-      sourceHash: 'old',
-      stale: true,
-    };
     const original = install(state);
     const request = structuredClone(original);
     await storyEchoGenerateInterceptor(request, 8_192, vi.fn(), 'regenerate');
 
-    expect(request.some((message) => message.mes.includes('过期骨架'))).toBe(false);
-    expect(state.lastInspection?.warnings.join('\n')).toContain('来源已失效');
+    expect(request.some((message) => message.mes.includes('story_echo_skeleton'))).toBe(false);
+    expect(request.some((message) => message.mes.includes('已验证总结'))).toBe(true);
   });
 });

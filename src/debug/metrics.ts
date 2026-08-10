@@ -2,19 +2,31 @@ import type {
   DebugDetails,
   DebugStage,
   StoryEchoChatState,
+  StoryEchoDebugTrace,
   StoryEchoMetrics,
 } from '../core/types';
 import { createUuid } from '../core/uuid';
 
 const MAX_DEBUG_TRACES = 50;
 
+/** Preserve traces recorded on an operation snapshot when committing into a live state clone. */
+export function mergeDebugTraces(
+  target: readonly StoryEchoDebugTrace[],
+  source: readonly StoryEchoDebugTrace[],
+): StoryEchoDebugTrace[] {
+  const byId = new Map(
+    [...target, ...source].map((trace) => [trace.id, trace] as const),
+  );
+  return [...byId.values()].slice(-MAX_DEBUG_TRACES);
+}
+
 export function createMetrics(): StoryEchoMetrics {
   return {
     summaryUpdates: 0,
     summaryFailures: 0,
     summaryMessagesCovered: 0,
-    skeletonUpdates: 0,
-    skeletonFailures: 0,
+    summaryCompactions: 0,
+    summaryCompactionFailures: 0,
     generationAttempts: 0,
     generationsTrimmed: 0,
     generationsDeferred: 0,
@@ -22,7 +34,7 @@ export function createMetrics(): StoryEchoMetrics {
     estimatedRemovedTokens: 0,
     estimatedInjectedTokens: 0,
     totalSummaryMs: 0,
-    totalSkeletonMs: 0,
+    totalSummaryCompactionMs: 0,
   };
 }
 
@@ -39,7 +51,7 @@ export function normalizeMetrics(value: unknown): StoryEchoMetrics {
   for (const key of Object.keys(metrics) as Array<keyof StoryEchoMetrics>) {
     (metrics[key] as number) = finiteCount(source[key]);
   }
-  for (const field of ['lastSummaryAt', 'lastSkeletonAt', 'lastGenerationAt'] as const) {
+  for (const field of ['lastSummaryAt', 'lastSummaryCompactionAt', 'lastGenerationAt'] as const) {
     if (typeof source[field] === 'string') {
       metrics[field] = source[field];
     }

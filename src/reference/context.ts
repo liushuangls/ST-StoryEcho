@@ -6,15 +6,13 @@ import {
   type SillyTavernWorldInfoEntry,
 } from '../platform/sillytavern';
 import { estimateTokens } from '../prompt/render';
+import {
+  MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
+  SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
+} from '../summary/constants';
 
 const WORLD_INFO_MODULE_URL = '/scripts/world-info.js';
 const MAX_REFERENCE_SOURCE_CHARACTERS = 100_000;
-export const MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS = 20_000;
-export const MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS = 10_000;
-export const MAX_STAGE_SUMMARY_CONSTANT_WORLD_INFO_CHARACTERS =
-  MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS;
-export const MAX_STAGE_SUMMARY_MATCHED_WORLD_INFO_CHARACTERS =
-  MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS;
 
 interface WorldInfoModule {
   getSortedEntries?: () => Promise<SillyTavernWorldInfoEntry[]>;
@@ -286,7 +284,7 @@ async function buildHistoricalWorldInfoReferenceContext(
   messages: TavernChatMessage[],
   settings: StoryEchoSettings['summary']['reference'],
   context: SillyTavernContext,
-  limits: { constantCharacters: number; matchedCharacters: number },
+  maxCharacters: number,
 ): Promise<WorldInfoReferenceContext> {
   if (!settings.enabled) {
     return emptyReference();
@@ -299,7 +297,10 @@ async function buildHistoricalWorldInfoReferenceContext(
     .map((message) => [clean(message.name), storyContent(message)].filter(Boolean).join(': '))
     .reverse()
     .join('\n'));
-  const maximumMatches = Math.min(20, Math.max(0, Math.floor(settings.maxWorldInfoEntries)));
+  const maximumMatches = Math.min(
+    MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
+    Math.max(0, Math.floor(settings.maxWorldInfoEntries)),
+  );
   const constants: MatchedWorldInfoEntry[] = [];
   const matches: MatchedWorldInfoEntry[] = [];
   let matchOverflow = false;
@@ -350,8 +351,15 @@ async function buildHistoricalWorldInfoReferenceContext(
     ]);
   }
 
-  const fittedConstants = fitWholeWorldInfoEntries(constants, context, limits.constantCharacters);
-  const fittedMatches = fitWholeWorldInfoEntries(matches, context, limits.matchedCharacters);
+  // Blue-light constants have priority. Green-light matches may only consume
+  // the formatted character budget left after the selected constants.
+  const fittedConstants = fitWholeWorldInfoEntries(constants, context, maxCharacters);
+  const constantCharacters = Array.from(fittedConstants.text).length;
+  const fittedMatches = fitWholeWorldInfoEntries(
+    matches,
+    context,
+    Math.max(0, maxCharacters - constantCharacters),
+  );
   const truncated = fittedConstants.truncated || fittedMatches.truncated || matchOverflow;
   if (!fittedConstants.text && !fittedMatches.text) {
     return { ...emptyReference(warnings), truncated };
@@ -360,7 +368,7 @@ async function buildHistoricalWorldInfoReferenceContext(
   const text = [
     '<story_echo_world_background>',
     '以下世界书内容只作为故事背景与设定参考，用于理解世界规则、专有名词、人物身份、地点和能力体系。',
-    '它们不证明某件剧情已经发生，也不代表角色当前状态；具体剧情事实以随后提供的剧情原文、阶段总结或现有骨架为依据。',
+    '它们不证明某件剧情已经发生，也不代表角色当前状态；具体剧情事实以随后提供的剧情原文或分层总结为依据。',
     ...(fittedConstants.text
       ? ['<constant_world_info>', fittedConstants.text, '</constant_world_info>']
       : []),
@@ -404,19 +412,23 @@ export async function buildSummaryWorldInfoReferenceContext(
   settings: StoryEchoSettings['summary']['reference'],
   context = getContext(),
 ): Promise<WorldInfoReferenceContext> {
-  return buildHistoricalWorldInfoReferenceContext(messages, settings, context, {
-    constantCharacters: MAX_STAGE_SUMMARY_CONSTANT_WORLD_INFO_CHARACTERS,
-    matchedCharacters: MAX_STAGE_SUMMARY_MATCHED_WORLD_INFO_CHARACTERS,
-  });
+  return buildHistoricalWorldInfoReferenceContext(
+    messages,
+    settings,
+    context,
+    SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
+  );
 }
 
-export async function buildStorySkeletonWorldInfoReferenceContext(
+export async function buildSummaryCompactionWorldInfoReferenceContext(
   messages: TavernChatMessage[],
   settings: StoryEchoSettings['summary']['reference'],
   context = getContext(),
 ): Promise<WorldInfoReferenceContext> {
-  return buildHistoricalWorldInfoReferenceContext(messages, settings, context, {
-    constantCharacters: MAX_SKELETON_CONSTANT_WORLD_INFO_CHARACTERS,
-    matchedCharacters: MAX_SKELETON_MATCHED_WORLD_INFO_CHARACTERS,
-  });
+  return buildHistoricalWorldInfoReferenceContext(
+    messages,
+    settings,
+    context,
+    SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
+  );
 }

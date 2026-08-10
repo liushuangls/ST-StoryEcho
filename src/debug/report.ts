@@ -1,6 +1,7 @@
 import { EXTENSION_VERSION } from '../core/constants';
 import type { StoryEchoChatState, StoryEchoSettings } from '../core/types';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
+import { summaryLevelCounts } from '../summary/compaction-state';
 
 export const RECENT_ERROR_REPORT_LIMIT = 5;
 
@@ -31,6 +32,7 @@ export function buildDebugReport(
         updatedAt: state.stageSummary.updatedAt ?? null,
         entryCount: state.stageSummary.entries.filter((entry) => !entry.deleted).length,
         deletedEntryCount: state.stageSummary.entries.filter((entry) => entry.deleted).length,
+        levelCounts: Object.fromEntries(summaryLevelCounts(state.stageSummary.entries)),
         entries: state.stageSummary.entries,
         rebuildCheckpoint: state.stageSummary.rebuildCheckpoint
           ? {
@@ -42,7 +44,6 @@ export function buildDebugReport(
             }
           : null,
       },
-      storySkeleton: state.storySkeleton,
     },
     settings: {
       enabled: settings.enabled,
@@ -72,7 +73,8 @@ export function buildRecentErrorReport(
     storyEchoVersion: EXTENSION_VERSION,
     generatedAt: new Date().toISOString(),
     llmProvider: settings.llm.provider,
-    summaryMaxTokens: settings.summary.maxTokens,
+    level1MaxTokens: settings.summary.level1MaxTokens,
+    higherLevelMaxTokens: settings.summary.higherLevelMaxTokens,
     taskQueue: storyEchoTaskCoordinator.snapshot(),
     rebuildCheckpoint: checkpoint
       ? {

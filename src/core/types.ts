@@ -46,7 +46,7 @@ export interface LlmResponseDiagnostic {
 }
 
 export interface StoryEchoSettings {
-  version: 10;
+  version: 12;
   enabled: boolean;
   debug: boolean;
   recentWindow: {
@@ -55,10 +55,14 @@ export interface StoryEchoSettings {
   };
   summary: {
     targetTurnsPerUpdate: number;
-    windowSize: number;
-    maxTokens: number;
-    /** Maximum output and stored size of the always-on global story skeleton. */
-    skeletonMaxTokens: number;
+    /** Level 1 entries merged together when the Level 1 frontier overflows. */
+    level1EntriesPerGroup: number;
+    /** Same-level entries merged together at every Level 2+ frontier. */
+    higherLevelEntriesPerGroup: number;
+    /** Output budget for summaries generated directly from raw chat. */
+    level1MaxTokens: number;
+    /** Output budget for every recursively compressed Level 2+ summary. */
+    higherLevelMaxTokens: number;
     reference: {
       /** Add blue-light and batch-matched green-light world-book entries. */
       enabled: boolean;
@@ -79,8 +83,30 @@ export interface StoryEchoSettings {
   };
 }
 
+export interface SummaryCompactionSource {
+  text: string;
+  level: number;
+  sourceStartMessageId: number;
+  sourceEndMessageId: number;
+  sourceHash: string;
+  updatedAt: string;
+  manuallyEdited?: boolean;
+  deleted?: boolean;
+}
+
+export interface SummaryCompactionProvenance {
+  sourceLevel: number;
+  sourceEntryCount: number;
+  /** Digest of the exact direct child summaries used by the compaction request. */
+  inputHash: string;
+  /** Direct children only; nested provenance is deliberately not duplicated. */
+  sources: SummaryCompactionSource[];
+}
+
 export interface StageSummaryEntry {
   text: string;
+  /** Level 1 comes from raw chat; every merge of same-level entries increments this value. */
+  level: number;
   /** Unicode code-point count of the current stored summary text. */
   characterCount?: number;
   /** Generation provenance. Manual edits change characterCount but preserve this provenance. */
@@ -91,6 +117,8 @@ export interface StageSummaryEntry {
   updatedAt: string;
   /** User-edited summaries keep their source range/hash but are never silently rewritten. */
   manuallyEdited?: boolean;
+  /** Present on Level 2+ entries so the current compressed node can be regenerated safely. */
+  compaction?: SummaryCompactionProvenance;
   /**
    * A deleted non-tail entry remains as a coverage tombstone. It is never
    * injected, but keeps its old raw source range outside later requests.
@@ -113,19 +141,6 @@ export interface StageSummaryRebuildCheckpoint {
   updatedAt: string;
 }
 
-export interface StorySkeleton {
-  text: string;
-  /** Last message covered by the stage-summary prefix folded into this historical skeleton. */
-  coveredThroughMessageId: number;
-  /** Digest of the exact stage-summary prefix used to build the current skeleton. */
-  sourceHash: string;
-  updatedAt?: string;
-  /** Manual edits become the authoritative baseline for later incremental updates. */
-  manuallyEdited?: boolean;
-  /** Stale skeletons stay stored and editable, but are not injected until rebuilt. */
-  stale?: boolean;
-}
-
 export interface InspectionRecord {
   createdAt: string;
   generationType: string;
@@ -145,8 +160,8 @@ export interface StoryEchoMetrics {
   summaryUpdates: number;
   summaryFailures: number;
   summaryMessagesCovered: number;
-  skeletonUpdates: number;
-  skeletonFailures: number;
+  summaryCompactions: number;
+  summaryCompactionFailures: number;
   generationAttempts: number;
   generationsTrimmed: number;
   generationsDeferred: number;
@@ -154,9 +169,9 @@ export interface StoryEchoMetrics {
   estimatedRemovedTokens: number;
   estimatedInjectedTokens: number;
   totalSummaryMs: number;
-  totalSkeletonMs: number;
+  totalSummaryCompactionMs: number;
   lastSummaryAt?: string;
-  lastSkeletonAt?: string;
+  lastSummaryCompactionAt?: string;
   lastGenerationAt?: string;
 }
 
@@ -171,7 +186,7 @@ export interface StoryEchoDebugTrace {
   details?: DebugDetails;
 }
 
-export type InternalLlmTask = 'stage-summary' | 'story-skeleton';
+export type InternalLlmTask = 'stage-summary' | 'summary-compaction';
 export type InternalLlmAttemptStatus = 'completed' | 'cancelled' | 'failed';
 
 export interface InternalLlmAttempt {
@@ -194,7 +209,7 @@ export interface InternalLlmAttempt {
 }
 
 export interface StoryEchoChatState {
-  schemaVersion: 2;
+  schemaVersion: 3;
   chatUuid: string;
   ownerChatId: string;
   stageSummary: {
@@ -204,7 +219,6 @@ export interface StoryEchoChatState {
     updatedAt?: string;
     rebuildCheckpoint?: StageSummaryRebuildCheckpoint;
   };
-  storySkeleton: StorySkeleton;
   metrics: StoryEchoMetrics;
   debugTraces: StoryEchoDebugTrace[];
   /** Bounded diagnostic history; never contains prompts, API keys, or response text. */

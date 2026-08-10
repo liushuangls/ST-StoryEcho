@@ -26,6 +26,7 @@ describe('SettingsRepository', () => {
   it('starts with one disabled context-management feature', () => {
     installContext();
     expect(new SettingsRepository().get()).toEqual(DEFAULT_SETTINGS);
+    expect(DEFAULT_SETTINGS.summary.reference.maxWorldInfoEntries).toBe(20);
   });
 
   it('persists context settings and the only remaining API credential', () => {
@@ -39,7 +40,7 @@ describe('SettingsRepository', () => {
     });
 
     expect(extensionSettings[MODULE_ID]).toMatchObject({
-      version: 10,
+      version: 12,
       enabled: true,
       recentWindow: { size: 12 },
       summary: { targetTurnsPerUpdate: 8 },
@@ -86,7 +87,7 @@ describe('SettingsRepository', () => {
         windowSize: 0,
         maxTokens: 1,
         skeletonMaxTokens: 99_999,
-        reference: { enabled: true, maxWorldInfoEntries: 99 },
+        reference: { enabled: true, maxWorldInfoEntries: 999 },
       },
       llm: {
         provider: 'unknown',
@@ -102,10 +103,11 @@ describe('SettingsRepository', () => {
     expect(settings.recentWindow).toEqual({ size: 0, unit: 'turns' });
     expect(settings.summary).toMatchObject({
       targetTurnsPerUpdate: 100,
-      windowSize: 1,
-      maxTokens: 128,
-      skeletonMaxTokens: 10_000,
-      reference: { maxWorldInfoEntries: 20 },
+      level1EntriesPerGroup: 2,
+      higherLevelEntriesPerGroup: 5,
+      level1MaxTokens: 128,
+      higherLevelMaxTokens: 16_000,
+      reference: { maxWorldInfoEntries: 100 },
     });
     expect(settings.llm.provider).toBe('main');
     expect(settings.llm.custom).toMatchObject({

@@ -25,7 +25,7 @@ function normalizeAttempt(value: unknown): InternalLlmAttempt | null {
   if (
     !isRecord(value) ||
     typeof value['id'] !== 'string' ||
-    !['stage-summary', 'story-skeleton'].includes(String(value['task'])) ||
+    !['stage-summary', 'summary-compaction'].includes(String(value['task'])) ||
     !['completed', 'cancelled', 'failed'].includes(String(value['status'])) ||
     typeof value['startedAt'] !== 'string' ||
     typeof value['finishedAt'] !== 'string'

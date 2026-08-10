@@ -1,6 +1,7 @@
 import { MODULE_ID } from '../core/constants';
 import type { StoryEchoSettings } from '../core/types';
 import { getContext } from '../platform/sillytavern';
+import { MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES } from '../summary/constants';
 import { DEFAULT_SETTINGS } from './defaults';
 
 function cloneDefaults(): StoryEchoSettings {
@@ -32,11 +33,31 @@ function mergeKnown<T>(defaults: T, stored: unknown): T {
 /**
  * 0.20.x stored the world-book policy under extraction.reference because it
  * was shared with the removed memory extractor. Preserve only the settings
- * that still affect stage summaries and the global skeleton.
+ * that still affect the retained summary hierarchy.
  */
 function migrateContextSettings(settings: StoryEchoSettings, stored: unknown): void {
   const root = isRecord(stored) ? stored : {};
   const storedSummary = isRecord(root['summary']) ? root['summary'] : {};
+  if (typeof storedSummary['level1EntriesPerGroup'] !== 'number') {
+    const legacyCapacity = typeof storedSummary['entriesPerLevel'] === 'number'
+      ? storedSummary['entriesPerLevel']
+      : storedSummary['windowSize'];
+    if (typeof legacyCapacity === 'number') {
+      settings.summary.level1EntriesPerGroup = legacyCapacity;
+    }
+  }
+  if (
+    typeof storedSummary['level1MaxTokens'] !== 'number' &&
+    typeof storedSummary['maxTokens'] === 'number'
+  ) {
+    settings.summary.level1MaxTokens = storedSummary['maxTokens'];
+  }
+  if (
+    typeof storedSummary['higherLevelMaxTokens'] !== 'number' &&
+    typeof storedSummary['skeletonMaxTokens'] === 'number'
+  ) {
+    settings.summary.higherLevelMaxTokens = storedSummary['skeletonMaxTokens'];
+  }
   if (!isRecord(storedSummary['reference'])) {
     const extraction = isRecord(root['extraction']) ? root['extraction'] : {};
     const reference = isRecord(extraction['reference']) ? extraction['reference'] : {};
@@ -82,28 +103,34 @@ function normalizeSettings(settings: StoryEchoSettings): void {
     100,
     DEFAULT_SETTINGS.summary.targetTurnsPerUpdate,
   );
-  settings.summary.windowSize = boundedInteger(
-    settings.summary.windowSize,
-    1,
+  settings.summary.level1EntriesPerGroup = boundedInteger(
+    settings.summary.level1EntriesPerGroup,
+    2,
     100,
-    DEFAULT_SETTINGS.summary.windowSize,
+    DEFAULT_SETTINGS.summary.level1EntriesPerGroup,
   );
-  settings.summary.maxTokens = boundedInteger(
-    settings.summary.maxTokens,
+  settings.summary.higherLevelEntriesPerGroup = boundedInteger(
+    settings.summary.higherLevelEntriesPerGroup,
+    2,
+    100,
+    DEFAULT_SETTINGS.summary.higherLevelEntriesPerGroup,
+  );
+  settings.summary.level1MaxTokens = boundedInteger(
+    settings.summary.level1MaxTokens,
     128,
-    8_192,
-    DEFAULT_SETTINGS.summary.maxTokens,
+    16_000,
+    DEFAULT_SETTINGS.summary.level1MaxTokens,
   );
-  settings.summary.skeletonMaxTokens = boundedInteger(
-    settings.summary.skeletonMaxTokens,
+  settings.summary.higherLevelMaxTokens = boundedInteger(
+    settings.summary.higherLevelMaxTokens,
     512,
-    10_000,
-    DEFAULT_SETTINGS.summary.skeletonMaxTokens,
+    16_000,
+    DEFAULT_SETTINGS.summary.higherLevelMaxTokens,
   );
   settings.summary.reference.maxWorldInfoEntries = boundedInteger(
     settings.summary.reference.maxWorldInfoEntries,
     0,
-    20,
+    MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
     DEFAULT_SETTINGS.summary.reference.maxWorldInfoEntries,
   );
   if (settings.llm.provider !== 'main' && settings.llm.provider !== 'openai-compatible') {

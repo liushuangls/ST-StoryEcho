@@ -115,7 +115,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     const abort = () => controller.abort();
     request.signal?.addEventListener('abort', abort, { once: true });
     const maxTokens = Math.min(
-      10_000,
+      16_000,
       Math.max(16, Math.floor(request.maxTokens ?? 8_192)),
     );
     // SillyTavern's Custom source only forwards provider-specific fields from

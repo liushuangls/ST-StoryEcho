@@ -19,7 +19,7 @@ interface ObservedCompletionContext {
 }
 
 function requestedMaxTokens(request: LlmRequest): number {
-  return Math.min(10_000, Math.max(16, Math.floor(request.maxTokens ?? 8_192)));
+  return Math.min(16_000, Math.max(16, Math.floor(request.maxTokens ?? 8_192)));
 }
 
 function boundedError(error: unknown): string {

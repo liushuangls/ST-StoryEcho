@@ -155,7 +155,7 @@ describe('OpenAiCompatibleProvider', () => {
     });
   });
 
-  it('allows a 10000-token skeleton budget but clamps larger custom requests', async () => {
+  it('allows a 16000-token high-level budget but clamps larger custom requests', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: 'OK' } }],
     }), { status: 200 }));
@@ -167,7 +167,7 @@ describe('OpenAiCompatibleProvider', () => {
     await provider.complete({ system: 'system', prompt: 'prompt', maxTokens: 20_000 });
 
     const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
-    expect(body.max_tokens).toBe(10_000);
+    expect(body.max_tokens).toBe(16_000);
   });
 
   it('keeps summary requests in plain text mode', async () => {

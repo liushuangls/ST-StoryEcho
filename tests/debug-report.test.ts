@@ -53,7 +53,7 @@ describe('buildDebugReport', () => {
     });
     const report = buildDebugReport(state, settings);
 
-    expect(report).toContain('"storySkeleton"');
+    expect(report).toContain('"levelCounts"');
     expect(report).toContain('"stageSummary"');
     expect(report).toContain('"metrics"');
     expect(report).toContain('"recentInternalLlmAttempts"');
@@ -71,6 +71,7 @@ describe('buildDebugReport', () => {
       stageSummary: {
         entries: [{
           text: '不应出现在精简错误报告中的阶段总结正文',
+          level: 1,
           sourceStartMessageId: 0,
           sourceEndMessageId: 1,
           sourceHash: 'saved-source',
@@ -84,6 +85,7 @@ describe('buildDebugReport', () => {
           generationSignature: 'generation-signature',
           entries: [{
             text: '不应复制的重建草稿正文',
+            level: 1,
             sourceStartMessageId: 0,
             sourceEndMessageId: 3,
             sourceHash: 'draft-source',
@@ -93,11 +95,6 @@ describe('buildDebugReport', () => {
           totalMessagesCovered: 4,
           updatedAt: '2026-01-01T00:00:01.000Z',
         },
-      },
-      storySkeleton: {
-        text: '不应复制的骨架正文',
-        coveredThroughMessageId: 1,
-        sourceHash: 'skeleton-source',
       },
     });
     const settings = structuredClone(DEFAULT_SETTINGS);
@@ -135,7 +132,6 @@ describe('buildDebugReport', () => {
     expect(report).toContain('draftEntryCount');
     expect(report).not.toContain('阶段总结正文');
     expect(report).not.toContain('重建草稿正文');
-    expect(report).not.toContain('骨架正文');
     expect(report).not.toContain('private.example');
     expect(report).not.toContain('secret-key');
   });

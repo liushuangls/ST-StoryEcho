@@ -13,7 +13,7 @@ const CATEGORY_PRESENTATION: Record<PromptTokenCategoryId, { label: string; clas
   'world-info': { label: '世界书', className: 'world-info' },
   examples: { label: '示例对话', className: 'examples' },
   'recent-context': { label: '最近原文上下文', className: 'recent-context' },
-  'story-echo-summary': { label: 'StoryEcho 骨架与阶段总结', className: 'story-echo-summary' },
+  'story-echo-summary': { label: 'StoryEcho 分层总结', className: 'story-echo-summary' },
   'other-prompts': { label: '其他提示与扩展注入', className: 'other-prompts' },
   unclassified: { label: '未分类与消息开销', className: 'unclassified' },
 };
@@ -41,7 +41,7 @@ export function promptStatsCardTemplate(): string {
         <div id="story-echo-prompt-stats-content" hidden>
           <div class="story-echo-token-story-heading">
             <strong>StoryEcho 本轮发送</strong>
-            <span>最近原文、全局骨架与阶段总结</span>
+            <span>最近原文与分层剧情总结</span>
           </div>
           <div class="story-echo-token-story-grid">
             <div class="story-echo-token-story-stat">
@@ -49,7 +49,7 @@ export function promptStatsCardTemplate(): string {
               <strong id="story-echo-token-context">—</strong>
             </div>
             <div class="story-echo-token-story-stat">
-              <span>骨架与阶段总结</span>
+              <span>分层剧情总结</span>
               <strong id="story-echo-token-summary">—</strong>
             </div>
           </div>
@@ -214,7 +214,7 @@ export class PromptTokenStatsCard {
     const note = element<HTMLElement>(panel, '#story-echo-prompt-stats-note');
     if (agentPrompt) {
       const warning = breakdown.agentContextTrimmed
-        ? '警告：Agent 启动前的二次组装移除了 StoryEcho 骨架/阶段总结；若 Profile 限制了“初始聊天历史楼数”，请设为 -1。'
+        ? '警告：Agent 启动前的二次组装移除了 StoryEcho 分层总结；若 Profile 限制了“初始聊天历史楼数”，请设为 -1。'
         : '';
       const measurement = breakdown.totalMeasured
         ? '总量取自 TauriTavern Agent 首轮模型调用的 provider usage；分类按启动前的最终消息与工具定义快照估算，差额归入“未分类”。'

@@ -8,8 +8,7 @@ const mocks = vi.hoisted(() => ({
   adoptRenamedChat: vi.fn(),
   reconcileSummary: vi.fn(),
   processNextSummary: vi.fn(),
-  reconcileSkeleton: vi.fn(),
-  processNextSkeleton: vi.fn(),
+  processNextCompaction: vi.fn(),
 }));
 
 vi.mock('../src/state/repository', () => ({
@@ -24,10 +23,9 @@ vi.mock('../src/summary/service', () => ({
     processNextThrough: mocks.processNextSummary,
   },
 }));
-vi.mock('../src/summary/skeleton-service', () => ({
-  storySkeletonService: {
-    reconcile: mocks.reconcileSkeleton,
-    processNextIfNeeded: mocks.processNextSkeleton,
+vi.mock('../src/summary/compaction-service', () => ({
+  summaryCompactionService: {
+    processNextIfNeeded: mocks.processNextCompaction,
   },
 }));
 
@@ -105,8 +103,7 @@ beforeEach(() => {
   mocks.getOrCreate.mockResolvedValue(state);
   mocks.reconcileSummary.mockResolvedValue(state);
   mocks.processNextSummary.mockResolvedValue({ state, updatedChunks: 0 });
-  mocks.reconcileSkeleton.mockResolvedValue(state);
-  mocks.processNextSkeleton.mockResolvedValue({ state, updatedChunks: 0, pendingEntries: 0 });
+  mocks.processNextCompaction.mockResolvedValue({ state, compactedChunks: 0, pending: false });
 });
 
 afterEach(() => {
@@ -141,7 +138,7 @@ describe('BackgroundProcessingScheduler', () => {
     scheduler.unregister();
   });
 
-  it('reconciles state, advances one summary and checks the skeleton', async () => {
+  it('reconciles state, advances one summary and checks hierarchy compaction', async () => {
     const current = settings({ enabled: true });
     current.recentWindow.size = 2;
     installContext(chat(5), current);
@@ -154,8 +151,7 @@ describe('BackgroundProcessingScheduler', () => {
 
     expect(mocks.reconcileSummary).toHaveBeenCalledWith(state);
     expect(mocks.processNextSummary).toHaveBeenCalledWith(5);
-    expect(mocks.reconcileSkeleton).toHaveBeenCalled();
-    expect(mocks.processNextSkeleton).toHaveBeenCalledOnce();
+    expect(mocks.processNextCompaction).toHaveBeenCalledOnce();
     scheduler.unregister();
   });
 

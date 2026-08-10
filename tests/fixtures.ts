@@ -5,18 +5,13 @@ export function chatState(
   overrides: Partial<StoryEchoChatState> = {},
 ): StoryEchoChatState {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     chatUuid: 'chat-uuid',
     ownerChatId: 'chat-id',
     stageSummary: {
       entries: [],
       coveredThroughMessageId: -1,
       coveredThroughHash: '',
-    },
-    storySkeleton: {
-      text: '',
-      coveredThroughMessageId: -1,
-      sourceHash: '',
     },
     metrics: createMetrics(),
     debugTraces: [],

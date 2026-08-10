@@ -61,7 +61,7 @@ describe('TauriTavern Agent compatibility bridge', () => {
     bridge.markStoryEchoSummaryInjected('chat-id', 2);
     handlers.get('completion-settings-ready')?.({
       messages: [
-        { role: 'system', content: '<story_echo_skeleton>partial</story_echo_skeleton>' },
+        { role: 'system', content: '<story_echo_summary>partial</story_echo_summary>' },
         { role: 'user', content: 'continue' },
       ],
       tools: [{ type: 'function', function: { name: 'search' } }],
@@ -130,7 +130,7 @@ describe('TauriTavern Agent compatibility bridge', () => {
         role: 'system',
         content: [
           'historical data notice',
-          '<story_echo_skeleton>old outline</story_echo_skeleton>',
+          '<story_echo_summary>old outline</story_echo_summary>',
           '<story_echo_summary>older plot</story_echo_summary>',
           '<story_echo_summary>newer plot</story_echo_summary>',
         ].join('\n'),
@@ -241,7 +241,7 @@ describe('TauriTavern Agent compatibility bridge', () => {
     handlers.get('completion-settings-ready')?.({
       messages: [{
         role: 'system',
-        content: [{ type: 'text', text: '<story_echo_skeleton>plot</story_echo_skeleton>' }],
+        content: [{ type: 'text', text: '<story_echo_summary>plot</story_echo_summary>' }],
       }],
     });
     target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {

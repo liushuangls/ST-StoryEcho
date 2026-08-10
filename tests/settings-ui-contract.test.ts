@@ -9,8 +9,9 @@ const CONTROLS = [
   'story-echo-window-unit',
   'story-echo-summary-batch',
   'story-echo-summary-window',
+  'story-echo-higher-summary-window',
   'story-echo-summary-tokens',
-  'story-echo-skeleton-tokens',
+  'story-echo-higher-summary-tokens',
   'story-echo-world-info-reference',
   'story-echo-reference-world-info',
   'story-echo-llm-provider',
@@ -68,7 +69,7 @@ describe('context-only settings panel contract', () => {
     );
     expect(source).toContain('窗口与总结设置');
     expect(source).toContain('世界书参考');
-    expect(source).toContain('阶段总结与骨架模型');
+    expect(source).toContain('阶段总结与高层压缩模型');
   });
 
   it('places derived context management immediately after model settings', () => {
@@ -112,5 +113,17 @@ describe('context-only settings panel contract', () => {
     expect(source).toContain('function bindSummaryLayoutLock(');
     expect(source).toContain("subscriptions.listen(summary, 'click'");
     expect(source).toContain("'--story-echo-summary-layout-height'");
+  });
+
+  it('creates a fresh summary manager for each mounted settings panel', () => {
+    expect(source).toContain(
+      'let stageSummaryMetadataManager: StageSummaryMetadataManager | undefined;',
+    );
+    expect(source).toContain(
+      'const summaryManager = new StageSummaryMetadataManager(stateRepository);',
+    );
+    expect(source).toContain('stageSummaryMetadataManager = undefined;');
+    expect(source).toContain('summaryManager.bind(panel, async () => refreshStatus(panel));');
+    expect(source).toContain('if (panel !== registeredPanel || !panel.isConnected)');
   });
 });
