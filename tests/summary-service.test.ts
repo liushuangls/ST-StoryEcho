@@ -116,19 +116,23 @@ describe('stage-summary prompt helpers', () => {
     expect(prompt).not.toContain('authoritative_facts');
   });
 
-  it('uses content-adaptive instructions without exposing output budgets', () => {
+  it('uses concise content-adaptive instructions without exposing output budgets', () => {
     const prompt = buildStageSummaryPrompt(
       [{ is_user: true, mes: '开始行动' }, { is_user: false, mes: '行动完成' }],
       10,
     );
     const instructions = `${STAGE_SUMMARY_SYSTEM_PROMPT}\n${prompt}`;
 
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('根据本批剧情的信息量、复杂度和后续影响自主决定篇幅');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不得为了缩短正文删除关键内容');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('主动追求高压缩率');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('关键状态链不断裂，不是逐消息、逐场景或逐动作复述');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('过程本身不影响人物选择和后续状态时，直接写结果');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('同一事实只出现一次');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不为每个场景设置标题');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('只有措辞本身构成承诺、规则、身份确认');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不用泛称替代仍会影响后续识别的专名');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('李玄清（此前被称为‘道长’）');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不用“关系升温”“发生冲突”“获得线索”“身份揭露”等抽象结论代替关键事实');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('完整、准确、无重复后自然收束');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('没有重复后立即收束');
     expect(instructions).not.toMatch(/\d+[～~-]\d+个中文字符/u);
     expect(instructions).not.toContain('输出预算');
     expect(instructions).not.toContain('最大输出');
