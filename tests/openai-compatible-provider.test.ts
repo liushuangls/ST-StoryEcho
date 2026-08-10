@@ -186,6 +186,37 @@ describe('OpenAiCompatibleProvider', () => {
     expect(body.json_schema).toBeUndefined();
   });
 
+  it.each([
+    {
+      name: 'official DeepSeek endpoint',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+    },
+    {
+      name: 'official DeepSeek endpoint with a deployment alias',
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'story-summary-deployment',
+    },
+    {
+      name: 'DeepSeek model behind an OpenAI-compatible proxy',
+      baseUrl: 'https://gateway.example/v1',
+      model: 'provider/deepseek-v4-pro',
+    },
+  ])('forwards the non-thinking switch for $name', async ({ baseUrl, model }) => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200 }));
+    const config = customConfig();
+    config.baseUrl = baseUrl;
+    config.model = model;
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    await provider.complete({ system: 'system', prompt: 'prompt' });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.custom_include_body).toBe('thinking:\n  type: disabled');
+  });
+
   it('gives reasoning models enough room to finish the connection test', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: 'OK' } }],

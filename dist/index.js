@@ -3103,8 +3103,15 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
 var GENERATE_ENDPOINT2 = "/api/backends/chat-completions/generate";
 var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 var MAX_REQUEST_TIMEOUT_MS2 = 6e5;
+var DEEPSEEK_NON_THINKING_BODY = "thinking:\n  type: disabled";
 function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isDeepSeekTarget(model, baseUrl) {
+  if (/(?:^|[/:._-])deepseek(?:$|[/:._-])/iu.test(model)) {
+    return true;
+  }
+  return new URL(baseUrl).hostname.toLowerCase() === "api.deepseek.com";
 }
 function responseContent(payload) {
   if (!isRecord9(payload)) {
@@ -3179,6 +3186,7 @@ var OpenAiCompatibleProvider = class {
       1e4,
       Math.max(16, Math.floor(request.maxTokens ?? 8192))
     );
+    const customIncludeBody = isDeepSeekTarget(model, baseUrl) ? DEEPSEEK_NON_THINKING_BODY : "";
     const body = {
       messages: [
         { role: "system", content: request.system },
@@ -3201,7 +3209,7 @@ var OpenAiCompatibleProvider = class {
       proxy_password: "",
       custom_url: baseUrl,
       custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : "",
-      custom_include_body: "",
+      custom_include_body: customIncludeBody,
       custom_exclude_body: ""
     };
     try {

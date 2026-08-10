@@ -22,9 +22,17 @@ type RequestHeadersProvider = () => Promise<Record<string, string>>;
 const GENERATE_ENDPOINT = '/api/backends/chat-completions/generate';
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_REQUEST_TIMEOUT_MS = 600_000;
+const DEEPSEEK_NON_THINKING_BODY = 'thinking:\n  type: disabled';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isDeepSeekTarget(model: string, baseUrl: string): boolean {
+  if (/(?:^|[/:._-])deepseek(?:$|[/:._-])/iu.test(model)) {
+    return true;
+  }
+  return new URL(baseUrl).hostname.toLowerCase() === 'api.deepseek.com';
 }
 
 function responseContent(payload: unknown): string | null {
@@ -110,6 +118,12 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       10_000,
       Math.max(16, Math.floor(request.maxTokens ?? 8_192)),
     );
+    // SillyTavern's Custom source only forwards provider-specific fields from
+    // custom_include_body. DeepSeek V4 defaults to thinking mode, so the
+    // top-level compatibility flags below are not sufficient to disable it.
+    const customIncludeBody = isDeepSeekTarget(model, baseUrl)
+      ? DEEPSEEK_NON_THINKING_BODY
+      : '';
     const body = {
       messages: [
         { role: 'system', content: request.system },
@@ -132,7 +146,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       proxy_password: '',
       custom_url: baseUrl,
       custom_include_headers: apiKey ? `Authorization: Bearer ${apiKey}` : '',
-      custom_include_body: '',
+      custom_include_body: customIncludeBody,
       custom_exclude_body: '',
     };
 
