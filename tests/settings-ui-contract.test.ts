@@ -49,6 +49,8 @@ describe('context-only settings panel contract', () => {
     expect(source).toContain('处理窗口外历史');
     expect(source).toContain('${stageSummaryManagerTemplate()}');
     expect(source).toContain('${promptStatsCardTemplate()}');
+    expect(source).toContain('id="story-echo-copy-recent-errors"');
+    expect(source).toContain('buildRecentErrorReport(state, settingsRepository.get())');
   });
 
   it('keeps window, world-book and model settings collapsed by default', () => {

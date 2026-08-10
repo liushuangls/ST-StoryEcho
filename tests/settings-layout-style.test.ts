@@ -33,14 +33,14 @@ describe('settings panel action layout', () => {
     expect(buttonRule).toContain('white-space: nowrap;');
   });
 
-  it('gives both diagnostic buttons a full horizontal grid cell', () => {
+  it('gives all diagnostic buttons a full horizontal grid cell', () => {
     const containerRule = rule('#story-echo-settings .story-echo-diagnostics-actions {');
     const buttonRule = rule(
       '#story-echo-settings .story-echo-diagnostics-actions .menu_button {',
     );
 
     expect(containerRule).toContain('display: grid;');
-    expect(containerRule).toContain('grid-template-columns: repeat(2, minmax(0, 1fr));');
+    expect(containerRule).toContain('grid-template-columns: repeat(3, minmax(0, 1fr));');
     expect(buttonRule).toContain('width: 100%;');
     expect(buttonRule).toContain('max-width: none;');
     expect(buttonRule).toContain('min-width: 0;');

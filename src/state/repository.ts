@@ -3,6 +3,7 @@ import { createUuid } from '../core/uuid';
 import type {
   InspectionRecord,
   StageSummaryEntry,
+  StageSummaryRebuildCheckpoint,
   StoryEchoChatState,
   StoryEchoDebugTrace,
 } from '../core/types';
@@ -87,6 +88,58 @@ function normalizeStageSummaryEntry(value: unknown): StageSummaryEntry | null {
   };
 }
 
+function normalizeStageSummaryRebuildCheckpoint(
+  value: unknown,
+): StageSummaryRebuildCheckpoint | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const targetEndMessageId = finiteInteger(value['targetEndMessageId'], -1);
+  const targetSourceHash = typeof value['targetSourceHash'] === 'string'
+    ? value['targetSourceHash']
+    : '';
+  const generationSignature = typeof value['generationSignature'] === 'string'
+    ? value['generationSignature']
+    : '';
+  const updatedAt = typeof value['updatedAt'] === 'string' ? value['updatedAt'] : '';
+  if (
+    targetEndMessageId < 0 ||
+    !targetSourceHash ||
+    !generationSignature ||
+    !updatedAt ||
+    !Array.isArray(value['entries'])
+  ) {
+    return undefined;
+  }
+  const entries: StageSummaryEntry[] = [];
+  let expectedStartMessageId = 0;
+  for (const candidate of value['entries']) {
+    const entry = normalizeStageSummaryEntry(candidate);
+    if (
+      !entry ||
+      entry.deleted ||
+      entry.sourceStartMessageId !== expectedStartMessageId ||
+      entry.sourceEndMessageId > targetEndMessageId
+    ) {
+      return undefined;
+    }
+    entries.push(entry);
+    expectedStartMessageId = entry.sourceEndMessageId + 1;
+  }
+  if (entries.length === 0) {
+    return undefined;
+  }
+  return {
+    targetEndMessageId,
+    targetSourceHash,
+    generationSignature,
+    entries,
+    totalDurationMs: Math.max(0, finiteInteger(value['totalDurationMs'], 0)),
+    totalMessagesCovered: Math.max(0, finiteInteger(value['totalMessagesCovered'], 0)),
+    updatedAt,
+  };
+}
+
 function normalizeStageSummary(value: unknown): StoryEchoChatState['stageSummary'] {
   const stored = isRecord(value) ? value : {};
   const entries: StageSummaryEntry[] = [];
@@ -122,11 +175,15 @@ function normalizeStageSummary(value: unknown): StoryEchoChatState['stageSummary
   }
 
   const latest = entries.at(-1);
+  const rebuildCheckpoint = normalizeStageSummaryRebuildCheckpoint(
+    stored['rebuildCheckpoint'],
+  );
   return {
     entries,
     coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
     coveredThroughHash: latest?.sourceHash ?? '',
     ...(latest ? { updatedAt: latest.updatedAt } : {}),
+    ...(rebuildCheckpoint ? { rebuildCheckpoint } : {}),
   };
 }
 
@@ -294,6 +351,7 @@ export class StoryStateRepository {
       if (state.storySkeleton.text) {
         state.storySkeleton.stale = true;
       }
+      delete state.stageSummary.rebuildCheckpoint;
       delete state.lastInspection;
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
@@ -357,6 +415,7 @@ export class StoryStateRepository {
       updatedAt: new Date().toISOString(),
       manuallyEdited: true,
     };
+    delete state.stageSummary.rebuildCheckpoint;
     markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
     const latest = state.stageSummary.entries.at(-1);
     state.stageSummary = {
@@ -383,6 +442,7 @@ export class StoryStateRepository {
       throw new Error('要删除的阶段总结不存在，可能已在其他页面删除或失效。');
     }
     const entries = [...state.stageSummary.entries];
+    delete state.stageSummary.rebuildCheckpoint;
     markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
     if (index === entries.length - 1) {
       entries.pop();

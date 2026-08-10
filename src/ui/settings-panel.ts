@@ -5,7 +5,7 @@ import type { LlmProviderId, StoryEchoChatState, StoryEchoSettings, WindowUnit }
 import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
 import { MAX_INTERNAL_LLM_ATTEMPTS } from '../debug/internal-llm-attempts';
 import { resetDiagnostics } from '../debug/metrics';
-import { buildDebugReport } from '../debug/report';
+import { buildDebugReport, buildRecentErrorReport } from '../debug/report';
 import { fetchCustomLlmModels } from '../llm/model-list';
 import { createLlmProvider } from '../llm/provider-factory';
 import { normalizeChatCompletionsBaseUrl } from '../llm/url';
@@ -370,6 +370,7 @@ function panelTemplate(): HTMLElement {
 
         <div class="story-echo-diagnostics-actions">
           <button id="story-echo-copy-report" class="menu_button" type="button"><i class="fa-solid fa-copy"></i><span>复制诊断报告</span></button>
+          <button id="story-echo-copy-recent-errors" class="menu_button" type="button"><i class="fa-solid fa-triangle-exclamation"></i><span>复制最近错误</span></button>
           <button id="story-echo-reset-stats" class="menu_button" type="button"><i class="fa-solid fa-eraser"></i><span>清空统计与轨迹</span></button>
         </div>
       </div>
@@ -623,6 +624,20 @@ function bindSettings(panel: HTMLElement): void {
       notify.success('诊断报告已复制。');
     } catch (error) {
       notify.error(error instanceof Error ? error.message : '复制诊断报告失败。');
+    }
+  });
+
+  element<HTMLButtonElement>(panel, '#story-echo-copy-recent-errors').addEventListener('click', async () => {
+    const state = stateRepository.getExisting();
+    if (!state) {
+      notify.info('当前聊天尚无 StoryEcho 状态。');
+      return;
+    }
+    try {
+      await copyText(buildRecentErrorReport(state, settingsRepository.get()));
+      notify.success('最近 5 条内部请求与错误已复制。');
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : '复制最近错误失败。');
     }
   });
 

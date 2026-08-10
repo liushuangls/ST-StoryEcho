@@ -39,6 +39,13 @@ function normalizeAttempt(value: unknown): InternalLlmAttempt | null {
   const error = typeof value['error'] === 'string'
     ? value['error'].replace(/\s+/gu, ' ').trim().slice(0, 500)
     : '';
+  const attemptErrors = Array.isArray(value['attemptErrors'])
+    ? value['attemptErrors']
+      .filter((item): item is string => typeof item === 'string')
+      .map((item) => item.replace(/\s+/gu, ' ').trim().slice(0, 500))
+      .filter(Boolean)
+      .slice(0, 4)
+    : [];
   return {
     id: value['id'].slice(0, 200),
     task: value['task'] as InternalLlmAttempt['task'],
@@ -53,6 +60,7 @@ function normalizeAttempt(value: unknown): InternalLlmAttempt | null {
     agentActiveAtEnd: value['agentActiveAtEnd'] === true,
     ...(completion ? { completion } : {}),
     ...(responseDiagnostic ? { responseDiagnostic } : {}),
+    ...(attemptErrors.length > 0 ? { attemptErrors } : {}),
     ...(error ? { error } : {}),
   };
 }

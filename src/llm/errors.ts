@@ -34,6 +34,29 @@ export function isLlmRequestTimeoutError(error: unknown): error is LlmRequestTim
   return error instanceof LlmRequestTimeoutError;
 }
 
+function boundedAttemptError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 500);
+}
+
+export class LlmRequestRetryError extends Error {
+  readonly attemptErrors: string[];
+
+  constructor(errors: readonly unknown[]) {
+    const attemptErrors = errors.map(boundedAttemptError).filter(Boolean);
+    const [first = '未知错误', retry = '未知错误'] = attemptErrors;
+    super(`内部LLM首次请求失败：${first}；当前批次重试失败：${retry}`);
+    this.name = 'LlmRequestRetryError';
+    this.attemptErrors = attemptErrors;
+  }
+}
+
+export function isLlmRequestRetryError(error: unknown): error is LlmRequestRetryError {
+  return error instanceof LlmRequestRetryError;
+}
+
 const RETRIABLE_UPSTREAM_TIMEOUT_STATUSES = new Set([
   408,
   502,

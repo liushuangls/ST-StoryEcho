@@ -979,7 +979,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.11";
+var EXTENSION_VERSION = "0.21.12";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -1404,6 +1404,7 @@ function normalizeAttempt(value) {
   const completion = normalizeLlmCompletionMetadata(value["completion"]);
   const responseDiagnostic = normalizeLlmResponseDiagnostic(value["responseDiagnostic"]);
   const error = typeof value["error"] === "string" ? value["error"].replace(/\s+/gu, " ").trim().slice(0, 500) : "";
+  const attemptErrors = Array.isArray(value["attemptErrors"]) ? value["attemptErrors"].filter((item) => typeof item === "string").map((item) => item.replace(/\s+/gu, " ").trim().slice(0, 500)).filter(Boolean).slice(0, 4) : [];
   return {
     id: value["id"].slice(0, 200),
     task: value["task"],
@@ -1418,6 +1419,7 @@ function normalizeAttempt(value) {
     agentActiveAtEnd: value["agentActiveAtEnd"] === true,
     ...completion ? { completion } : {},
     ...responseDiagnostic ? { responseDiagnostic } : {},
+    ...attemptErrors.length > 0 ? { attemptErrors } : {},
     ...error ? { error } : {}
   };
 }
@@ -1851,6 +1853,40 @@ function normalizeStageSummaryEntry(value) {
     ...deleted ? { deleted: true } : {}
   };
 }
+function normalizeStageSummaryRebuildCheckpoint(value) {
+  if (!isRecord6(value)) {
+    return void 0;
+  }
+  const targetEndMessageId = finiteInteger2(value["targetEndMessageId"], -1);
+  const targetSourceHash = typeof value["targetSourceHash"] === "string" ? value["targetSourceHash"] : "";
+  const generationSignature = typeof value["generationSignature"] === "string" ? value["generationSignature"] : "";
+  const updatedAt = typeof value["updatedAt"] === "string" ? value["updatedAt"] : "";
+  if (targetEndMessageId < 0 || !targetSourceHash || !generationSignature || !updatedAt || !Array.isArray(value["entries"])) {
+    return void 0;
+  }
+  const entries = [];
+  let expectedStartMessageId = 0;
+  for (const candidate of value["entries"]) {
+    const entry = normalizeStageSummaryEntry(candidate);
+    if (!entry || entry.deleted || entry.sourceStartMessageId !== expectedStartMessageId || entry.sourceEndMessageId > targetEndMessageId) {
+      return void 0;
+    }
+    entries.push(entry);
+    expectedStartMessageId = entry.sourceEndMessageId + 1;
+  }
+  if (entries.length === 0) {
+    return void 0;
+  }
+  return {
+    targetEndMessageId,
+    targetSourceHash,
+    generationSignature,
+    entries,
+    totalDurationMs: Math.max(0, finiteInteger2(value["totalDurationMs"], 0)),
+    totalMessagesCovered: Math.max(0, finiteInteger2(value["totalMessagesCovered"], 0)),
+    updatedAt
+  };
+}
 function normalizeStageSummary(value) {
   const stored = isRecord6(value) ? value : {};
   const entries = [];
@@ -1879,11 +1915,15 @@ function normalizeStageSummary(value) {
     }
   }
   const latest = entries.at(-1);
+  const rebuildCheckpoint = normalizeStageSummaryRebuildCheckpoint(
+    stored["rebuildCheckpoint"]
+  );
   return {
     entries,
     coveredThroughMessageId: latest?.sourceEndMessageId ?? -1,
     coveredThroughHash: latest?.sourceHash ?? "",
-    ...latest ? { updatedAt: latest.updatedAt } : {}
+    ...latest ? { updatedAt: latest.updatedAt } : {},
+    ...rebuildCheckpoint ? { rebuildCheckpoint } : {}
   };
 }
 function normalizeStorySkeleton(value) {
@@ -2014,6 +2054,7 @@ var StoryStateRepository = class {
       if (state.storySkeleton.text) {
         state.storySkeleton.stale = true;
       }
+      delete state.stageSummary.rebuildCheckpoint;
       delete state.lastInspection;
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
@@ -2065,6 +2106,7 @@ var StoryStateRepository = class {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       manuallyEdited: true
     };
+    delete state.stageSummary.rebuildCheckpoint;
     markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
     const latest = state.stageSummary.entries.at(-1);
     state.stageSummary = {
@@ -2090,6 +2132,7 @@ var StoryStateRepository = class {
       throw new Error("\u8981\u5220\u9664\u7684\u9636\u6BB5\u603B\u7ED3\u4E0D\u5B58\u5728\uFF0C\u53EF\u80FD\u5DF2\u5728\u5176\u4ED6\u9875\u9762\u5220\u9664\u6216\u5931\u6548\u3002");
     }
     const entries = [...state.stageSummary.entries];
+    delete state.stageSummary.rebuildCheckpoint;
     markSkeletonStaleForSummary(state, existing.sourceEndMessageId);
     if (index === entries.length - 1) {
       entries.pop();
@@ -2365,6 +2408,22 @@ var LlmRequestTimeoutError = class extends Error {
 };
 function isLlmRequestTimeoutError(error) {
   return error instanceof LlmRequestTimeoutError;
+}
+function boundedAttemptError(error) {
+  return (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim().slice(0, 500);
+}
+var LlmRequestRetryError = class extends Error {
+  attemptErrors;
+  constructor(errors) {
+    const attemptErrors = errors.map(boundedAttemptError).filter(Boolean);
+    const [first = "\u672A\u77E5\u9519\u8BEF", retry = "\u672A\u77E5\u9519\u8BEF"] = attemptErrors;
+    super(`\u5185\u90E8LLM\u9996\u6B21\u8BF7\u6C42\u5931\u8D25\uFF1A${first}\uFF1B\u5F53\u524D\u6279\u6B21\u91CD\u8BD5\u5931\u8D25\uFF1A${retry}`);
+    this.name = "LlmRequestRetryError";
+    this.attemptErrors = attemptErrors;
+  }
+};
+function isLlmRequestRetryError(error) {
+  return error instanceof LlmRequestRetryError;
 }
 var RETRIABLE_UPSTREAM_TIMEOUT_STATUSES = /* @__PURE__ */ new Set([
   408,
@@ -3360,14 +3419,19 @@ async function completeNonEmptyDetailed(provider, request) {
   return second;
 }
 async function completeNonEmptyDetailedWithTimeoutRetry(provider, request) {
+  const priorErrors = [];
   for (let retry = 0; ; retry += 1) {
     try {
       return await completeNonEmptyDetailed(provider, request);
     } catch (error) {
       throwIfStoryEchoTaskCancelled(request.signal);
       if (!isLlmRequestTimeoutError(error) || retry >= MAX_LLM_TIMEOUT_RETRIES) {
+        if (priorErrors.length > 0) {
+          throw new LlmRequestRetryError([...priorErrors, error]);
+        }
         throw error;
       }
+      priorErrors.push(error);
       yieldBackgroundAtRetryBoundary();
       logger.warn(`\u5185\u90E8LLM\u8BF7\u6C42\u8D85\u65F6\uFF0C\u4EC5\u91CD\u8BD5\u5F53\u524D\u8BF7\u6C42\uFF08${retry + 1}/${MAX_LLM_TIMEOUT_RETRIES}\uFF09\u3002`);
     }
@@ -3432,6 +3496,7 @@ async function completeObservedInternalRequest(state, settings, request, context
   } catch (error) {
     const finishedAt = /* @__PURE__ */ new Date();
     const emptyResponse = isLlmEmptyResponseError(error) ? error : null;
+    const retryError = isLlmRequestRetryError(error) ? error : null;
     recordInternalLlmAttempt(state, {
       id,
       task: context.task,
@@ -3448,6 +3513,7 @@ async function completeObservedInternalRequest(state, settings, request, context
         completion: emptyResponse.completion,
         responseDiagnostic: emptyResponse.responseDiagnostic
       } : {},
+      ...retryError ? { attemptErrors: retryError.attemptErrors } : {},
       error: boundedError(error)
     });
     throw error;
@@ -3747,7 +3813,7 @@ async function buildStorySkeletonWorldInfoReferenceContext(messages, settings, c
 }
 
 // src/summary/constants.ts
-var SUMMARY_LLM_TIMEOUT_MS = 6e5;
+var SUMMARY_LLM_TIMEOUT_MS = 3e5;
 
 // src/summary/prompts.ts
 var STAGE_SUMMARY_SYSTEM_PROMPT = `\u4F60\u662F\u4E00\u540D\u4E13\u4E1A\u7684\u957F\u7BC7\u89D2\u8272\u626E\u6F14\u5267\u60C5\u8FDE\u7EED\u6027\u7F16\u8F91\u5668\u3002
@@ -3890,6 +3956,49 @@ function latestActiveSummaryText(entries) {
     }
   }
   return "";
+}
+function mergeDebugTraces(target, source) {
+  const byId = new Map(
+    [...target, ...source].map((trace) => [trace.id, trace])
+  );
+  return [...byId.values()].slice(-50);
+}
+async function rebuildGenerationSignature(context, settings) {
+  return sha256(JSON.stringify({
+    checkpointProtocolVersion: 1,
+    systemPrompt: STAGE_SUMMARY_SYSTEM_PROMPT,
+    identity: summaryIdentity(context),
+    targetTurnsPerUpdate: settings.summary.targetTurnsPerUpdate,
+    maxTokens: settings.summary.maxTokens,
+    reference: settings.summary.reference,
+    maximumSourceCharacters: MAX_SUMMARY_SOURCE_CHARACTERS,
+    model: settings.llm.provider === "main" ? { provider: "main", ...getMainConnectionIdentity(context) } : {
+      provider: settings.llm.provider,
+      baseUrl: settings.llm.custom.baseUrl.trim(),
+      model: settings.llm.custom.model.trim(),
+      fallbackToMain: settings.llm.custom.fallbackToMain
+    }
+  }));
+}
+async function rebuildCheckpointMatches(checkpoint, targetEndMessageId, targetSourceHash, generationSignature, chatSnapshot) {
+  if (checkpoint.targetEndMessageId !== targetEndMessageId || checkpoint.targetSourceHash !== targetSourceHash || checkpoint.generationSignature !== generationSignature || checkpoint.entries.length === 0) {
+    return false;
+  }
+  let expectedStartMessageId = 0;
+  for (const entry of checkpoint.entries) {
+    if (entry.deleted || entry.sourceStartMessageId !== expectedStartMessageId || entry.sourceEndMessageId > targetEndMessageId) {
+      return false;
+    }
+    const actualHash = await sha256(sourcePayload2(
+      chatSnapshot.slice(entry.sourceStartMessageId, entry.sourceEndMessageId + 1),
+      entry.sourceStartMessageId
+    ));
+    if (!entry.sourceHash || actualHash !== entry.sourceHash) {
+      return false;
+    }
+    expectedStartMessageId = entry.sourceEndMessageId + 1;
+  }
+  return true;
 }
 var StageSummaryService = class {
   queue = Promise.resolve();
@@ -4325,10 +4434,47 @@ ${prompt}`;
     }));
     const sourceSnapshot = state.stageSummary.entries.map((entry) => ({ ...entry }));
     const skeletonSnapshot = { ...state.storySkeleton };
-    const rebuiltEntries = [];
-    let start = 0;
-    let totalDurationMs = 0;
-    let totalMessagesCovered = 0;
+    const targetSourceHash = await sha256(sourcePayload2(chatSnapshot, 0));
+    const generationSignature = await rebuildGenerationSignature(context, settings);
+    const storedCheckpoint = state.stageSummary.rebuildCheckpoint;
+    const resumeCheckpoint = storedCheckpoint && await rebuildCheckpointMatches(
+      storedCheckpoint,
+      maximumEnd,
+      targetSourceHash,
+      generationSignature,
+      chatSnapshot
+    ) ? storedCheckpoint : void 0;
+    let rebuiltEntries = resumeCheckpoint ? structuredClone(resumeCheckpoint.entries) : [];
+    let start = rebuiltEntries.at(-1)?.sourceEndMessageId !== void 0 ? rebuiltEntries.at(-1).sourceEndMessageId + 1 : 0;
+    let totalDurationMs = resumeCheckpoint?.totalDurationMs ?? 0;
+    let totalMessagesCovered = rebuiltEntries.reduce(
+      (total, entry) => total + entry.sourceEndMessageId - entry.sourceStartMessageId + 1,
+      0
+    );
+    if (storedCheckpoint && !resumeCheckpoint) {
+      delete state.stageSummary.rebuildCheckpoint;
+      recordDebugTrace(state, settings.debug, "summary", "\u5168\u91CF\u91CD\u5EFA\u8349\u7A3F\u4E0E\u5F53\u524D\u539F\u6587\u6216\u8BBE\u7F6E\u4E0D\u5339\u914D\uFF0C\u5DF2\u4ECE\u5934\u5F00\u59CB\u3002", {
+        storedDraftEntries: storedCheckpoint.entries.length,
+        storedTargetEndMessageId: storedCheckpoint.targetEndMessageId,
+        currentTargetEndMessageId: maximumEnd
+      });
+      await this.stateRepository.save(state);
+    }
+    if (resumeCheckpoint) {
+      const latestDraft = rebuiltEntries.at(-1);
+      recordDebugTrace(state, settings.debug, "summary", "\u5DF2\u9A8C\u8BC1\u5E76\u6062\u590D\u5168\u91CF\u91CD\u5EFA\u8349\u7A3F\u3002", {
+        draftEntries: rebuiltEntries.length,
+        coveredThroughMessageId: latestDraft.sourceEndMessageId,
+        resumeFromMessageId: start
+      });
+      onProgress?.({
+        startMessageId: latestDraft.sourceStartMessageId,
+        endMessageId: latestDraft.sourceEndMessageId,
+        targetEndMessageId: maximumEnd,
+        resumed: true,
+        completedChunks: rebuiltEntries.length
+      });
+    }
     try {
       while (start <= maximumEnd) {
         const chunk = this.prepareNextChunk(
@@ -4358,10 +4504,41 @@ ${prompt}`;
           personaLabelSanitized: generated.personaLabelSanitized,
           previousSummaryCharacters: generated.previousSummaryCharacters
         });
+        const live2 = this.stateRepository.getExisting();
+        if (!live2 || live2.ownerChatId !== state.ownerChatId) {
+          throw new Error("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u8349\u7A3F\u671F\u95F4\u804A\u5929\u53D1\u751F\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
+        }
+        if (!sameStageSummaryEntries(live2.stageSummary.entries, sourceSnapshot)) {
+          throw new Error("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u8349\u7A3F\u671F\u95F4\u5DF2\u6709\u603B\u7ED3\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
+        }
+        if (!sameStorySkeletonRevision(live2.storySkeleton, skeletonSnapshot)) {
+          throw new Error("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u8349\u7A3F\u671F\u95F4\u5168\u5C40\u9AA8\u67B6\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
+        }
+        const liveTargetSourceHash = await sha256(sourcePayload2(
+          getContext().chat.slice(0, maximumEnd + 1),
+          0
+        ));
+        if (liveTargetSourceHash !== targetSourceHash) {
+          throw new Error("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u8349\u7A3F\u671F\u95F4\u5386\u53F2\u539F\u6587\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u53D6\u6D88\u4EFB\u52A1\u3002");
+        }
+        mergeInternalLlmAttempts(live2, state);
+        live2.debugTraces = mergeDebugTraces(live2.debugTraces, state.debugTraces);
+        live2.stageSummary.rebuildCheckpoint = {
+          targetEndMessageId: maximumEnd,
+          targetSourceHash,
+          generationSignature,
+          entries: structuredClone(rebuiltEntries),
+          totalDurationMs,
+          totalMessagesCovered,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        await this.stateRepository.save(live2);
+        state = live2;
         onProgress?.({
           startMessageId: chunk.startMessageId,
           endMessageId: chunk.endMessageId,
-          targetEndMessageId: maximumEnd
+          targetEndMessageId: maximumEnd,
+          completedChunks: rebuiltEntries.length
         });
         start = chunk.endMessageId + 1;
       }
@@ -4418,23 +4595,34 @@ ${prompt}`;
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
         try {
-          assertChatOwner(state);
-          await this.stateRepository.save(state);
+          const live2 = this.stateRepository.getExisting();
+          if (!live2 || live2.ownerChatId !== state.ownerChatId) {
+            throw new Error("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u53D6\u6D88\u8BCA\u65AD\u65F6\u804A\u5929\u5DF2\u5207\u6362\u3002");
+          }
+          mergeInternalLlmAttempts(live2, state);
+          live2.debugTraces = mergeDebugTraces(live2.debugTraces, state.debugTraces);
+          await this.stateRepository.save(live2);
         } catch (saveError) {
           logger.warn("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u53D6\u6D88\u8BCA\u65AD\u65F6\u804A\u5929\u5DF2\u5207\u6362\u6216\u5143\u6570\u636E\u4E0D\u53EF\u7528\u3002", saveError);
         }
         throw error;
       }
-      state.metrics.summaryFailures += 1;
-      recordDebugTrace(state, settings.debug, "error", "\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u539F\u6709\u7ED3\u679C\u3002", {
+      const live = this.stateRepository.getExisting();
+      const failureState = live && live.ownerChatId === state.ownerChatId ? live : state;
+      mergeInternalLlmAttempts(failureState, state);
+      failureState.debugTraces = mergeDebugTraces(failureState.debugTraces, state.debugTraces);
+      failureState.metrics.summaryFailures += 1;
+      recordDebugTrace(failureState, settings.debug, "error", "\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u539F\u6709\u7ED3\u679C\u3002", {
         error: error instanceof Error ? error.message : String(error),
         startMessageId: start,
         targetEndMessageId: maximumEnd,
-        completedDraftEntries: rebuiltEntries.length
+        completedDraftEntries: rebuiltEntries.length,
+        resumeFromMessageId: rebuiltEntries.at(-1)?.sourceEndMessageId !== void 0 ? rebuiltEntries.at(-1).sourceEndMessageId + 1 : 0
       });
       try {
-        assertChatOwner(state);
-        await this.stateRepository.save(state);
+        assertChatOwner(failureState);
+        await this.stateRepository.save(failureState);
+        state = failureState;
       } catch (saveError) {
         logger.warn("\u4FDD\u5B58\u9636\u6BB5\u603B\u7ED3\u91CD\u5EFA\u5931\u8D25\u7EDF\u8BA1\u65F6\u804A\u5929\u5DF2\u5207\u6362\u6216\u5143\u6570\u636E\u4E0D\u53EF\u7528\u3002", saveError);
       }
@@ -4496,7 +4684,8 @@ ${prompt}`;
           entries: state.stageSummary.entries,
           coveredThroughMessageId: generated.entry.sourceEndMessageId,
           coveredThroughHash: generated.entry.sourceHash,
-          updatedAt: generated.entry.updatedAt
+          updatedAt: generated.entry.updatedAt,
+          ...state.stageSummary.rebuildCheckpoint ? { rebuildCheckpoint: state.stageSummary.rebuildCheckpoint } : {}
         };
         state.metrics.summaryUpdates += 1;
         state.metrics.summaryMessagesCovered += generated.sourceMessageCount;
@@ -5597,8 +5786,20 @@ async function storyEchoGenerateInterceptor(chat, contextSize, abort, type) {
 }
 
 // src/debug/report.ts
+var RECENT_ERROR_REPORT_LIMIT = 5;
+function sanitizedReport(value, settings) {
+  const report = JSON.stringify(value, null, 2);
+  const redactions = [
+    settings.llm.custom.baseUrl.trim(),
+    settings.llm.custom.apiKey.trim()
+  ].filter(Boolean);
+  return redactions.reduce(
+    (sanitized, redaction) => sanitized.split(redaction).join("[REDACTED]"),
+    report
+  );
+}
 function buildDebugReport(state, settings) {
-  const report = JSON.stringify({
+  return sanitizedReport({
     storyEchoVersion: EXTENSION_VERSION,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     chat: {
@@ -5609,7 +5810,13 @@ function buildDebugReport(state, settings) {
         updatedAt: state.stageSummary.updatedAt ?? null,
         entryCount: state.stageSummary.entries.filter((entry) => !entry.deleted).length,
         deletedEntryCount: state.stageSummary.entries.filter((entry) => entry.deleted).length,
-        entries: state.stageSummary.entries
+        entries: state.stageSummary.entries,
+        rebuildCheckpoint: state.stageSummary.rebuildCheckpoint ? {
+          targetEndMessageId: state.stageSummary.rebuildCheckpoint.targetEndMessageId,
+          draftEntryCount: state.stageSummary.rebuildCheckpoint.entries.length,
+          coveredThroughMessageId: state.stageSummary.rebuildCheckpoint.entries.at(-1)?.sourceEndMessageId ?? -1,
+          updatedAt: state.stageSummary.rebuildCheckpoint.updatedAt
+        } : null
       },
       storySkeleton: state.storySkeleton
     },
@@ -5627,15 +5834,26 @@ function buildDebugReport(state, settings) {
     },
     lastInspection: state.lastInspection ?? null,
     recentDebugTraces: state.debugTraces
-  }, null, 2);
-  const redactions = [
-    settings.llm.custom.baseUrl.trim(),
-    settings.llm.custom.apiKey.trim()
-  ].filter(Boolean);
-  return redactions.reduce(
-    (sanitized, value) => sanitized.split(value).join("[REDACTED]"),
-    report
-  );
+  }, settings);
+}
+function buildRecentErrorReport(state, settings, limit = RECENT_ERROR_REPORT_LIMIT) {
+  const retained = Math.max(1, Math.min(20, Math.floor(limit)));
+  const checkpoint = state.stageSummary.rebuildCheckpoint;
+  return sanitizedReport({
+    storyEchoVersion: EXTENSION_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    llmProvider: settings.llm.provider,
+    summaryMaxTokens: settings.summary.maxTokens,
+    taskQueue: storyEchoTaskCoordinator.snapshot(),
+    rebuildCheckpoint: checkpoint ? {
+      targetEndMessageId: checkpoint.targetEndMessageId,
+      draftEntryCount: checkpoint.entries.length,
+      coveredThroughMessageId: checkpoint.entries.at(-1)?.sourceEndMessageId ?? -1,
+      updatedAt: checkpoint.updatedAt
+    } : null,
+    recentInternalLlmAttempts: state.recentInternalLlmAttempts.slice(-retained),
+    recentErrorTraces: state.debugTraces.filter((trace) => trace.stage === "error").slice(-retained)
+  }, settings);
 }
 
 // src/llm/model-list.ts
@@ -6757,13 +6975,21 @@ function stageSummaryDeliveryStatus(entry, activeIndex, activeEntryCount, window
   }
   return "\u968F\u8BF7\u6C42\u643A\u5E26\uFF08\u5F85\u6C47\u5165\u9AA8\u67B6\uFF09";
 }
-function stageSummaryFullRebuildConfirmation(hasUnsavedChanges) {
+function stageSummaryFullRebuildConfirmation(hasUnsavedChanges, checkpoint) {
   return [
     ...hasUnsavedChanges ? ["\u5F53\u524D\u8FD8\u6709\u5C1A\u672A\u4FDD\u5B58\u7684\u9636\u6BB5\u603B\u7ED3\u6216\u9AA8\u67B6\u4FEE\u6539\uFF0C\u7EE7\u7EED\u4F1A\u653E\u5F03\u8FD9\u4E9B\u4FEE\u6539\u3002"] : [],
     "\u5C06\u4F9D\u636E\u5F53\u524D\u804A\u5929\u539F\u6587\u91CD\u65B0\u751F\u6210\u5168\u90E8\u53EF\u5F52\u6863\u9636\u6BB5\u603B\u7ED3\uFF0C\u518D\u7528\u65B0\u603B\u7ED3\u5E72\u51C0\u91CD\u5EFA\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u3002",
+    ...checkpoint ? [`\u68C0\u6D4B\u5230 ${checkpoint.entries.length} \u6279\u5DF2\u4FDD\u5B58\u7684\u91CD\u5EFA\u8349\u7A3F\uFF1B\u539F\u6587\u4E0E\u8BBE\u7F6E\u6821\u9A8C\u901A\u8FC7\u540E\u5C06\u4ECE\u6D88\u606F ${(checkpoint.entries.at(-1)?.sourceEndMessageId ?? -1) + 1} \u7EE7\u7EED\uFF0C\u5426\u5219\u81EA\u52A8\u4ECE\u5934\u5F00\u59CB\u3002`] : [],
     "\u73B0\u6709\u9636\u6BB5\u603B\u7ED3\u7684\u4EBA\u5DE5\u4FEE\u6539\u4F1A\u88AB\u66FF\u6362\uFF1B\u804A\u5929\u539F\u6587\u4E0D\u4F1A\u6539\u53D8\u3002\u9636\u6BB5\u603B\u7ED3\u4F1A\u5728\u5168\u90E8\u6210\u529F\u540E\u4E00\u6B21\u6027\u66FF\u6362\uFF0C\u9AA8\u67B6\u91CD\u5EFA\u5931\u8D25\u65F6\u65B0\u603B\u7ED3\u4ECD\u4F1A\u4FDD\u7559\u4E14\u65E7\u9AA8\u67B6\u505C\u6B62\u6CE8\u5165\u3002",
     "\u8FD9\u53EF\u80FD\u9700\u8981\u591A\u6B21 LLM \u8BF7\u6C42\uFF0C\u786E\u5B9A\u7EE7\u7EED\u5417\uFF1F"
   ].join("\n\n");
+}
+function stageSummaryRebuildCheckpointText(checkpoint) {
+  if (!checkpoint) {
+    return "\u5168\u91CF\u91CD\u5EFA\u4E2D\u65AD\u65F6\u4F1A\u4FDD\u7559\u5DF2\u5B8C\u6210\u6279\u6B21\uFF1B\u6B63\u5F0F\u603B\u7ED3\u4ECD\u5728\u5168\u90E8\u6210\u529F\u540E\u4E00\u6B21\u6027\u66FF\u6362\u3002";
+  }
+  const latest = checkpoint.entries.at(-1);
+  return `\u5DF2\u4FDD\u7559 ${checkpoint.entries.length} \u6279\u91CD\u5EFA\u8349\u7A3F\uFF0C\u8986\u76D6\u6D88\u606F 0\uFF5E${latest?.sourceEndMessageId ?? -1}\uFF1B\u518D\u6B21\u91CD\u5EFA\u4F1A\u6821\u9A8C\u540E\u7EE7\u7EED\u3002`;
 }
 function stageSummaryRegenerationConfirmation(entry, hasUnsavedChanges, invalidatesSkeleton) {
   return [
@@ -6874,6 +7100,9 @@ function stageSummaryManagerTemplate() {
         <button id="story-echo-summary-rebuild-all" class="menu_button story-echo-summary-rebuild-all" type="button">
           <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>\u91CD\u5EFA\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u4E0E\u9AA8\u67B6</span>
         </button>
+      </div>
+      <div id="story-echo-summary-rebuild-status" class="story-echo-summary-count" role="status" aria-live="polite">
+        ${stageSummaryRebuildCheckpointText()}
       </div>
       <p class="story-echo-hint">
         \u6700\u8FD1 S \u6761\u4F1A\u968F\u8BF7\u6C42\u643A\u5E26\uFF1B\u66F4\u8001\u7684\u603B\u7ED3\u5728\u9AA8\u67B6\u5438\u6536\u540E\u6807\u8BB0\u4E3A\u201C\u5DF2\u6C47\u5165\u9AA8\u67B6\u201D\u3002\u5168\u90E8\u91CD\u5EFA\u4F1A\u4F9D\u636E\u5F53\u524D\u804A\u5929\u539F\u6587\u91CD\u65B0\u751F\u6210\u6240\u6709\u53EF\u5F52\u6863\u9636\u6BB5\u603B\u7ED3\uFF0C\u9636\u6BB5\u603B\u7ED3\u4F1A\u5728\u5168\u90E8\u6210\u529F\u540E\u4E00\u6B21\u6027\u66FF\u6362\uFF0C\u518D\u4ECE\u65B0\u603B\u7ED3\u5E72\u51C0\u91CD\u5EFA\u9AA8\u67B6\u3002
@@ -7100,8 +7329,10 @@ var StageSummaryMetadataManager = class {
       const button = event.currentTarget;
       const label = button.querySelector("span");
       const idleLabel = label?.textContent ?? "\u91CD\u5EFA\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u4E0E\u9AA8\u67B6";
+      const stateBeforeRebuild = this.repository.getExisting();
       const confirmation = stageSummaryFullRebuildConfirmation(
-        this.editorDirty || this.skeletonDirty
+        this.editorDirty || this.skeletonDirty,
+        stateBeforeRebuild?.stageSummary.rebuildCheckpoint
       );
       if (!await showConfirmation("\u91CD\u5EFA\u5168\u90E8\u9636\u6BB5\u603B\u7ED3\u4E0E\u9AA8\u67B6", confirmation)) {
         return;
@@ -7150,11 +7381,11 @@ var StageSummaryMetadataManager = class {
               targetEndMessageId,
               (progress) => {
                 if (label) {
-                  label.textContent = `\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
+                  label.textContent = progress.resumed ? `\u5DF2\u6062\u590D ${progress.completedChunks ?? 0} \u6279\uFF0C\u7EE7\u7EED\u91CD\u5EFA\u2026` : `\u9636\u6BB5\u603B\u7ED3\uFF1A\u5DF2\u5B8C\u6210 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
                 }
                 this.setSkeletonActivityStatus(
                   panel,
-                  `\u6B63\u5728\u91CD\u5EFA\u9636\u6BB5\u603B\u7ED3\uFF1A\u6D88\u606F ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}\uFF1B\u5B8C\u6210\u540E\u5C06\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026`
+                  progress.resumed ? `\u5DF2\u6062\u590D ${progress.completedChunks ?? 0} \u6279\u8349\u7A3F\uFF0C\u5C06\u4ECE\u6D88\u606F ${progress.endMessageId + 1} \u7EE7\u7EED\uFF1B\u5B8C\u6210\u540E\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026` : `\u6B63\u5728\u91CD\u5EFA\u9636\u6BB5\u603B\u7ED3\uFF1A\u5DF2\u5B8C\u6210 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}\uFF1B\u5B8C\u6210\u540E\u5C06\u91CD\u65B0\u751F\u6210\u5168\u5C40\u5267\u60C5\u9AA8\u67B6\u2026`
                 );
               }
             );
@@ -7192,7 +7423,8 @@ var StageSummaryMetadataManager = class {
           this.resetSelection();
           this.skeletonDirty = false;
         }
-        notify.error(summariesRebuilt ? `\u9636\u6BB5\u603B\u7ED3\u5DF2\u91CD\u5EFA\uFF0C\u4F46\u9AA8\u67B6\u91CD\u5EFA\u5931\u8D25\u5E76\u5DF2\u505C\u6B62\u6CE8\u5165\uFF1A${message}` : message);
+        const checkpoint = this.repository.getExisting()?.stageSummary.rebuildCheckpoint;
+        notify.error(summariesRebuilt ? `\u9636\u6BB5\u603B\u7ED3\u5DF2\u91CD\u5EFA\uFF0C\u4F46\u9AA8\u67B6\u91CD\u5EFA\u5931\u8D25\u5E76\u5DF2\u505C\u6B62\u6CE8\u5165\uFF1A${message}` : checkpoint ? `${message}\uFF1B\u5DF2\u4FDD\u7559 ${checkpoint.entries.length} \u6279\u8349\u7A3F\uFF0C\u518D\u6B21\u70B9\u51FB\u53EF\u4ECE\u6D88\u606F ${(checkpoint.entries.at(-1)?.sourceEndMessageId ?? -1) + 1} \u7EE7\u7EED\u3002` : message);
       } finally {
         try {
           await onChanged();
@@ -7392,6 +7624,7 @@ ${consequence}
     const skeletonUpdate = element2(panel, "#story-echo-skeleton-update");
     const skeletonRebuild = element2(panel, "#story-echo-skeleton-rebuild");
     const summaryRebuildAll = element2(panel, "#story-echo-summary-rebuild-all");
+    const summaryRebuildStatus = element2(panel, "#story-echo-summary-rebuild-status");
     const skeletonStatus = element2(panel, "#story-echo-skeleton-status");
     const skeletonBusy = Boolean(this.skeletonActivityStatus) || this.summaryRegenerationActive;
     skeletonText.disabled = !skeleton?.text || skeletonBusy;
@@ -7399,6 +7632,9 @@ ${consequence}
     skeletonUpdate.disabled = !state || skeletonBusy;
     skeletonRebuild.disabled = !state || skeletonBusy;
     summaryRebuildAll.disabled = !state || skeletonBusy;
+    summaryRebuildStatus.textContent = stageSummaryRebuildCheckpointText(
+      state?.stageSummary.rebuildCheckpoint
+    );
     skeletonStatus.classList.toggle(
       "story-echo-skeleton-status-active",
       Boolean(this.skeletonActivityStatus)
@@ -7876,6 +8112,7 @@ function panelTemplate() {
 
         <div class="story-echo-diagnostics-actions">
           <button id="story-echo-copy-report" class="menu_button" type="button"><i class="fa-solid fa-copy"></i><span>\u590D\u5236\u8BCA\u65AD\u62A5\u544A</span></button>
+          <button id="story-echo-copy-recent-errors" class="menu_button" type="button"><i class="fa-solid fa-triangle-exclamation"></i><span>\u590D\u5236\u6700\u8FD1\u9519\u8BEF</span></button>
           <button id="story-echo-reset-stats" class="menu_button" type="button"><i class="fa-solid fa-eraser"></i><span>\u6E05\u7A7A\u7EDF\u8BA1\u4E0E\u8F68\u8FF9</span></button>
         </div>
       </div>
@@ -8099,6 +8336,19 @@ function bindSettings(panel) {
       notify.success("\u8BCA\u65AD\u62A5\u544A\u5DF2\u590D\u5236\u3002");
     } catch (error) {
       notify.error(error instanceof Error ? error.message : "\u590D\u5236\u8BCA\u65AD\u62A5\u544A\u5931\u8D25\u3002");
+    }
+  });
+  element3(panel, "#story-echo-copy-recent-errors").addEventListener("click", async () => {
+    const state = stateRepository2.getExisting();
+    if (!state) {
+      notify.info("\u5F53\u524D\u804A\u5929\u5C1A\u65E0 StoryEcho \u72B6\u6001\u3002");
+      return;
+    }
+    try {
+      await copyText(buildRecentErrorReport(state, settingsRepository2.get()));
+      notify.success("\u6700\u8FD1 5 \u6761\u5185\u90E8\u8BF7\u6C42\u4E0E\u9519\u8BEF\u5DF2\u590D\u5236\u3002");
+    } catch (error) {
+      notify.error(error instanceof Error ? error.message : "\u590D\u5236\u6700\u8FD1\u9519\u8BEF\u5931\u8D25\u3002");
     }
   });
   element3(panel, "#story-echo-reset-stats").addEventListener("click", async (event) => {

@@ -164,4 +164,29 @@ describe('completeWithConfiguredProvider', () => {
     })).rejects.toThrow(/300000ms/);
     expect(generateRaw).toHaveBeenCalledTimes(2);
   });
+
+  it('preserves both the first timeout and the retry failure', async () => {
+    const generateRaw = vi.fn()
+      .mockRejectedValueOnce(new LlmRequestTimeoutError(300_000))
+      .mockRejectedValueOnce(new Error('主连接流式请求返回了错误。'));
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ generateRaw }),
+    });
+
+    const error = await completeWithConfiguredProvider(DEFAULT_SETTINGS, {
+      system: 'system',
+      prompt: 'current-batch',
+    }).then(() => null, (reason: unknown) => reason);
+
+    expect(error).toMatchObject({
+      attemptErrors: [
+        'LLM请求超时（300000ms）。',
+        '主连接流式请求返回了错误。',
+      ],
+    });
+    expect(error).toHaveProperty(
+      'message',
+      expect.stringContaining('当前批次重试失败'),
+    );
+  });
 });

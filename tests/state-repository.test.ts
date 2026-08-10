@@ -115,6 +115,15 @@ describe('StoryStateRepository', () => {
           },
           entry(5, 6),
         ],
+        rebuildCheckpoint: {
+          targetEndMessageId: 5,
+          targetSourceHash: 'target-source',
+          generationSignature: 'generation-signature',
+          entries: [entry(0, 1), entry(2, 3)],
+          totalDurationMs: 1_500.9,
+          totalMessagesCovered: 4,
+          updatedAt: '2026-02-05T01:00:00.000Z',
+        },
       },
       storySkeleton: {
         text: ' skeleton ',
@@ -159,6 +168,11 @@ describe('StoryStateRepository', () => {
           requestedMaxTokens: 3_000,
           agentActiveAtStart: true,
           agentActiveAtEnd: false,
+          attemptErrors: [
+            ' first timeout ',
+            42,
+            ' retry failed ',
+          ],
           completion: {
             provider: 'main',
             requestedMaxTokens: 3_000,
@@ -209,6 +223,17 @@ describe('StoryStateRepository', () => {
             deleted: true,
           },
         ],
+        rebuildCheckpoint: {
+          targetEndMessageId: 5,
+          targetSourceHash: 'target-source',
+          generationSignature: 'generation-signature',
+          entries: [
+            { text: 'summary-0', sourceStartMessageId: 0, sourceEndMessageId: 1 },
+            { text: 'summary-2', sourceStartMessageId: 2, sourceEndMessageId: 3 },
+          ],
+          totalDurationMs: 1_500,
+          totalMessagesCovered: 4,
+        },
       },
       storySkeleton: {
         text: 'skeleton',
@@ -237,6 +262,7 @@ describe('StoryStateRepository', () => {
         durationMs: 1_000,
         agentActiveAtStart: true,
         agentActiveAtEnd: false,
+        attemptErrors: ['first timeout', 'retry failed'],
         completion: {
           finishReason: 'length',
           completionTokens: 125,
@@ -314,6 +340,20 @@ describe('StoryStateRepository', () => {
 
   it('clones derived context for a branch and marks its skeleton stale', async () => {
     const stored = chatState({
+      stageSummary: {
+        entries: [],
+        coveredThroughMessageId: -1,
+        coveredThroughHash: '',
+        rebuildCheckpoint: {
+          targetEndMessageId: 1,
+          targetSourceHash: 'target-source',
+          generationSignature: 'generation-signature',
+          entries: [entry(0, 1)],
+          totalDurationMs: 100,
+          totalMessagesCovered: 2,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
       ownerChatId: 'parent',
       storySkeleton: {
         text: 'parent skeleton',
@@ -328,6 +368,7 @@ describe('StoryStateRepository', () => {
     expect(state?.storySkeleton.stale).toBe(true);
     expect(state?.metrics.summaryUpdates).toBe(0);
     expect(state?.recentInternalLlmAttempts).toEqual([]);
+    expect(state?.stageSummary.rebuildCheckpoint).toBeUndefined();
   });
 
   it('edits and deletes summaries while invalidating a covered skeleton', async () => {

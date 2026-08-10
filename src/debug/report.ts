@@ -2,11 +2,25 @@ import { EXTENSION_VERSION } from '../core/constants';
 import type { StoryEchoChatState, StoryEchoSettings } from '../core/types';
 import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 
+export const RECENT_ERROR_REPORT_LIMIT = 5;
+
+function sanitizedReport(value: unknown, settings: StoryEchoSettings): string {
+  const report = JSON.stringify(value, null, 2);
+  const redactions = [
+    settings.llm.custom.baseUrl.trim(),
+    settings.llm.custom.apiKey.trim(),
+  ].filter(Boolean);
+  return redactions.reduce(
+    (sanitized, redaction) => sanitized.split(redaction).join('[REDACTED]'),
+    report,
+  );
+}
+
 export function buildDebugReport(
   state: StoryEchoChatState,
   settings: StoryEchoSettings,
 ): string {
-  const report = JSON.stringify({
+  return sanitizedReport({
     storyEchoVersion: EXTENSION_VERSION,
     generatedAt: new Date().toISOString(),
     chat: {
@@ -18,6 +32,15 @@ export function buildDebugReport(
         entryCount: state.stageSummary.entries.filter((entry) => !entry.deleted).length,
         deletedEntryCount: state.stageSummary.entries.filter((entry) => entry.deleted).length,
         entries: state.stageSummary.entries,
+        rebuildCheckpoint: state.stageSummary.rebuildCheckpoint
+          ? {
+              targetEndMessageId: state.stageSummary.rebuildCheckpoint.targetEndMessageId,
+              draftEntryCount: state.stageSummary.rebuildCheckpoint.entries.length,
+              coveredThroughMessageId: state.stageSummary.rebuildCheckpoint.entries.at(-1)
+                ?.sourceEndMessageId ?? -1,
+              updatedAt: state.stageSummary.rebuildCheckpoint.updatedAt,
+            }
+          : null,
       },
       storySkeleton: state.storySkeleton,
     },
@@ -35,13 +58,33 @@ export function buildDebugReport(
     },
     lastInspection: state.lastInspection ?? null,
     recentDebugTraces: state.debugTraces,
-  }, null, 2);
-  const redactions = [
-    settings.llm.custom.baseUrl.trim(),
-    settings.llm.custom.apiKey.trim(),
-  ].filter(Boolean);
-  return redactions.reduce(
-    (sanitized, value) => sanitized.split(value).join('[REDACTED]'),
-    report,
-  );
+  }, settings);
+}
+
+export function buildRecentErrorReport(
+  state: StoryEchoChatState,
+  settings: StoryEchoSettings,
+  limit = RECENT_ERROR_REPORT_LIMIT,
+): string {
+  const retained = Math.max(1, Math.min(20, Math.floor(limit)));
+  const checkpoint = state.stageSummary.rebuildCheckpoint;
+  return sanitizedReport({
+    storyEchoVersion: EXTENSION_VERSION,
+    generatedAt: new Date().toISOString(),
+    llmProvider: settings.llm.provider,
+    summaryMaxTokens: settings.summary.maxTokens,
+    taskQueue: storyEchoTaskCoordinator.snapshot(),
+    rebuildCheckpoint: checkpoint
+      ? {
+          targetEndMessageId: checkpoint.targetEndMessageId,
+          draftEntryCount: checkpoint.entries.length,
+          coveredThroughMessageId: checkpoint.entries.at(-1)?.sourceEndMessageId ?? -1,
+          updatedAt: checkpoint.updatedAt,
+        }
+      : null,
+    recentInternalLlmAttempts: state.recentInternalLlmAttempts.slice(-retained),
+    recentErrorTraces: state.debugTraces
+      .filter((trace) => trace.stage === 'error')
+      .slice(-retained),
+  }, settings);
 }

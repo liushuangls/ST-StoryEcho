@@ -10,7 +10,7 @@ import {
   BackgroundYieldForForegroundError,
   storyEchoTaskCoordinator,
 } from '../runtime/task-coordinator';
-import { isLlmRequestTimeoutError } from './errors';
+import { isLlmRequestTimeoutError, LlmRequestRetryError } from './errors';
 import { MainLlmProvider } from './main-provider';
 import { createLlmProvider } from './provider-factory';
 
@@ -56,14 +56,19 @@ async function completeNonEmptyWithTimeoutRetry(
   provider: LlmProvider,
   request: LlmRequest,
 ): Promise<string> {
+  const priorErrors: unknown[] = [];
   for (let retry = 0; ; retry += 1) {
     try {
       return await completeNonEmpty(provider, request);
     } catch (error) {
       throwIfStoryEchoTaskCancelled(request.signal);
       if (!isLlmRequestTimeoutError(error) || retry >= MAX_LLM_TIMEOUT_RETRIES) {
+        if (priorErrors.length > 0) {
+          throw new LlmRequestRetryError([...priorErrors, error]);
+        }
         throw error;
       }
+      priorErrors.push(error);
       yieldBackgroundAtRetryBoundary();
       logger.warn(`内部LLM请求超时，仅重试当前请求（${retry + 1}/${MAX_LLM_TIMEOUT_RETRIES}）。`);
     }
@@ -119,14 +124,19 @@ async function completeNonEmptyDetailedWithTimeoutRetry(
   provider: LlmProvider,
   request: LlmRequest,
 ): Promise<LlmCompletionResult> {
+  const priorErrors: unknown[] = [];
   for (let retry = 0; ; retry += 1) {
     try {
       return await completeNonEmptyDetailed(provider, request);
     } catch (error) {
       throwIfStoryEchoTaskCancelled(request.signal);
       if (!isLlmRequestTimeoutError(error) || retry >= MAX_LLM_TIMEOUT_RETRIES) {
+        if (priorErrors.length > 0) {
+          throw new LlmRequestRetryError([...priorErrors, error]);
+        }
         throw error;
       }
+      priorErrors.push(error);
       yieldBackgroundAtRetryBoundary();
       logger.warn(`内部LLM请求超时，仅重试当前请求（${retry + 1}/${MAX_LLM_TIMEOUT_RETRIES}）。`);
     }

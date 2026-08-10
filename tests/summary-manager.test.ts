@@ -9,6 +9,7 @@ import {
   stageSummaryFullRebuildConfirmation,
   stageSummaryKey,
   stageSummaryManagerTemplate,
+  stageSummaryRebuildCheckpointText,
   stageSummaryRegenerationConfirmation,
   storySkeletonGenerationStatusText,
   toggleSummarySelection,
@@ -61,6 +62,28 @@ describe('stage summary manager selection', () => {
       .toContain('尚未保存的阶段总结或骨架修改');
     expect(stageSummaryFullRebuildConfirmation(false))
       .not.toContain('尚未保存的阶段总结或骨架修改');
+    expect(stageSummaryFullRebuildConfirmation(false, {
+      targetEndMessageId: 29,
+      targetSourceHash: 'target-source',
+      generationSignature: 'generation-signature',
+      entries: [summary(0), summary(1)],
+      totalDurationMs: 100,
+      totalMessagesCovered: 20,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    })).toContain('检测到 2 批已保存的重建草稿');
+  });
+
+  it('describes resumable full-rebuild drafts without presenting them as active', () => {
+    expect(stageSummaryRebuildCheckpointText()).toContain('正式总结仍在全部成功后一次性替换');
+    expect(stageSummaryRebuildCheckpointText({
+      targetEndMessageId: 29,
+      targetSourceHash: 'target-source',
+      generationSignature: 'generation-signature',
+      entries: [summary(0), summary(1)],
+      totalDurationMs: 100,
+      totalMessagesCovered: 20,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    })).toBe('已保留 2 批重建草稿，覆盖消息 0～19；再次重建会校验后继续。');
   });
 
   it('explains the atomic single-summary regeneration consequences', () => {
@@ -138,6 +161,7 @@ describe('stage summary manager pagination and template', () => {
     expect(template).not.toContain('必须保留六个分级标题');
     expect(template).toContain('id="story-echo-summary-search"');
     expect(template).toContain('id="story-echo-summary-rebuild-all"');
+    expect(template).toContain('id="story-echo-summary-rebuild-status"');
     expect(template).toContain('重建全部阶段总结与骨架');
     expect(template).toContain('全部成功后一次性替换');
     expect(template).toContain('id="story-echo-summary-list"');

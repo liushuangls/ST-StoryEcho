@@ -2,7 +2,9 @@ import { sha256 } from '../core/hash';
 import { logger } from '../core/logger';
 import type {
   StageSummaryEntry,
+  StageSummaryRebuildCheckpoint,
   StoryEchoChatState,
+  StoryEchoDebugTrace,
   StoryEchoSettings,
   StorySkeleton,
   TavernChatMessage,
@@ -14,7 +16,12 @@ import { countCompletedTurns, planNextChunk } from '../history/chunk-planner';
 import { SourceRevisionCache } from '../history/source-revision-cache';
 import { firstStoryPhaseBoundary } from '../history/story-phase';
 import { completeObservedInternalRequest } from '../llm/observed-completion';
-import { getContext, getCurrentChatId, type SillyTavernContext } from '../platform/sillytavern';
+import {
+  getContext,
+  getCurrentChatId,
+  getMainConnectionIdentity,
+  type SillyTavernContext,
+} from '../platform/sillytavern';
 import { estimateTokens } from '../prompt/render';
 import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
@@ -34,6 +41,8 @@ export interface StageSummaryProgress {
   startMessageId: number;
   endMessageId: number;
   targetEndMessageId: number;
+  resumed?: boolean;
+  completedChunks?: number;
 }
 
 export interface StageSummaryRunResult {
@@ -171,6 +180,75 @@ function latestActiveSummaryText(entries: readonly StageSummaryEntry[]): string 
     }
   }
   return '';
+}
+
+function mergeDebugTraces(
+  target: readonly StoryEchoDebugTrace[],
+  source: readonly StoryEchoDebugTrace[],
+): StoryEchoDebugTrace[] {
+  const byId = new Map(
+    [...target, ...source].map((trace) => [trace.id, trace] as const),
+  );
+  return [...byId.values()].slice(-50);
+}
+
+async function rebuildGenerationSignature(
+  context: SillyTavernContext,
+  settings: StoryEchoSettings,
+): Promise<string> {
+  return sha256(JSON.stringify({
+    checkpointProtocolVersion: 1,
+    systemPrompt: STAGE_SUMMARY_SYSTEM_PROMPT,
+    identity: summaryIdentity(context),
+    targetTurnsPerUpdate: settings.summary.targetTurnsPerUpdate,
+    maxTokens: settings.summary.maxTokens,
+    reference: settings.summary.reference,
+    maximumSourceCharacters: MAX_SUMMARY_SOURCE_CHARACTERS,
+    model: settings.llm.provider === 'main'
+      ? { provider: 'main', ...getMainConnectionIdentity(context) }
+      : {
+          provider: settings.llm.provider,
+          baseUrl: settings.llm.custom.baseUrl.trim(),
+          model: settings.llm.custom.model.trim(),
+          fallbackToMain: settings.llm.custom.fallbackToMain,
+        },
+  }));
+}
+
+async function rebuildCheckpointMatches(
+  checkpoint: StageSummaryRebuildCheckpoint,
+  targetEndMessageId: number,
+  targetSourceHash: string,
+  generationSignature: string,
+  chatSnapshot: readonly TavernChatMessage[],
+): Promise<boolean> {
+  if (
+    checkpoint.targetEndMessageId !== targetEndMessageId ||
+    checkpoint.targetSourceHash !== targetSourceHash ||
+    checkpoint.generationSignature !== generationSignature ||
+    checkpoint.entries.length === 0
+  ) {
+    return false;
+  }
+  let expectedStartMessageId = 0;
+  for (const entry of checkpoint.entries) {
+    if (
+      entry.deleted ||
+      entry.sourceStartMessageId !== expectedStartMessageId ||
+      entry.sourceEndMessageId > targetEndMessageId
+    ) {
+      return false;
+    }
+    const actualHash = await sha256(sourcePayload(
+      chatSnapshot.slice(entry.sourceStartMessageId, entry.sourceEndMessageId + 1),
+      entry.sourceStartMessageId,
+    ));
+    if (!entry.sourceHash || actualHash !== entry.sourceHash) {
+      return false;
+    }
+    expectedStartMessageId = entry.sourceEndMessageId + 1;
+  }
+  return true;
 }
 
 export class StageSummaryService {
@@ -706,10 +784,54 @@ export class StageSummaryService {
       }));
     const sourceSnapshot = state.stageSummary.entries.map((entry) => ({ ...entry }));
     const skeletonSnapshot = { ...state.storySkeleton };
-    const rebuiltEntries: StageSummaryEntry[] = [];
-    let start = 0;
-    let totalDurationMs = 0;
-    let totalMessagesCovered = 0;
+    const targetSourceHash = await sha256(sourcePayload(chatSnapshot, 0));
+    const generationSignature = await rebuildGenerationSignature(context, settings);
+    const storedCheckpoint = state.stageSummary.rebuildCheckpoint;
+    const resumeCheckpoint = storedCheckpoint && await rebuildCheckpointMatches(
+      storedCheckpoint,
+      maximumEnd,
+      targetSourceHash,
+      generationSignature,
+      chatSnapshot,
+    )
+      ? storedCheckpoint
+      : undefined;
+    let rebuiltEntries: StageSummaryEntry[] = resumeCheckpoint
+      ? structuredClone(resumeCheckpoint.entries)
+      : [];
+    let start = rebuiltEntries.at(-1)?.sourceEndMessageId !== undefined
+      ? rebuiltEntries.at(-1)!.sourceEndMessageId + 1
+      : 0;
+    let totalDurationMs = resumeCheckpoint?.totalDurationMs ?? 0;
+    let totalMessagesCovered = rebuiltEntries.reduce(
+      (total, entry) => total + entry.sourceEndMessageId - entry.sourceStartMessageId + 1,
+      0,
+    );
+
+    if (storedCheckpoint && !resumeCheckpoint) {
+      delete state.stageSummary.rebuildCheckpoint;
+      recordDebugTrace(state, settings.debug, 'summary', '全量重建草稿与当前原文或设置不匹配，已从头开始。', {
+        storedDraftEntries: storedCheckpoint.entries.length,
+        storedTargetEndMessageId: storedCheckpoint.targetEndMessageId,
+        currentTargetEndMessageId: maximumEnd,
+      });
+      await this.stateRepository.save(state);
+    }
+    if (resumeCheckpoint) {
+      const latestDraft = rebuiltEntries.at(-1)!;
+      recordDebugTrace(state, settings.debug, 'summary', '已验证并恢复全量重建草稿。', {
+        draftEntries: rebuiltEntries.length,
+        coveredThroughMessageId: latestDraft.sourceEndMessageId,
+        resumeFromMessageId: start,
+      });
+      onProgress?.({
+        startMessageId: latestDraft.sourceStartMessageId,
+        endMessageId: latestDraft.sourceEndMessageId,
+        targetEndMessageId: maximumEnd,
+        resumed: true,
+        completedChunks: rebuiltEntries.length,
+      });
+    }
 
     try {
       while (start <= maximumEnd) {
@@ -740,10 +862,41 @@ export class StageSummaryService {
           personaLabelSanitized: generated.personaLabelSanitized,
           previousSummaryCharacters: generated.previousSummaryCharacters,
         });
+        const live = this.stateRepository.getExisting();
+        if (!live || live.ownerChatId !== state.ownerChatId) {
+          throw new Error('保存阶段总结重建草稿期间聊天发生切换，已取消任务。');
+        }
+        if (!sameStageSummaryEntries(live.stageSummary.entries, sourceSnapshot)) {
+          throw new Error('保存阶段总结重建草稿期间已有总结发生变化，已取消任务。');
+        }
+        if (!sameStorySkeletonRevision(live.storySkeleton, skeletonSnapshot)) {
+          throw new Error('保存阶段总结重建草稿期间全局骨架发生变化，已取消任务。');
+        }
+        const liveTargetSourceHash = await sha256(sourcePayload(
+          getContext().chat.slice(0, maximumEnd + 1),
+          0,
+        ));
+        if (liveTargetSourceHash !== targetSourceHash) {
+          throw new Error('保存阶段总结重建草稿期间历史原文发生变化，已取消任务。');
+        }
+        mergeInternalLlmAttempts(live, state);
+        live.debugTraces = mergeDebugTraces(live.debugTraces, state.debugTraces);
+        live.stageSummary.rebuildCheckpoint = {
+          targetEndMessageId: maximumEnd,
+          targetSourceHash,
+          generationSignature,
+          entries: structuredClone(rebuiltEntries),
+          totalDurationMs,
+          totalMessagesCovered,
+          updatedAt: new Date().toISOString(),
+        };
+        await this.stateRepository.save(live);
+        state = live;
         onProgress?.({
           startMessageId: chunk.startMessageId,
           endMessageId: chunk.endMessageId,
           targetEndMessageId: maximumEnd,
+          completedChunks: rebuiltEntries.length,
         });
         start = chunk.endMessageId + 1;
       }
@@ -801,23 +954,36 @@ export class StageSummaryService {
     } catch (error) {
       if (isStoryEchoTaskCancelledError(error)) {
         try {
-          assertChatOwner(state);
-          await this.stateRepository.save(state);
+          const live = this.stateRepository.getExisting();
+          if (!live || live.ownerChatId !== state.ownerChatId) {
+            throw new Error('保存阶段总结重建取消诊断时聊天已切换。');
+          }
+          mergeInternalLlmAttempts(live, state);
+          live.debugTraces = mergeDebugTraces(live.debugTraces, state.debugTraces);
+          await this.stateRepository.save(live);
         } catch (saveError) {
           logger.warn('保存阶段总结重建取消诊断时聊天已切换或元数据不可用。', saveError);
         }
         throw error;
       }
-      state.metrics.summaryFailures += 1;
-      recordDebugTrace(state, settings.debug, 'error', '全部阶段总结重建失败，已保留原有结果。', {
+      const live = this.stateRepository.getExisting();
+      const failureState = live && live.ownerChatId === state.ownerChatId ? live : state;
+      mergeInternalLlmAttempts(failureState, state);
+      failureState.debugTraces = mergeDebugTraces(failureState.debugTraces, state.debugTraces);
+      failureState.metrics.summaryFailures += 1;
+      recordDebugTrace(failureState, settings.debug, 'error', '全部阶段总结重建失败，已保留原有结果。', {
         error: error instanceof Error ? error.message : String(error),
         startMessageId: start,
         targetEndMessageId: maximumEnd,
         completedDraftEntries: rebuiltEntries.length,
+        resumeFromMessageId: rebuiltEntries.at(-1)?.sourceEndMessageId !== undefined
+          ? rebuiltEntries.at(-1)!.sourceEndMessageId + 1
+          : 0,
       });
       try {
-        assertChatOwner(state);
-        await this.stateRepository.save(state);
+        assertChatOwner(failureState);
+        await this.stateRepository.save(failureState);
+        state = failureState;
       } catch (saveError) {
         logger.warn('保存阶段总结重建失败统计时聊天已切换或元数据不可用。', saveError);
       }
@@ -887,6 +1053,9 @@ export class StageSummaryService {
           coveredThroughMessageId: generated.entry.sourceEndMessageId,
           coveredThroughHash: generated.entry.sourceHash,
           updatedAt: generated.entry.updatedAt,
+          ...(state.stageSummary.rebuildCheckpoint
+            ? { rebuildCheckpoint: state.stageSummary.rebuildCheckpoint }
+            : {}),
         };
         state.metrics.summaryUpdates += 1;
         state.metrics.summaryMessagesCovered += generated.sourceMessageCount;

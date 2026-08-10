@@ -98,6 +98,21 @@ export interface StageSummaryEntry {
   deleted?: boolean;
 }
 
+/**
+ * Persisted drafts for an interrupted full rebuild. They are never injected
+ * into chat context and replace the active summaries only after every batch
+ * succeeds and the source revision is revalidated.
+ */
+export interface StageSummaryRebuildCheckpoint {
+  targetEndMessageId: number;
+  targetSourceHash: string;
+  generationSignature: string;
+  entries: StageSummaryEntry[];
+  totalDurationMs: number;
+  totalMessagesCovered: number;
+  updatedAt: string;
+}
+
 export interface StorySkeleton {
   text: string;
   /** Last message covered by the stage-summary prefix folded into this historical skeleton. */
@@ -173,6 +188,8 @@ export interface InternalLlmAttempt {
   agentActiveAtEnd: boolean;
   completion?: LlmCompletionMetadata;
   responseDiagnostic?: LlmResponseDiagnostic;
+  /** Individual failures when one bounded retry was attempted. */
+  attemptErrors?: string[];
   error?: string;
 }
 
@@ -185,6 +202,7 @@ export interface StoryEchoChatState {
     coveredThroughMessageId: number;
     coveredThroughHash: string;
     updatedAt?: string;
+    rebuildCheckpoint?: StageSummaryRebuildCheckpoint;
   };
   storySkeleton: StorySkeleton;
   metrics: StoryEchoMetrics;

@@ -1,4 +1,8 @@
-import type { StageSummaryEntry, StoryEchoChatState } from '../core/types';
+import type {
+  StageSummaryEntry,
+  StageSummaryRebuildCheckpoint,
+  StoryEchoChatState,
+} from '../core/types';
 import {
   getContext,
   getCurrentChatId,
@@ -61,15 +65,31 @@ export function stageSummaryDeliveryStatus(
   return '随请求携带（待汇入骨架）';
 }
 
-export function stageSummaryFullRebuildConfirmation(hasUnsavedChanges: boolean): string {
+export function stageSummaryFullRebuildConfirmation(
+  hasUnsavedChanges: boolean,
+  checkpoint?: StageSummaryRebuildCheckpoint,
+): string {
   return [
     ...(hasUnsavedChanges
       ? ['当前还有尚未保存的阶段总结或骨架修改，继续会放弃这些修改。']
       : []),
     '将依据当前聊天原文重新生成全部可归档阶段总结，再用新总结干净重建全局剧情骨架。',
+    ...(checkpoint
+      ? [`检测到 ${checkpoint.entries.length} 批已保存的重建草稿；原文与设置校验通过后将从消息 ${(checkpoint.entries.at(-1)?.sourceEndMessageId ?? -1) + 1} 继续，否则自动从头开始。`]
+      : []),
     '现有阶段总结的人工修改会被替换；聊天原文不会改变。阶段总结会在全部成功后一次性替换，骨架重建失败时新总结仍会保留且旧骨架停止注入。',
     '这可能需要多次 LLM 请求，确定继续吗？',
   ].join('\n\n');
+}
+
+export function stageSummaryRebuildCheckpointText(
+  checkpoint?: StageSummaryRebuildCheckpoint,
+): string {
+  if (!checkpoint) {
+    return '全量重建中断时会保留已完成批次；正式总结仍在全部成功后一次性替换。';
+  }
+  const latest = checkpoint.entries.at(-1);
+  return `已保留 ${checkpoint.entries.length} 批重建草稿，覆盖消息 0～${latest?.sourceEndMessageId ?? -1}；再次重建会校验后继续。`;
 }
 
 export function stageSummaryRegenerationConfirmation(
@@ -205,6 +225,9 @@ export function stageSummaryManagerTemplate(): string {
         <button id="story-echo-summary-rebuild-all" class="menu_button story-echo-summary-rebuild-all" type="button">
           <i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i><span>重建全部阶段总结与骨架</span>
         </button>
+      </div>
+      <div id="story-echo-summary-rebuild-status" class="story-echo-summary-count" role="status" aria-live="polite">
+        ${stageSummaryRebuildCheckpointText()}
       </div>
       <p class="story-echo-hint">
         最近 S 条会随请求携带；更老的总结在骨架吸收后标记为“已汇入骨架”。全部重建会依据当前聊天原文重新生成所有可归档阶段总结，阶段总结会在全部成功后一次性替换，再从新总结干净重建骨架。
@@ -452,8 +475,10 @@ export class StageSummaryMetadataManager {
       const button = event.currentTarget as HTMLButtonElement;
       const label = button.querySelector<HTMLElement>('span');
       const idleLabel = label?.textContent ?? '重建全部阶段总结与骨架';
+      const stateBeforeRebuild = this.repository.getExisting();
       const confirmation = stageSummaryFullRebuildConfirmation(
         this.editorDirty || this.skeletonDirty,
+        stateBeforeRebuild?.stageSummary.rebuildCheckpoint,
       );
       if (!await showConfirmation('重建全部阶段总结与骨架', confirmation)) {
         return;
@@ -504,11 +529,15 @@ export class StageSummaryMetadataManager {
               targetEndMessageId,
               (progress) => {
                 if (label) {
-                  label.textContent = `阶段总结：消息 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
+                  label.textContent = progress.resumed
+                    ? `已恢复 ${progress.completedChunks ?? 0} 批，继续重建…`
+                    : `阶段总结：已完成 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}`;
                 }
                 this.setSkeletonActivityStatus(
                   panel,
-                  `正在重建阶段总结：消息 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}；完成后将重新生成全局剧情骨架…`,
+                  progress.resumed
+                    ? `已恢复 ${progress.completedChunks ?? 0} 批草稿，将从消息 ${progress.endMessageId + 1} 继续；完成后重新生成全局剧情骨架…`
+                    : `正在重建阶段总结：已完成 ${progress.endMessageId + 1}/${progress.targetEndMessageId + 1}；完成后将重新生成全局剧情骨架…`,
                 );
               },
             );
@@ -548,9 +577,12 @@ export class StageSummaryMetadataManager {
           this.resetSelection();
           this.skeletonDirty = false;
         }
+        const checkpoint = this.repository.getExisting()?.stageSummary.rebuildCheckpoint;
         notify.error(summariesRebuilt
           ? `阶段总结已重建，但骨架重建失败并已停止注入：${message}`
-          : message);
+          : checkpoint
+            ? `${message}；已保留 ${checkpoint.entries.length} 批草稿，再次点击可从消息 ${(checkpoint.entries.at(-1)?.sourceEndMessageId ?? -1) + 1} 继续。`
+            : message);
       } finally {
         try {
           await onChanged();
@@ -768,6 +800,7 @@ export class StageSummaryMetadataManager {
     const skeletonUpdate = element<HTMLButtonElement>(panel, '#story-echo-skeleton-update');
     const skeletonRebuild = element<HTMLButtonElement>(panel, '#story-echo-skeleton-rebuild');
     const summaryRebuildAll = element<HTMLButtonElement>(panel, '#story-echo-summary-rebuild-all');
+    const summaryRebuildStatus = element<HTMLElement>(panel, '#story-echo-summary-rebuild-status');
     const skeletonStatus = element<HTMLElement>(panel, '#story-echo-skeleton-status');
     const skeletonBusy = Boolean(this.skeletonActivityStatus) ||
       this.summaryRegenerationActive;
@@ -776,6 +809,9 @@ export class StageSummaryMetadataManager {
     skeletonUpdate.disabled = !state || skeletonBusy;
     skeletonRebuild.disabled = !state || skeletonBusy;
     summaryRebuildAll.disabled = !state || skeletonBusy;
+    summaryRebuildStatus.textContent = stageSummaryRebuildCheckpointText(
+      state?.stageSummary.rebuildCheckpoint,
+    );
     skeletonStatus.classList.toggle(
       'story-echo-skeleton-status-active',
       Boolean(this.skeletonActivityStatus),

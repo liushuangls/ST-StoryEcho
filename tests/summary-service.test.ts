@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoryEchoChatState, StoryEchoSettings, TavernChatMessage } from '../src/core/types';
+import { LlmRequestRetryError, LlmRequestTimeoutError } from '../src/llm/errors';
 import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState } from './fixtures';
@@ -158,7 +159,7 @@ describe('StageSummaryService', () => {
     expect(mocks.complete).toHaveBeenCalledTimes(2);
     expect(mocks.complete.mock.calls[0]?.[1]).toMatchObject({
       maxTokens: 1_600,
-      timeoutMs: 600_000,
+      timeoutMs: 300_000,
     });
     expect(mocks.save).toHaveBeenCalledTimes(2);
     expect(result.state?.stageSummary.entries[0]).toMatchObject({
@@ -252,6 +253,115 @@ describe('StageSummaryService', () => {
       status: 'failed',
       error: 'upstream disconnected',
     });
+  });
+
+  it('records both failures from a bounded timeout retry', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    mocks.complete.mockRejectedValueOnce(new LlmRequestRetryError([
+      new LlmRequestTimeoutError(300_000),
+      new Error('主连接流式请求返回了错误。'),
+    ]));
+
+    await expect(new StageSummaryService().processAllThrough(chat.length - 1))
+      .rejects.toThrow('当前批次重试失败');
+
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      status: 'failed',
+      attemptErrors: [
+        'LLM请求超时（300000ms）。',
+        '主连接流式请求返回了错误。',
+      ],
+    });
+  });
+
+  it('persists full-rebuild drafts and resumes from the failed batch', async () => {
+    const chat = completedChat(6);
+    install(chat);
+    const oldEntry = {
+      text: '旧总结保持可用。',
+      sourceStartMessageId: 0,
+      sourceEndMessageId: 3,
+      sourceHash: 'old-source',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    mocks.state!.stageSummary = {
+      entries: [oldEntry],
+      coveredThroughMessageId: 3,
+      coveredThroughHash: oldEntry.sourceHash,
+      updatedAt: oldEntry.updatedAt,
+    };
+    mocks.complete
+      .mockResolvedValueOnce({
+        text: '重建草稿一。',
+        metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+      })
+      .mockResolvedValueOnce({
+        text: '重建草稿二。',
+        metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+      })
+      .mockRejectedValueOnce(new Error('third batch failed'));
+    const service = new StageSummaryService();
+
+    await expect(service.rebuildAllThrough(chat.length - 1))
+      .rejects.toThrow('third batch failed');
+
+    expect(mocks.state!.stageSummary.entries).toEqual([oldEntry]);
+    expect(mocks.state!.stageSummary.rebuildCheckpoint).toMatchObject({
+      targetEndMessageId: 11,
+      entries: [
+        { text: '重建草稿一。', sourceStartMessageId: 0, sourceEndMessageId: 3 },
+        { text: '重建草稿二。', sourceStartMessageId: 4, sourceEndMessageId: 7 },
+      ],
+    });
+    expect(mocks.complete).toHaveBeenCalledTimes(3);
+
+    mocks.complete.mockResolvedValueOnce({
+      text: '重建草稿三。',
+      metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+    });
+    const progress = vi.fn();
+    const result = await service.rebuildAllThrough(chat.length - 1, progress);
+
+    expect(mocks.complete).toHaveBeenCalledTimes(4);
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      resumed: true,
+      completedChunks: 2,
+      endMessageId: 7,
+    }));
+    expect(result.updatedChunks).toBe(3);
+    expect(result.state?.stageSummary.entries.map((entry) => entry.text)).toEqual([
+      '重建草稿一。',
+      '重建草稿二。',
+      '重建草稿三。',
+    ]);
+    expect(result.state?.stageSummary.rebuildCheckpoint).toBeUndefined();
+  });
+
+  it('discards a full-rebuild checkpoint after the source changes', async () => {
+    const chat = completedChat(4);
+    install(chat);
+    mocks.complete
+      .mockResolvedValueOnce({
+        text: '旧原文草稿。',
+        metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+      })
+      .mockRejectedValueOnce(new Error('second batch failed'));
+    const service = new StageSummaryService();
+    await expect(service.rebuildAllThrough(chat.length - 1)).rejects.toThrow();
+    expect(mocks.state!.stageSummary.rebuildCheckpoint?.entries).toHaveLength(1);
+
+    chat[0]!.mes = '原文已经修改';
+    mocks.complete.mockResolvedValue({
+      text: '新原文总结。',
+      metadata: { provider: 'main', requestedMaxTokens: 1_600, responseCharacters: 6 },
+    });
+    const progress = vi.fn();
+    await service.rebuildAllThrough(chat.length - 1, progress);
+
+    expect(progress).not.toHaveBeenCalledWith(expect.objectContaining({ resumed: true }));
+    expect(mocks.complete).toHaveBeenCalledTimes(4);
+    expect(mocks.state!.stageSummary.rebuildCheckpoint).toBeUndefined();
   });
 
   it('persists cancellation diagnostics without counting a cancelled summary as a failure', async () => {
