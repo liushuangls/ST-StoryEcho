@@ -45,6 +45,7 @@ describe('OpenAiCompatibleProvider', () => {
       max_tokens: 123,
       include_reasoning: false,
       reasoning_effort: 'low',
+      enable_thinking: false,
       temperature: 0,
       top_p: 1,
       messages: [
@@ -52,6 +53,66 @@ describe('OpenAiCompatibleProvider', () => {
         { role: 'user', content: 'prompt' },
       ],
     });
+  });
+
+  it('reports an empty reasoning-only response without retaining its text', async () => {
+    const secretReasoning = 'private chain of thought';
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'model-name';
+    config.apiKey = 'field-name-secret';
+    const payloadWithCredentialField = {
+      model: 'model-name',
+      choices: [{
+        finish_reason: 'length',
+        message: { content: '', reasoning_content: secretReasoning },
+      }],
+      usage: {
+        prompt_tokens: 500,
+        completion_tokens: 40,
+        total_tokens: 540,
+        completion_tokens_details: { reasoning_tokens: 40 },
+      },
+      [config.apiKey]: true,
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify(payloadWithCredentialField), { status: 200 }),
+    );
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    const error = await provider.completeDetailed({
+      system: 'system',
+      prompt: 'prompt',
+      maxTokens: 3_000,
+    }).catch((value: unknown) => value);
+
+    expect(error).toMatchObject({
+      name: 'LlmEmptyResponseError',
+      message: '自定义LLM没有返回可读取的内容。',
+      completion: {
+        provider: 'openai-compatible',
+        requestedMaxTokens: 3_000,
+        finishReason: 'length',
+        promptTokens: 500,
+        completionTokens: 40,
+        reasoningTokens: 40,
+        totalTokens: 540,
+        responseCharacters: 0,
+      },
+      responseDiagnostic: {
+        responseType: 'object',
+        rootFields: ['[REDACTED]', 'choices', 'model', 'usage'],
+        choiceFields: ['finish_reason', 'message'],
+        messageFields: ['content', 'reasoning_content'],
+        messageContentType: 'string',
+        choiceTextType: 'missing',
+        rootContentType: 'missing',
+        hasReasoning: true,
+      },
+    });
+    expect(JSON.stringify(error)).not.toContain(secretReasoning);
+    expect(JSON.stringify(error)).not.toContain(config.apiKey);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('returns provider finish and usage metadata for diagnostics', async () => {

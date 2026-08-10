@@ -10,6 +10,7 @@ import { recordInternalLlmAttempt } from '../debug/internal-llm-attempts';
 import { tauriTavernAgentBridge } from '../platform/tauritavern-agent';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { completeWithConfiguredProviderDetailed } from './complete';
+import { isLlmEmptyResponseError } from './errors';
 
 interface ObservedCompletionContext {
   task: InternalLlmTask;
@@ -58,6 +59,7 @@ export async function completeObservedInternalRequest(
     return result;
   } catch (error) {
     const finishedAt = new Date();
+    const emptyResponse = isLlmEmptyResponseError(error) ? error : null;
     recordInternalLlmAttempt(state, {
       id,
       task: context.task,
@@ -67,9 +69,14 @@ export async function completeObservedInternalRequest(
       durationMs: Math.max(0, Math.round(performance.now() - startedAtMs)),
       sourceStartMessageId: context.sourceStartMessageId,
       sourceEndMessageId: context.sourceEndMessageId,
-      requestedMaxTokens: requestedMaxTokens(request),
+      requestedMaxTokens: emptyResponse?.completion.requestedMaxTokens
+        ?? requestedMaxTokens(request),
       agentActiveAtStart,
       agentActiveAtEnd: tauriTavernAgentBridge.isRunActive(),
+      ...(emptyResponse ? {
+        completion: emptyResponse.completion,
+        responseDiagnostic: emptyResponse.responseDiagnostic,
+      } : {}),
       error: boundedError(error),
     });
     throw error;

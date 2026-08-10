@@ -3,6 +3,7 @@ import type {
   StoryEchoChatState,
 } from '../core/types';
 import { normalizeLlmCompletionMetadata } from '../llm/completion-metadata';
+import { normalizeLlmResponseDiagnostic } from '../llm/response-diagnostic';
 
 export const MAX_INTERNAL_LLM_ATTEMPTS = 20;
 
@@ -34,6 +35,7 @@ function normalizeAttempt(value: unknown): InternalLlmAttempt | null {
   const sourceStartMessageId = optionalMessageId(value['sourceStartMessageId']);
   const sourceEndMessageId = optionalMessageId(value['sourceEndMessageId']);
   const completion = normalizeLlmCompletionMetadata(value['completion']);
+  const responseDiagnostic = normalizeLlmResponseDiagnostic(value['responseDiagnostic']);
   const error = typeof value['error'] === 'string'
     ? value['error'].replace(/\s+/gu, ' ').trim().slice(0, 500)
     : '';
@@ -50,6 +52,7 @@ function normalizeAttempt(value: unknown): InternalLlmAttempt | null {
     agentActiveAtStart: value['agentActiveAtStart'] === true,
     agentActiveAtEnd: value['agentActiveAtEnd'] === true,
     ...(completion ? { completion } : {}),
+    ...(responseDiagnostic ? { responseDiagnostic } : {}),
     ...(error ? { error } : {}),
   };
 }

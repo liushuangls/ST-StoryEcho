@@ -6,6 +6,7 @@ import {
 } from '../src/debug/metrics';
 import {
   MAX_INTERNAL_LLM_ATTEMPTS,
+  normalizeInternalLlmAttempts,
   recordInternalLlmAttempt,
 } from '../src/debug/internal-llm-attempts';
 import { chatState } from './fixtures';
@@ -84,5 +85,35 @@ describe('diagnostics metrics', () => {
     expect(state.recentInternalLlmAttempts).toHaveLength(MAX_INTERNAL_LLM_ATTEMPTS);
     expect(state.recentInternalLlmAttempts[0]?.id).toBe('attempt-5');
     expect(state.recentInternalLlmAttempts.at(-1)?.id).toBe('attempt-24');
+  });
+
+  it('normalizes structural empty-response diagnostics without response content', () => {
+    const attempts = normalizeInternalLlmAttempts([{
+      id: 'attempt-empty',
+      task: 'stage-summary',
+      status: 'failed',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      finishedAt: '2026-01-01T00:00:01.000Z',
+      durationMs: 1_000,
+      requestedMaxTokens: 3_000,
+      agentActiveAtStart: false,
+      agentActiveAtEnd: false,
+      responseDiagnostic: {
+        responseType: 'object',
+        rootFields: ['choices', 'usage'],
+        choiceFields: ['finish_reason', 'message'],
+        messageFields: ['content', 'reasoning_content'],
+        messageContentType: 'string',
+        choiceTextType: 'missing',
+        rootContentType: 'missing',
+        hasReasoning: true,
+      },
+      error: '自定义LLM没有返回可读取的内容。',
+    }]);
+
+    expect(attempts[0]?.responseDiagnostic).toMatchObject({
+      hasReasoning: true,
+      messageFields: ['content', 'reasoning_content'],
+    });
   });
 });

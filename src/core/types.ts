@@ -23,6 +23,28 @@ export interface LlmCompletionResult {
   metadata: LlmCompletionMetadata;
 }
 
+export type LlmResponseValueType =
+  | 'missing'
+  | 'null'
+  | 'string'
+  | 'array'
+  | 'object'
+  | 'number'
+  | 'boolean'
+  | 'other';
+
+/** Structural response diagnostics only; never contains response text or credentials. */
+export interface LlmResponseDiagnostic {
+  responseType: LlmResponseValueType;
+  rootFields: string[];
+  choiceFields: string[];
+  messageFields: string[];
+  messageContentType: LlmResponseValueType;
+  choiceTextType: LlmResponseValueType;
+  rootContentType: LlmResponseValueType;
+  hasReasoning: boolean;
+}
+
 export interface StoryEchoSettings {
   version: 10;
   enabled: boolean;
@@ -150,6 +172,7 @@ export interface InternalLlmAttempt {
   agentActiveAtStart: boolean;
   agentActiveAtEnd: boolean;
   completion?: LlmCompletionMetadata;
+  responseDiagnostic?: LlmResponseDiagnostic;
   error?: string;
 }
 

@@ -36,6 +36,16 @@ describe('buildDebugReport', () => {
         reasoningTokens: 80,
         responseCharacters: 125,
       },
+      responseDiagnostic: {
+        responseType: 'object',
+        rootFields: ['choices', 'usage'],
+        choiceFields: ['finish_reason', 'message'],
+        messageFields: ['content', 'reasoning_content'],
+        messageContentType: 'string',
+        choiceTextType: 'missing',
+        rootContentType: 'missing',
+        hasReasoning: true,
+      },
     });
     const report = buildDebugReport(state, settings);
 
@@ -45,6 +55,8 @@ describe('buildDebugReport', () => {
     expect(report).toContain('"recentInternalLlmAttempts"');
     expect(report).toContain('"finishReason": "length"');
     expect(report).toContain('"reasoningTokens": 80');
+    expect(report).toContain('"hasReasoning": true');
+    expect(report).toContain('"messageFields"');
     expect(report).not.toContain('private.example');
     expect(report).not.toContain('apiKey');
     expect(report).not.toContain('llm-secret');

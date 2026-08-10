@@ -10,9 +10,11 @@ import { normalizeChatCompletionsBaseUrl } from './url';
 import {
   findRetriableUpstreamTimeoutStatus,
   isRetriableUpstreamTimeoutStatus,
+  LlmEmptyResponseError,
   LlmRequestTimeoutError,
 } from './errors';
 import { completionMetadataFromPayload } from './completion-metadata';
+import { responseDiagnosticFromPayload } from './response-diagnostic';
 
 type FetchLike = typeof fetch;
 type RequestHeadersProvider = () => Promise<Record<string, string>>;
@@ -122,6 +124,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       group_names: [],
       include_reasoning: false,
       reasoning_effort: 'low',
+      enable_thinking: false,
       enable_web_search: false,
       request_images: false,
       custom_prompt_post_processing: 'strict',
@@ -169,7 +172,20 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       }
       const content = responseContent(payload);
       if (!content?.trim()) {
-        throw new Error('自定义LLM没有返回可读取的内容。');
+        const completion = completionMetadataFromPayload(payload, {
+          provider: this.id,
+          requestedMaxTokens: maxTokens,
+          responseText: '',
+          source: 'custom',
+          model,
+        });
+        const responseDiagnostic = responseDiagnosticFromPayload(payload, [apiKey]);
+        responseDiagnostic.hasReasoning ||= (completion.reasoningTokens ?? 0) > 0;
+        throw new LlmEmptyResponseError(
+          '自定义LLM没有返回可读取的内容。',
+          completion,
+          responseDiagnostic,
+        );
       }
       return {
         text: content,

@@ -1,3 +1,23 @@
+import type {
+  LlmCompletionMetadata,
+  LlmResponseDiagnostic,
+} from '../core/types';
+
+export class LlmEmptyResponseError extends Error {
+  constructor(
+    message: string,
+    readonly completion: LlmCompletionMetadata,
+    readonly responseDiagnostic: LlmResponseDiagnostic,
+  ) {
+    super(message);
+    this.name = 'LlmEmptyResponseError';
+  }
+}
+
+export function isLlmEmptyResponseError(error: unknown): error is LlmEmptyResponseError {
+  return error instanceof LlmEmptyResponseError;
+}
+
 export class LlmRequestTimeoutError extends Error {
   constructor(
     readonly timeoutMs: number,

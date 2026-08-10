@@ -979,7 +979,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.6";
+var EXTENSION_VERSION = "0.21.7";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -1275,9 +1275,116 @@ function normalizeLlmCompletionMetadata(value) {
   };
 }
 
+// src/llm/response-diagnostic.ts
+var MAX_FIELDS_PER_LEVEL = 24;
+var MAX_FIELD_NAME_CHARACTERS = 80;
+var REASONING_FIELD_PATTERN = /(?:reason|thinking|thought|analysis)/iu;
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function valueType(value, present = true) {
+  if (!present) {
+    return "missing";
+  }
+  if (value === null) {
+    return "null";
+  }
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  if (typeof value === "object") {
+    return "object";
+  }
+  if (["string", "number", "boolean"].includes(typeof value)) {
+    return typeof value;
+  }
+  return "other";
+}
+function sanitizeFieldName(key, secrets = []) {
+  return secrets.reduce(
+    (sanitized, secret) => secret ? sanitized.split(secret).join("[REDACTED]") : sanitized,
+    key.replace(/[\p{Cc}\p{Cf}]/gu, "")
+  ).slice(0, MAX_FIELD_NAME_CHARACTERS);
+}
+function normalizedFieldNames(value, secrets = []) {
+  const fields = isRecord4(value) ? Object.keys(value) : Array.isArray(value) ? value.filter((field) => typeof field === "string") : [];
+  return fields.slice(0, MAX_FIELDS_PER_LEVEL).map((key) => sanitizeFieldName(key, secrets)).filter(Boolean).sort();
+}
+function hasReasoningField(value) {
+  const pending = [{ value, depth: 0 }];
+  for (let visited = 0; pending.length > 0 && visited < 500; visited += 1) {
+    const current = pending.pop();
+    if (current.depth > 4 || current.value === null || typeof current.value !== "object") {
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      for (const item of current.value.slice(0, 50)) {
+        if (isRecord4(item) && typeof item["type"] === "string" && REASONING_FIELD_PATTERN.test(item["type"])) {
+          return true;
+        }
+        pending.push({ value: item, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    for (const [key, child] of Object.entries(current.value).slice(0, 100)) {
+      if (REASONING_FIELD_PATTERN.test(key)) {
+        return true;
+      }
+      pending.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  return false;
+}
+function propertyType(value, key) {
+  return value ? valueType(value[key], Object.prototype.hasOwnProperty.call(value, key)) : "missing";
+}
+function responseDiagnosticFromPayload(payload, secrets = []) {
+  const root = isRecord4(payload) ? payload : null;
+  const choices = root?.["choices"];
+  const choice = Array.isArray(choices) && isRecord4(choices[0]) ? choices[0] : null;
+  const message = choice && isRecord4(choice["message"]) ? choice["message"] : null;
+  return {
+    responseType: valueType(payload),
+    rootFields: normalizedFieldNames(root, secrets),
+    choiceFields: normalizedFieldNames(choice, secrets),
+    messageFields: normalizedFieldNames(message, secrets),
+    messageContentType: propertyType(message, "content"),
+    choiceTextType: propertyType(choice, "text"),
+    rootContentType: propertyType(root, "content"),
+    hasReasoning: hasReasoningField(payload)
+  };
+}
+function normalizedValueType(value) {
+  return [
+    "missing",
+    "null",
+    "string",
+    "array",
+    "object",
+    "number",
+    "boolean",
+    "other"
+  ].includes(String(value)) ? value : "other";
+}
+function normalizeLlmResponseDiagnostic(value) {
+  if (!isRecord4(value)) {
+    return void 0;
+  }
+  return {
+    responseType: normalizedValueType(value["responseType"]),
+    rootFields: normalizedFieldNames(value["rootFields"]),
+    choiceFields: normalizedFieldNames(value["choiceFields"]),
+    messageFields: normalizedFieldNames(value["messageFields"]),
+    messageContentType: normalizedValueType(value["messageContentType"]),
+    choiceTextType: normalizedValueType(value["choiceTextType"]),
+    rootContentType: normalizedValueType(value["rootContentType"]),
+    hasReasoning: value["hasReasoning"] === true
+  };
+}
+
 // src/debug/internal-llm-attempts.ts
 var MAX_INTERNAL_LLM_ATTEMPTS = 20;
-function isRecord4(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function finiteInteger(value, fallback) {
@@ -1289,12 +1396,13 @@ function optionalMessageId(value) {
   return Number.isInteger(number) && number >= 0 ? number : void 0;
 }
 function normalizeAttempt(value) {
-  if (!isRecord4(value) || typeof value["id"] !== "string" || !["stage-summary", "story-skeleton"].includes(String(value["task"])) || !["completed", "cancelled", "failed"].includes(String(value["status"])) || typeof value["startedAt"] !== "string" || typeof value["finishedAt"] !== "string") {
+  if (!isRecord5(value) || typeof value["id"] !== "string" || !["stage-summary", "story-skeleton"].includes(String(value["task"])) || !["completed", "cancelled", "failed"].includes(String(value["status"])) || typeof value["startedAt"] !== "string" || typeof value["finishedAt"] !== "string") {
     return null;
   }
   const sourceStartMessageId = optionalMessageId(value["sourceStartMessageId"]);
   const sourceEndMessageId = optionalMessageId(value["sourceEndMessageId"]);
   const completion = normalizeLlmCompletionMetadata(value["completion"]);
+  const responseDiagnostic = normalizeLlmResponseDiagnostic(value["responseDiagnostic"]);
   const error = typeof value["error"] === "string" ? value["error"].replace(/\s+/gu, " ").trim().slice(0, 500) : "";
   return {
     id: value["id"].slice(0, 200),
@@ -1309,6 +1417,7 @@ function normalizeAttempt(value) {
     agentActiveAtStart: value["agentActiveAtStart"] === true,
     agentActiveAtEnd: value["agentActiveAtEnd"] === true,
     ...completion ? { completion } : {},
+    ...responseDiagnostic ? { responseDiagnostic } : {},
     ...error ? { error } : {}
   };
 }
@@ -1684,7 +1793,7 @@ function normalizeStorySkeletonText(raw, maxTokens) {
 // src/state/repository.ts
 var MAX_EDITED_SUMMARY_CHARACTERS = 64e3;
 var LEGACY_SUMMARY_UPDATED_AT = "1970-01-01T00:00:00.000Z";
-function isRecord5(value) {
+function isRecord6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function finiteInteger2(value, fallback) {
@@ -1712,7 +1821,7 @@ function createState(ownerChatId) {
   };
 }
 function normalizeStageSummaryEntry(value) {
-  if (!isRecord5(value)) {
+  if (!isRecord6(value)) {
     return null;
   }
   const text = typeof value["text"] === "string" ? value["text"].trim() : "";
@@ -1736,7 +1845,7 @@ function normalizeStageSummaryEntry(value) {
   };
 }
 function normalizeStageSummary(value) {
-  const stored = isRecord5(value) ? value : {};
+  const stored = isRecord6(value) ? value : {};
   const entries = [];
   const candidates = Array.isArray(stored["entries"]) ? stored["entries"] : [];
   let expectedStartMessageId = 0;
@@ -1771,7 +1880,7 @@ function normalizeStageSummary(value) {
   };
 }
 function normalizeStorySkeleton(value) {
-  const stored = isRecord5(value) ? value : {};
+  const stored = isRecord6(value) ? value : {};
   const text = typeof stored["text"] === "string" ? stored["text"].trim() : "";
   const coveredThroughMessageId = finiteInteger2(stored["coveredThroughMessageId"], -1);
   if (!text || coveredThroughMessageId < 0) {
@@ -1792,7 +1901,7 @@ function normalizeStorySkeleton(value) {
   };
 }
 function normalizeInspection(value) {
-  if (!isRecord5(value) || typeof value["createdAt"] !== "string") {
+  if (!isRecord6(value) || typeof value["createdAt"] !== "string") {
     return void 0;
   }
   return {
@@ -1815,10 +1924,10 @@ function normalizeDebugTraces(value) {
     return [];
   }
   return value.flatMap((candidate) => {
-    if (!isRecord5(candidate) || typeof candidate["id"] !== "string" || typeof candidate["createdAt"] !== "string" || typeof candidate["message"] !== "string" || !["summary", "interceptor", "error"].includes(String(candidate["stage"]))) {
+    if (!isRecord6(candidate) || typeof candidate["id"] !== "string" || typeof candidate["createdAt"] !== "string" || typeof candidate["message"] !== "string" || !["summary", "interceptor", "error"].includes(String(candidate["stage"]))) {
       return [];
     }
-    const details = isRecord5(candidate["details"]) ? Object.fromEntries(Object.entries(candidate["details"]).flatMap(([key, detail]) => typeof detail === "string" || typeof detail === "number" || typeof detail === "boolean" || detail === null ? [[key, detail]] : [])) : void 0;
+    const details = isRecord6(candidate["details"]) ? Object.fromEntries(Object.entries(candidate["details"]).flatMap(([key, detail]) => typeof detail === "string" || typeof detail === "number" || typeof detail === "boolean" || detail === null ? [[key, detail]] : [])) : void 0;
     return [{
       id: candidate["id"],
       createdAt: candidate["createdAt"],
@@ -1829,7 +1938,7 @@ function normalizeDebugTraces(value) {
   }).slice(-50);
 }
 function isStoredState(value) {
-  return isRecord5(value) && (value["schemaVersion"] === 1 || value["schemaVersion"] === CHAT_STATE_VERSION) && typeof value["chatUuid"] === "string" && typeof value["ownerChatId"] === "string";
+  return isRecord6(value) && (value["schemaVersion"] === 1 || value["schemaVersion"] === CHAT_STATE_VERSION) && typeof value["chatUuid"] === "string" && typeof value["ownerChatId"] === "string";
 }
 function normalizeState(stored) {
   const inspection = normalizeInspection(stored["lastInspection"]);
@@ -2228,6 +2337,17 @@ function firstStoryPhaseBoundary(messages, startMessageId, endMessageId) {
 }
 
 // src/llm/errors.ts
+var LlmEmptyResponseError = class extends Error {
+  constructor(message, completion, responseDiagnostic) {
+    super(message);
+    this.completion = completion;
+    this.responseDiagnostic = responseDiagnostic;
+    this.name = "LlmEmptyResponseError";
+  }
+};
+function isLlmEmptyResponseError(error) {
+  return error instanceof LlmEmptyResponseError;
+}
 var LlmRequestTimeoutError = class extends Error {
   constructor(timeoutMs, upstreamStatus) {
     super(upstreamStatus ? `LLM\u4E0A\u6E38\u6682\u65F6\u4E0D\u53EF\u7528\uFF08HTTP ${upstreamStatus}\uFF09\uFF0C\u6309\u8D85\u65F6\u5904\u7406\u3002` : `LLM\u8BF7\u6C42\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09\u3002`);
@@ -2306,11 +2426,11 @@ async function withInternalGeneration(request, operation) {
 
 // src/llm/main-provider.ts
 var MAX_REQUEST_TIMEOUT_MS = 6e5;
-function isRecord6(value) {
+function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function tuneInternalGenerationSettings(value) {
-  if (!isRecord6(value)) {
+  if (!isRecord7(value)) {
     return;
   }
   if ("reasoning_effort" in value) {
@@ -2319,7 +2439,7 @@ function tuneInternalGenerationSettings(value) {
   if ("include_reasoning" in value) {
     value["include_reasoning"] = false;
   }
-  if (isRecord6(value["thinking"]) && "type" in value["thinking"]) {
+  if (isRecord7(value["thinking"]) && "type" in value["thinking"]) {
     value["thinking"] = { ...value["thinking"], type: "disabled" };
   }
   if ("enable_thinking" in value) {
@@ -2532,22 +2652,22 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
 var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
 var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 var MAX_REQUEST_TIMEOUT_MS2 = 6e5;
-function isRecord7(value) {
+function isRecord8(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function responseContent(payload) {
-  if (!isRecord7(payload)) {
+  if (!isRecord8(payload)) {
     return typeof payload === "string" ? payload : null;
   }
   const choices = payload["choices"];
-  const first = Array.isArray(choices) && isRecord7(choices[0]) ? choices[0] : null;
-  const message = first && isRecord7(first["message"]) ? first["message"] : null;
+  const first = Array.isArray(choices) && isRecord8(choices[0]) ? choices[0] : null;
+  const message = first && isRecord8(first["message"]) ? first["message"] : null;
   const content = message?.["content"];
   if (typeof content === "string") {
     return content;
   }
   if (Array.isArray(content)) {
-    return content.map((part) => isRecord7(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
+    return content.map((part) => isRecord8(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
   }
   if (first && typeof first["text"] === "string") {
     return first["text"];
@@ -2556,11 +2676,11 @@ function responseContent(payload) {
 }
 function responseError(payload, fallback, apiKey) {
   let message = fallback;
-  if (isRecord7(payload)) {
+  if (isRecord8(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       message = error;
-    } else if (isRecord7(error) && typeof error["message"] === "string") {
+    } else if (isRecord8(error) && typeof error["message"] === "string") {
       message = error["message"];
     } else if (typeof payload["message"] === "string") {
       message = payload["message"];
@@ -2622,6 +2742,7 @@ var OpenAiCompatibleProvider = class {
       group_names: [],
       include_reasoning: false,
       reasoning_effort: "low",
+      enable_thinking: false,
       enable_web_search: false,
       request_images: false,
       custom_prompt_post_processing: "strict",
@@ -2666,7 +2787,20 @@ var OpenAiCompatibleProvider = class {
       }
       const content = responseContent(payload);
       if (!content?.trim()) {
-        throw new Error("\u81EA\u5B9A\u4E49LLM\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u5185\u5BB9\u3002");
+        const completion = completionMetadataFromPayload(payload, {
+          provider: this.id,
+          requestedMaxTokens: maxTokens,
+          responseText: "",
+          source: "custom",
+          model
+        });
+        const responseDiagnostic = responseDiagnosticFromPayload(payload, [apiKey]);
+        responseDiagnostic.hasReasoning ||= (completion.reasoningTokens ?? 0) > 0;
+        throw new LlmEmptyResponseError(
+          "\u81EA\u5B9A\u4E49LLM\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u5185\u5BB9\u3002",
+          completion,
+          responseDiagnostic
+        );
       }
       return {
         text: content,
@@ -2836,6 +2970,7 @@ async function completeObservedInternalRequest(state, settings, request, context
     return result;
   } catch (error) {
     const finishedAt = /* @__PURE__ */ new Date();
+    const emptyResponse = isLlmEmptyResponseError(error) ? error : null;
     recordInternalLlmAttempt(state, {
       id,
       task: context.task,
@@ -2845,9 +2980,13 @@ async function completeObservedInternalRequest(state, settings, request, context
       durationMs: Math.max(0, Math.round(performance.now() - startedAtMs)),
       sourceStartMessageId: context.sourceStartMessageId,
       sourceEndMessageId: context.sourceEndMessageId,
-      requestedMaxTokens: requestedMaxTokens(request),
+      requestedMaxTokens: emptyResponse?.completion.requestedMaxTokens ?? requestedMaxTokens(request),
       agentActiveAtStart,
       agentActiveAtEnd: tauriTavernAgentBridge.isRunActive(),
+      ...emptyResponse ? {
+        completion: emptyResponse.completion,
+        responseDiagnostic: emptyResponse.responseDiagnostic
+      } : {},
       error: boundedError(error)
     });
     throw error;
@@ -5059,16 +5198,16 @@ function buildDebugReport(state, settings) {
 // src/llm/model-list.ts
 var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
 var MAX_RESPONSE_BYTES2 = 2 * 1024 * 1024;
-function isRecord8(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function errorMessage(payload, response, apiKey) {
   let detail = "";
-  if (isRecord8(payload)) {
+  if (isRecord9(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       detail = error;
-    } else if (isRecord8(error) && typeof error["message"] === "string") {
+    } else if (isRecord9(error) && typeof error["message"] === "string") {
       detail = error["message"];
     } else if (typeof payload["message"] === "string") {
       detail = payload["message"];
@@ -5080,13 +5219,13 @@ function errorMessage(payload, response, apiKey) {
   return suffix ? `${base} ${suffix}` : base;
 }
 function parseCustomModelList(payload) {
-  const root = isRecord8(payload) ? payload : null;
+  const root = isRecord9(payload) ? payload : null;
   const candidates = Array.isArray(root?.["models"]) ? root["models"] : Array.isArray(root?.["data"]) ? root["data"] : Array.isArray(payload) ? payload : [];
   const names = candidates.map((candidate) => {
     if (typeof candidate === "string") {
       return candidate.trim();
     }
-    if (!isRecord8(candidate)) {
+    if (!isRecord9(candidate)) {
       return "";
     }
     const value = candidate["id"] ?? candidate["model"] ?? candidate["name"];
@@ -5248,7 +5387,7 @@ async function loadTauriItemizedPromptRecord(chatId, recordId) {
   const value = await storage.getItem(
     `${TAURI_PROMPT_RECORD_PREFIX}${chatId}:${recordId}`
   );
-  return isRecord9(value) ? value : null;
+  return isRecord10(value) ? value : null;
 }
 function finiteTokens(value) {
   const number = typeof value === "number" ? value : Number(value);
@@ -5261,7 +5400,7 @@ function messageIdValue2(value) {
 function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord9(value) {
+function isRecord10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function promptText(value) {
