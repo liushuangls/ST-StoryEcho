@@ -23,6 +23,21 @@ function eventStream(frames: string[], splitAt: number[] = []): Response {
   });
 }
 
+function openEventStream(frames: string[], onCancel: () => void): Response {
+  const bytes = new TextEncoder().encode(frames.join(''));
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+    },
+    cancel() {
+      onCancel();
+    },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
 function sse(data: unknown): string {
   return `data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`;
 }
@@ -230,7 +245,7 @@ describe('MainLlmProvider streaming', () => {
       sse({ type: 'content_block_delta', delta: { type: 'text_delta', text: '完整' } }),
       sse({ type: 'content_block_delta', delta: { type: 'text_delta', text: '总结' } }),
       sse({ type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: { output_tokens: 99 } }),
-      sse({ type: 'message_stop' }),
+      'event: message_stop\ndata: {}\n\n',
     ], [1, 2, 55, 144]));
     const provider = new MainLlmProvider(fetchMock, async () => ({}), async () => runtime);
 
@@ -252,6 +267,51 @@ describe('MainLlmProvider streaming', () => {
         model: 'claude-stream',
       },
     });
+  });
+
+  it('finishes a Claude stream at message_stop even when the proxy keeps it open', async () => {
+    installStreamingContext('claude', 'claude-stream');
+    const runtime = streamingRuntime();
+    let cancelled = false;
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(openEventStream([
+      sse({
+        type: 'message_start',
+        message: { model: 'claude-stream', usage: { input_tokens: 600 } },
+      }),
+      sse({ type: 'content_block_delta', delta: { type: 'text_delta', text: '完整总结' } }),
+      sse({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 88 } }),
+      'event: message_stop\ndata: {}\n\n',
+    ], () => {
+      cancelled = true;
+    }));
+    const provider = new MainLlmProvider(fetchMock, async () => ({}), async () => runtime);
+    const abort = new AbortController();
+    const completion = provider.completeDetailed({
+      system: 'system',
+      prompt: 'prompt',
+      maxTokens: 3_000,
+      signal: abort.signal,
+    });
+    const pending = Symbol('pending');
+    const outcome = await Promise.race([
+      completion,
+      new Promise<typeof pending>((resolve) => globalThis.setTimeout(() => resolve(pending), 50)),
+    ]);
+    if (outcome === pending) {
+      abort.abort();
+      await completion.catch(() => undefined);
+    }
+
+    expect(outcome).not.toBe(pending);
+    expect(outcome).toMatchObject({
+      text: '完整总结',
+      metadata: {
+        finishReason: 'end_turn',
+        promptTokens: 600,
+        completionTokens: 88,
+      },
+    });
+    expect(cancelled).toBe(true);
   });
 
   it('streams native Gemini candidates and retains finish/usage metadata', async () => {

@@ -76,6 +76,7 @@ interface SseEvent {
 
 interface StreamMetadata {
   terminal: boolean;
+  terminalEvent: boolean;
   finishReason?: string;
   model?: string;
   usage: Record<string, unknown>;
@@ -270,7 +271,11 @@ function firstRecord(value: unknown): Record<string, unknown> {
   return Array.isArray(value) && isRecord(value[0]) ? value[0] : {};
 }
 
-function inspectChunk(value: unknown, metadata: StreamMetadata): void {
+function inspectChunk(
+  value: unknown,
+  metadata: StreamMetadata,
+  eventType = 'message',
+): void {
   if (!isRecord(value)) {
     return;
   }
@@ -292,7 +297,7 @@ function inspectChunk(value: unknown, metadata: StreamMetadata): void {
     metadata.finishReason = finishReason;
     metadata.terminal = true;
   }
-  const type = boundedString(value['type']);
+  const type = boundedString(value['type']) ?? boundedString(eventType);
   if (
     type === 'message_stop'
     || type === 'message-end'
@@ -300,6 +305,7 @@ function inspectChunk(value: unknown, metadata: StreamMetadata): void {
     || value['done'] === true
   ) {
     metadata.terminal = true;
+    metadata.terminalEvent = true;
   }
   if (!metadata.model) {
     const model = boundedString(value['model'] ?? message['model'] ?? response['model']);
@@ -347,6 +353,7 @@ async function readStream(
   const decoder = new TextDecoder();
   const metadata: StreamMetadata = {
     terminal: false,
+    terminalEvent: false,
     usage: {},
     usageMetadata: {},
   };
@@ -376,7 +383,7 @@ async function readStream(
       throw new Error('主连接返回了无法解析的流式数据。');
     }
     throwStreamPayloadError(parsed, timeoutMs, event.event);
-    inspectChunk(parsed, metadata);
+    inspectChunk(parsed, metadata, event.event);
     const next = runtime.getStreamingReply(parsed, state, {
       chatCompletionSource: identity.source,
       model: identity.model,
@@ -408,7 +415,7 @@ async function readStream(
       buffer = extracted.remainder;
       for (const event of extracted.events) {
         consume(event);
-        if (sawDoneMarker) {
+        if (sawDoneMarker || metadata.terminalEvent) {
           break readLoop;
         }
       }

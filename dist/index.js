@@ -2653,7 +2653,7 @@ function mergeUsage(target, source, depth = 0) {
 function firstRecord(value) {
   return Array.isArray(value) && isRecord8(value[0]) ? value[0] : {};
 }
-function inspectChunk(value, metadata) {
+function inspectChunk(value, metadata, eventType = "message") {
   if (!isRecord8(value)) {
     return;
   }
@@ -2669,9 +2669,10 @@ function inspectChunk(value, metadata) {
     metadata.finishReason = finishReason;
     metadata.terminal = true;
   }
-  const type = boundedString2(value["type"]);
+  const type = boundedString2(value["type"]) ?? boundedString2(eventType);
   if (type === "message_stop" || type === "message-end" || type === "response.completed" || value["done"] === true) {
     metadata.terminal = true;
+    metadata.terminalEvent = true;
   }
   if (!metadata.model) {
     const model = boundedString2(value["model"] ?? message["model"] ?? response["model"]);
@@ -2709,6 +2710,7 @@ async function readStream(response, runtime, identity, timeoutMs) {
   const decoder = new TextDecoder();
   const metadata = {
     terminal: false,
+    terminalEvent: false,
     usage: {},
     usageMetadata: {}
   };
@@ -2737,7 +2739,7 @@ async function readStream(response, runtime, identity, timeoutMs) {
       throw new Error("\u4E3B\u8FDE\u63A5\u8FD4\u56DE\u4E86\u65E0\u6CD5\u89E3\u6790\u7684\u6D41\u5F0F\u6570\u636E\u3002");
     }
     throwStreamPayloadError(parsed, timeoutMs, event.event);
-    inspectChunk(parsed, metadata);
+    inspectChunk(parsed, metadata, event.event);
     const next = runtime.getStreamingReply(parsed, state, {
       chatCompletionSource: identity.source,
       model: identity.model,
@@ -2768,7 +2770,7 @@ async function readStream(response, runtime, identity, timeoutMs) {
       buffer = extracted.remainder;
       for (const event of extracted.events) {
         consume(event);
-        if (sawDoneMarker) {
+        if (sawDoneMarker || metadata.terminalEvent) {
           break readLoop;
         }
       }
