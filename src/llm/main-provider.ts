@@ -4,6 +4,7 @@ import type {
   LlmRequest,
 } from '../core/types';
 import {
+  getRequestHeaders,
   getContext,
   getMainConnectionIdentity,
 } from '../platform/sillytavern';
@@ -14,37 +15,19 @@ import {
 import { LlmRequestTimeoutError } from './errors';
 import { completionMetadataFromPayload } from './completion-metadata';
 import { markInternalGenerationRequest, withInternalGeneration } from './internal-generation';
+import { tuneInternalGenerationSettings } from './internal-settings';
+import {
+  canStreamMainConnection,
+  completeMainConnectionStream,
+  loadMainStreamingRuntime,
+  type MainStreamingRuntimeLoader,
+} from './main-streaming';
+
+export { tuneInternalGenerationSettings } from './internal-settings';
 
 const MAX_REQUEST_TIMEOUT_MS = 600_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Keep background summarization from inheriting an expensive role-play preset. */
-export function tuneInternalGenerationSettings(value: unknown): void {
-  if (!isRecord(value)) {
-    return;
-  }
-  if ('reasoning_effort' in value) {
-    value['reasoning_effort'] = 'low';
-  }
-  if ('include_reasoning' in value) {
-    value['include_reasoning'] = false;
-  }
-  if (isRecord(value['thinking']) && 'type' in value['thinking']) {
-    value['thinking'] = { ...value['thinking'], type: 'disabled' };
-  }
-  if ('enable_thinking' in value) {
-    value['enable_thinking'] = false;
-  }
-  if ('temperature' in value) {
-    value['temperature'] = 0;
-  }
-  if ('top_p' in value) {
-    value['top_p'] = 1;
-  }
-}
+type FetchLike = typeof fetch;
+type RequestHeadersProvider = () => Promise<Record<string, string>>;
 
 async function withLightweightMainReasoning<T>(
   context: ReturnType<typeof getContext>,
@@ -69,6 +52,12 @@ async function withLightweightMainReasoning<T>(
 
 export class MainLlmProvider implements LlmProvider {
   readonly id = 'main' as const;
+
+  constructor(
+    private readonly fetchImpl: FetchLike = fetch,
+    private readonly requestHeaders: RequestHeadersProvider = getRequestHeaders,
+    private readonly loadStreamingRuntime: MainStreamingRuntimeLoader = loadMainStreamingRuntime,
+  ) {}
 
   private async perform(
     request: LlmRequest,
@@ -117,6 +106,25 @@ export class MainLlmProvider implements LlmProvider {
         context,
         () => runStoryEchoTaskAbortable(
           async () => {
+            const identity = getMainConnectionIdentity(context);
+            if (canStreamMainConnection(context, identity)) {
+              return completeMainConnectionStream({
+                context,
+                identity,
+                systemPrompt: options.systemPrompt,
+                prompt: options.prompt,
+                ...(options.responseLength !== undefined
+                  ? { responseLength: options.responseLength }
+                  : {}),
+                timeoutMs: requestedTimeoutMs ?? MAX_REQUEST_TIMEOUT_MS,
+                ...(timeoutController?.signal ?? request.signal
+                  ? { signal: timeoutController?.signal ?? request.signal }
+                  : {}),
+                fetchImpl: this.fetchImpl,
+                requestHeaders: this.requestHeaders,
+                loadRuntime: this.loadStreamingRuntime,
+              });
+            }
             if (
               captureMetadata &&
               context.generateRawData &&

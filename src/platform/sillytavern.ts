@@ -85,6 +85,7 @@ export interface SillyTavernContext {
   chatMetadata: Record<string, unknown>;
   eventSource?: {
     on(event: string, handler: (...args: unknown[]) => void | Promise<void>): void;
+    emit?(event: string, ...args: unknown[]): void | Promise<void>;
     off?(event: string, handler: (...args: unknown[]) => void | Promise<void>): void;
     removeListener?(event: string, handler: (...args: unknown[]) => void | Promise<void>): void;
   };

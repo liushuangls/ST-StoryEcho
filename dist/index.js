@@ -979,7 +979,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 2;
 var SETTINGS_VERSION = 10;
-var EXTENSION_VERSION = "0.21.7";
+var EXTENSION_VERSION = "0.21.8";
 
 // src/settings/defaults.ts
 var DEFAULT_SETTINGS = Object.freeze({
@@ -2424,8 +2424,7 @@ async function withInternalGeneration(request, operation) {
   }
 }
 
-// src/llm/main-provider.ts
-var MAX_REQUEST_TIMEOUT_MS = 6e5;
+// src/llm/internal-settings.ts
 function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -2452,22 +2451,497 @@ function tuneInternalGenerationSettings(value) {
     value["top_p"] = 1;
   }
 }
+
+// src/http/response.ts
+async function readResponseTextWithLimit(response, maxBytes, tooLargeMessage) {
+  const declaredLengthHeader = response.headers.get("content-length");
+  const declaredLength = declaredLengthHeader === null ? Number.NaN : Number(declaredLengthHeader);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    try {
+      await response.body?.cancel();
+    } catch {
+    }
+    throw new Error(tooLargeMessage);
+  }
+  if (!response.body) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      throw new Error(tooLargeMessage);
+    }
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parts = [];
+  let receivedBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+        }
+        throw new Error(tooLargeMessage);
+      }
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+    return parts.join("");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+// src/llm/main-streaming.ts
+var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
+var MAX_STREAM_BYTES = 2 * 1024 * 1024;
+var MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
+var runtimePromise;
+function isRecord8(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function boundedString2(value, maximumLength = 200) {
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, maximumLength) : void 0;
+}
+function eventName(context, key) {
+  return context.eventTypes?.[key] ?? context.event_types?.[key];
+}
+function canStreamMainConnection(context, identity) {
+  const remove = context.eventSource?.off ?? context.eventSource?.removeListener;
+  return identity.mainApi === "openai" && Boolean(context.chatCompletionSettings) && Boolean(identity.source) && Boolean(identity.model) && typeof context.eventSource?.emit === "function" && typeof remove === "function";
+}
+async function loadMainStreamingRuntime() {
+  runtimePromise ??= (async () => {
+    const moduleUrl = "/scripts/openai.js";
+    const loaded = await import(
+      /* @vite-ignore */
+      moduleUrl
+    );
+    if (typeof loaded.createGenerationParameters !== "function" || typeof loaded.getStreamingReply !== "function") {
+      throw new Error("\u5F53\u524DSillyTavern\u7248\u672C\u4E0D\u652F\u6301\u4E3B\u8FDE\u63A5\u6D41\u5F0F\u5185\u90E8\u8BF7\u6C42\u3002");
+    }
+    return {
+      createGenerationParameters: loaded.createGenerationParameters,
+      getStreamingReply: loaded.getStreamingReply
+    };
+  })().catch((error) => {
+    runtimePromise = void 0;
+    throw error;
+  });
+  return runtimePromise;
+}
+function parseSseEvent(block) {
+  let type = "message";
+  const data = [];
+  for (const line of block.split(/\r\n|\n|\r/u)) {
+    if (!line || line.startsWith(":")) {
+      continue;
+    }
+    const separator = line.indexOf(":");
+    const field = separator >= 0 ? line.slice(0, separator) : line;
+    let value = separator >= 0 ? line.slice(separator + 1) : "";
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+    if (field === "event") {
+      type = value || "message";
+    } else if (field === "data") {
+      data.push(value);
+    }
+  }
+  return data.length > 0 ? { event: type, data: data.join("\n") } : null;
+}
+function takeSseEvents(buffer) {
+  const events = [];
+  const separator = /\r\n\r\n|\n\n|\r\r/gu;
+  let start = 0;
+  for (let match = separator.exec(buffer); match; match = separator.exec(buffer)) {
+    const parsed = parseSseEvent(buffer.slice(start, match.index));
+    if (parsed) {
+      events.push(parsed);
+    }
+    start = match.index + match[0].length;
+  }
+  return { events, remainder: buffer.slice(start) };
+}
+function statusFromPayload(value, depth = 0) {
+  if (depth > 4 || !isRecord8(value)) {
+    return null;
+  }
+  for (const [key, candidate] of Object.entries(value)) {
+    if (/^(?:code|status|statusCode|status_code)$/u.test(key)) {
+      const status = Number(candidate);
+      if (Number.isInteger(status) && isRetriableUpstreamTimeoutStatus(status)) {
+        return status;
+      }
+    }
+    const nested = statusFromPayload(candidate, depth + 1);
+    if (nested !== null) {
+      return nested;
+    }
+  }
+  return null;
+}
+function timeoutStatusFromText(value) {
+  const fromMessage = findRetriableUpstreamTimeoutStatus(value);
+  if (fromMessage !== null) {
+    return fromMessage;
+  }
+  try {
+    return statusFromPayload(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+function streamErrorPayload(value) {
+  if (!isRecord8(value)) {
+    return false;
+  }
+  const id = boundedString2(value["id"]);
+  return value["type"] === "error" || value["error"] !== void 0 || typeof value["message"] === "string" || value["detail"] !== void 0 || Boolean(id?.startsWith("tauritavern-error-"));
+}
+function throwStreamPayloadError(value, timeoutMs, eventType = "message") {
+  if (eventType !== "error" && !streamErrorPayload(value)) {
+    return;
+  }
+  const serialized = JSON.stringify(value).slice(0, MAX_ERROR_RESPONSE_BYTES);
+  const upstreamStatus = timeoutStatusFromText(serialized);
+  if (upstreamStatus !== null) {
+    throw new LlmRequestTimeoutError(timeoutMs, upstreamStatus);
+  }
+  throw new Error("\u4E3B\u8FDE\u63A5\u6D41\u5F0F\u8BF7\u6C42\u8FD4\u56DE\u4E86\u9519\u8BEF\u3002");
+}
+function numericValue(value) {
+  if (typeof value !== "number" && typeof value !== "string" || typeof value === "string" && !value.trim()) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+function mergeUsage(target, source, depth = 0) {
+  if (!isRecord8(source) || depth > 4) {
+    return;
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (isRecord8(value)) {
+      const nested = isRecord8(target[key]) ? target[key] : {};
+      target[key] = nested;
+      mergeUsage(nested, value, depth + 1);
+      continue;
+    }
+    const numeric = numericValue(value);
+    if (numeric !== null) {
+      const existing = numericValue(target[key]);
+      target[key] = existing === null ? numeric : Math.max(existing, numeric);
+    } else if (target[key] === void 0 && typeof value !== "object") {
+      target[key] = value;
+    }
+  }
+}
+function firstRecord(value) {
+  return Array.isArray(value) && isRecord8(value[0]) ? value[0] : {};
+}
+function inspectChunk(value, metadata) {
+  if (!isRecord8(value)) {
+    return;
+  }
+  const choice = firstRecord(value["choices"]);
+  const candidate = firstRecord(value["candidates"]);
+  const delta = isRecord8(value["delta"]) ? value["delta"] : {};
+  const message = isRecord8(value["message"]) ? value["message"] : {};
+  const response = isRecord8(value["response"]) ? value["response"] : {};
+  const finishReason = boundedString2(
+    choice["finish_reason"] ?? choice["stop_reason"] ?? value["finish_reason"] ?? value["stop_reason"] ?? value["stopReason"] ?? delta["stop_reason"] ?? candidate["finishReason"]
+  );
+  if (finishReason) {
+    metadata.finishReason = finishReason;
+    metadata.terminal = true;
+  }
+  const type = boundedString2(value["type"]);
+  if (type === "message_stop" || type === "message-end" || type === "response.completed" || value["done"] === true) {
+    metadata.terminal = true;
+  }
+  if (!metadata.model) {
+    const model = boundedString2(value["model"] ?? message["model"] ?? response["model"]);
+    if (model) {
+      metadata.model = model;
+    }
+  }
+  mergeUsage(metadata.usage, value["usage"]);
+  mergeUsage(metadata.usage, message["usage"]);
+  mergeUsage(metadata.usage, response["usage"]);
+  mergeUsage(metadata.usageMetadata, value["usageMetadata"]);
+}
+function looksLikeTauriStreamErrorText(value) {
+  return /^\s*\[(?:API(?:[\s_-]+)?(?:Error|错误|錯誤)|[^\]]*\bAPI)\]/iu.test(value);
+}
+function makePayload(text, metadata) {
+  const choice = {
+    message: { role: "assistant", content: text }
+  };
+  if (metadata.finishReason) {
+    choice["finish_reason"] = metadata.finishReason;
+  }
+  return {
+    ...metadata.model ? { model: metadata.model } : {},
+    choices: [choice],
+    ...Object.keys(metadata.usage).length > 0 ? { usage: metadata.usage } : {},
+    ...Object.keys(metadata.usageMetadata).length > 0 ? { usageMetadata: metadata.usageMetadata } : {}
+  };
+}
+async function readStream(response, runtime, identity, timeoutMs) {
+  if (!response.body) {
+    throw new Error("\u4E3B\u8FDE\u63A5\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u6D41\u5F0F\u54CD\u5E94\u3002");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const metadata = {
+    terminal: false,
+    usage: {},
+    usageMetadata: {}
+  };
+  const state = {
+    reasoning: "",
+    images: [],
+    signature: "",
+    toolSignatures: {},
+    native: null
+  };
+  let text = "";
+  let buffer = "";
+  let receivedBytes = 0;
+  let sawDoneMarker = false;
+  let reachedEof = false;
+  const consume = (event) => {
+    if (event.data === "[DONE]") {
+      sawDoneMarker = true;
+      metadata.terminal = true;
+      return;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(event.data);
+    } catch {
+      throw new Error("\u4E3B\u8FDE\u63A5\u8FD4\u56DE\u4E86\u65E0\u6CD5\u89E3\u6790\u7684\u6D41\u5F0F\u6570\u636E\u3002");
+    }
+    throwStreamPayloadError(parsed, timeoutMs, event.event);
+    inspectChunk(parsed, metadata);
+    const next = runtime.getStreamingReply(parsed, state, {
+      chatCompletionSource: identity.source,
+      model: identity.model,
+      overrideShowThoughts: false
+    });
+    if (typeof next !== "string") {
+      throw new Error("\u4E3B\u8FDE\u63A5\u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u6D41\u5F0F\u6587\u672C\u3002");
+    }
+    if (!text && next && looksLikeTauriStreamErrorText(next)) {
+      throw new Error("\u4E3B\u8FDE\u63A5\u6D41\u5F0F\u8BF7\u6C42\u8FD4\u56DE\u4E86\u9519\u8BEF\u3002");
+    }
+    text += next;
+  };
+  try {
+    readLoop: while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        reachedEof = true;
+        buffer += decoder.decode();
+      } else {
+        receivedBytes += value.byteLength;
+        if (receivedBytes > MAX_STREAM_BYTES) {
+          throw new Error("\u4E3B\u8FDE\u63A5\u6D41\u5F0F\u54CD\u5E94\u8FC7\u5927\u3002");
+        }
+        buffer += decoder.decode(value, { stream: true });
+      }
+      const extracted = takeSseEvents(buffer);
+      buffer = extracted.remainder;
+      for (const event of extracted.events) {
+        consume(event);
+        if (sawDoneMarker) {
+          break readLoop;
+        }
+      }
+      if (done) {
+        break;
+      }
+    }
+    if (!metadata.terminal) {
+      const possibleJson = buffer.trim();
+      if (possibleJson.startsWith("{") && possibleJson.endsWith("}")) {
+        try {
+          throwStreamPayloadError(JSON.parse(possibleJson), timeoutMs);
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+          } else {
+            throw error;
+          }
+        }
+      }
+      throw new Error("\u4E3B\u8FDE\u63A5\u6D41\u5F0F\u54CD\u5E94\u672A\u5B8C\u6574\u7ED3\u675F\uFF0C\u5DF2\u4E22\u5F03\u672A\u5B8C\u6210\u5185\u5BB9\u3002");
+    }
+    return { text, payload: makePayload(text, metadata) };
+  } finally {
+    if (!reachedEof) {
+      try {
+        await reader.cancel();
+      } catch {
+      }
+    }
+    reader.releaseLock();
+  }
+}
+async function prepareMessages(context, systemPrompt, prompt) {
+  const substitute = (value) => context.substituteParams?.(value) ?? value;
+  const event = eventName(context, "CHAT_COMPLETION_PROMPT_READY");
+  const data = {
+    chat: [
+      { role: "system", content: substitute(systemPrompt).trim() },
+      { role: "user", content: substitute(prompt.trim()) }
+    ],
+    dryRun: false
+  };
+  if (event) {
+    await context.eventSource?.emit?.call(context.eventSource, event, data);
+  }
+  if (!Array.isArray(data.chat)) {
+    throw new Error("\u4E3B\u8FDE\u63A5\u63D0\u793A\u8BCD\u5904\u7406\u5668\u8FD4\u56DE\u4E86\u65E0\u6548\u6D88\u606F\u3002");
+  }
+  return data.chat.filter(isRecord8);
+}
+async function throwHttpError(response, timeoutMs) {
+  let detail = "";
+  try {
+    detail = await readResponseTextWithLimit(
+      response,
+      MAX_ERROR_RESPONSE_BYTES,
+      "\u4E3B\u8FDE\u63A5\u9519\u8BEF\u54CD\u5E94\u8FC7\u5927\u3002"
+    );
+  } catch {
+  }
+  const upstreamStatus = isRetriableUpstreamTimeoutStatus(response.status) ? response.status : timeoutStatusFromText(detail);
+  if (upstreamStatus !== null) {
+    throw new LlmRequestTimeoutError(timeoutMs, upstreamStatus);
+  }
+  throw new Error(`\u4E3B\u8FDE\u63A5\u6D41\u5F0F\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09\u3002`);
+}
+async function completeMainConnectionStream(request) {
+  const controller = new AbortController();
+  const abortFromSignal = () => {
+    controller.abort(
+      request.signal?.reason ?? new StoryEchoTaskCancelledError("\u8BF7\u6C42\u5DF2\u5931\u6548")
+    );
+  };
+  const abortFromStop = () => {
+    controller.abort(new StoryEchoTaskCancelledError("\u751F\u6210\u5DF2\u505C\u6B62"));
+  };
+  const stopEvent = eventName(request.context, "GENERATION_STOPPED");
+  const eventSource = request.context.eventSource;
+  const remove = eventSource?.off ?? eventSource?.removeListener;
+  if (request.signal?.aborted) {
+    abortFromSignal();
+  } else {
+    request.signal?.addEventListener("abort", abortFromSignal, { once: true });
+  }
+  if (stopEvent) {
+    eventSource?.on(stopEvent, abortFromStop);
+  }
+  try {
+    controller.signal.throwIfAborted();
+    const runtime = await request.loadRuntime();
+    controller.signal.throwIfAborted();
+    const messages = await prepareMessages(
+      request.context,
+      request.systemPrompt,
+      request.prompt
+    );
+    controller.signal.throwIfAborted();
+    const settings = {
+      ...request.context.chatCompletionSettings,
+      stream_openai: true,
+      ...request.responseLength !== void 0 ? { openai_max_tokens: request.responseLength } : {}
+    };
+    const generated = await runtime.createGenerationParameters(
+      settings,
+      request.identity.model,
+      "quiet",
+      messages,
+      { allowToolCalls: false, agentMode: false }
+    );
+    if (!isRecord8(generated) || !isRecord8(generated.generate_data)) {
+      throw new Error("SillyTavern\u751F\u6210\u4E86\u65E0\u6548\u7684\u4E3B\u8FDE\u63A5\u8BF7\u6C42\u53C2\u6570\u3002");
+    }
+    const body = generated.generate_data;
+    body["stream"] = true;
+    const settingsEvent = eventName(request.context, "CHAT_COMPLETION_SETTINGS_READY");
+    if (settingsEvent) {
+      await eventSource?.emit?.call(eventSource, settingsEvent, body);
+    }
+    controller.signal.throwIfAborted();
+    tuneInternalGenerationSettings(body);
+    body["stream"] = true;
+    body["type"] = "quiet";
+    delete body["n"];
+    delete body["tools"];
+    delete body["tool_choice"];
+    const response = await request.fetchImpl.call(globalThis, GENERATE_ENDPOINT, {
+      method: "POST",
+      headers: {
+        ...await request.requestHeaders(),
+        "Content-Type": "application/json"
+      },
+      cache: "no-cache",
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      return await throwHttpError(response, request.timeoutMs);
+    }
+    return await readStream(
+      response,
+      runtime,
+      request.identity,
+      request.timeoutMs
+    );
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw controller.signal.reason ?? error;
+    }
+    throw error;
+  } finally {
+    request.signal?.removeEventListener("abort", abortFromSignal);
+    if (stopEvent && remove) {
+      remove.call(eventSource, stopEvent, abortFromStop);
+    }
+  }
+}
+
+// src/llm/main-provider.ts
+var MAX_REQUEST_TIMEOUT_MS = 6e5;
 async function withLightweightMainReasoning(context, operation) {
-  const eventName = context.eventTypes?.["CHAT_COMPLETION_SETTINGS_READY"] ?? context.event_types?.["CHAT_COMPLETION_SETTINGS_READY"];
+  const eventName2 = context.eventTypes?.["CHAT_COMPLETION_SETTINGS_READY"] ?? context.event_types?.["CHAT_COMPLETION_SETTINGS_READY"];
   const eventSource = context.eventSource;
   const remove = eventSource?.off ?? eventSource?.removeListener;
-  if (!eventName || !eventSource || !remove) {
+  if (!eventName2 || !eventSource || !remove) {
     return operation();
   }
   const handler = (settings) => tuneInternalGenerationSettings(settings);
-  eventSource.on(eventName, handler);
+  eventSource.on(eventName2, handler);
   try {
     return await operation();
   } finally {
-    remove.call(eventSource, eventName, handler);
+    remove.call(eventSource, eventName2, handler);
   }
 }
 var MainLlmProvider = class {
+  constructor(fetchImpl = fetch, requestHeaders = getRequestHeaders, loadStreamingRuntime = loadMainStreamingRuntime) {
+    this.fetchImpl = fetchImpl;
+    this.requestHeaders = requestHeaders;
+    this.loadStreamingRuntime = loadStreamingRuntime;
+  }
   id = "main";
   async perform(request, captureMetadata) {
     const context = getContext();
@@ -2503,6 +2977,21 @@ var MainLlmProvider = class {
         context,
         () => runStoryEchoTaskAbortable(
           async () => {
+            const identity = getMainConnectionIdentity(context);
+            if (canStreamMainConnection(context, identity)) {
+              return completeMainConnectionStream({
+                context,
+                identity,
+                systemPrompt: options.systemPrompt,
+                prompt: options.prompt,
+                ...options.responseLength !== void 0 ? { responseLength: options.responseLength } : {},
+                timeoutMs: requestedTimeoutMs ?? MAX_REQUEST_TIMEOUT_MS,
+                ...timeoutController?.signal ?? request.signal ? { signal: timeoutController?.signal ?? request.signal } : {},
+                fetchImpl: this.fetchImpl,
+                requestHeaders: this.requestHeaders,
+                loadRuntime: this.loadStreamingRuntime
+              });
+            }
             if (captureMetadata && context.generateRawData && context.extractMessageFromData) {
               const payload = await context.generateRawData(options);
               return {
@@ -2557,51 +3046,6 @@ var MainLlmProvider = class {
   }
 };
 
-// src/http/response.ts
-async function readResponseTextWithLimit(response, maxBytes, tooLargeMessage) {
-  const declaredLengthHeader = response.headers.get("content-length");
-  const declaredLength = declaredLengthHeader === null ? Number.NaN : Number(declaredLengthHeader);
-  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-    try {
-      await response.body?.cancel();
-    } catch {
-    }
-    throw new Error(tooLargeMessage);
-  }
-  if (!response.body) {
-    const text = await response.text();
-    if (new TextEncoder().encode(text).byteLength > maxBytes) {
-      throw new Error(tooLargeMessage);
-    }
-    return text;
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const parts = [];
-  let receivedBytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      receivedBytes += value.byteLength;
-      if (receivedBytes > maxBytes) {
-        try {
-          await reader.cancel();
-        } catch {
-        }
-        throw new Error(tooLargeMessage);
-      }
-      parts.push(decoder.decode(value, { stream: true }));
-    }
-    parts.push(decoder.decode());
-    return parts.join("");
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 // src/llm/url.ts
 function normalizeChatCompletionsUrl(rawUrl, options) {
   const trimmed = rawUrl.trim();
@@ -2649,25 +3093,25 @@ function normalizeChatCompletionsBaseUrl(rawUrl, options) {
 }
 
 // src/llm/openai-compatible-provider.ts
-var GENERATE_ENDPOINT = "/api/backends/chat-completions/generate";
+var GENERATE_ENDPOINT2 = "/api/backends/chat-completions/generate";
 var MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 var MAX_REQUEST_TIMEOUT_MS2 = 6e5;
-function isRecord8(value) {
+function isRecord9(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function responseContent(payload) {
-  if (!isRecord8(payload)) {
+  if (!isRecord9(payload)) {
     return typeof payload === "string" ? payload : null;
   }
   const choices = payload["choices"];
-  const first = Array.isArray(choices) && isRecord8(choices[0]) ? choices[0] : null;
-  const message = first && isRecord8(first["message"]) ? first["message"] : null;
+  const first = Array.isArray(choices) && isRecord9(choices[0]) ? choices[0] : null;
+  const message = first && isRecord9(first["message"]) ? first["message"] : null;
   const content = message?.["content"];
   if (typeof content === "string") {
     return content;
   }
   if (Array.isArray(content)) {
-    return content.map((part) => isRecord8(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
+    return content.map((part) => isRecord9(part) && typeof part["text"] === "string" ? part["text"] : "").join("");
   }
   if (first && typeof first["text"] === "string") {
     return first["text"];
@@ -2676,11 +3120,11 @@ function responseContent(payload) {
 }
 function responseError(payload, fallback, apiKey) {
   let message = fallback;
-  if (isRecord8(payload)) {
+  if (isRecord9(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       message = error;
-    } else if (isRecord8(error) && typeof error["message"] === "string") {
+    } else if (isRecord9(error) && typeof error["message"] === "string") {
       message = error["message"];
     } else if (typeof payload["message"] === "string") {
       message = payload["message"];
@@ -2754,7 +3198,7 @@ var OpenAiCompatibleProvider = class {
       custom_exclude_body: ""
     };
     try {
-      const response = await this.fetchImpl.call(globalThis, GENERATE_ENDPOINT, {
+      const response = await this.fetchImpl.call(globalThis, GENERATE_ENDPOINT2, {
         method: "POST",
         headers: {
           ...await this.requestHeaders(),
@@ -4731,8 +5175,8 @@ var BackgroundProcessingScheduler = class {
     ];
     const branchEvents = /* @__PURE__ */ new Set(["CHAT_CHANGED", "MESSAGE_SWIPED", "MESSAGE_SWIPE_DELETED"]);
     for (const eventKey of mutationEvents) {
-      const eventName = eventTypes[eventKey];
-      if (!eventName || registeredNames.has(eventName)) {
+      const eventName2 = eventTypes[eventKey];
+      if (!eventName2 || registeredNames.has(eventName2)) {
         continue;
       }
       const handler = () => {
@@ -4745,9 +5189,9 @@ var BackgroundProcessingScheduler = class {
         }
         this.schedule();
       };
-      eventSource.on(eventName, handler);
-      this.registeredEvents.push({ eventName, eventSource, handler });
-      registeredNames.add(eventName);
+      eventSource.on(eventName2, handler);
+      this.registeredEvents.push({ eventName: eventName2, eventSource, handler });
+      registeredNames.add(eventName2);
     }
     const renamedEventName = eventTypes["CHAT_RENAMED"];
     if (renamedEventName && !registeredNames.has(renamedEventName)) {
@@ -4776,8 +5220,8 @@ var BackgroundProcessingScheduler = class {
       registeredNames.add(renamedEventName);
     }
     for (const eventKey of ["GENERATION_STOPPED", "GENERATION_ABORTED", "GENERATION_ENDED"]) {
-      const eventName = eventTypes[eventKey];
-      if (!eventName || registeredNames.has(eventName)) {
+      const eventName2 = eventTypes[eventKey];
+      if (!eventName2 || registeredNames.has(eventName2)) {
         continue;
       }
       const handler = () => {
@@ -4786,9 +5230,9 @@ var BackgroundProcessingScheduler = class {
         }
         storyEchoTaskCoordinator.releaseForegroundLease("generation-stopped");
       };
-      eventSource.on(eventName, handler);
-      this.registeredEvents.push({ eventName, eventSource, handler });
-      registeredNames.add(eventName);
+      eventSource.on(eventName2, handler);
+      this.registeredEvents.push({ eventName: eventName2, eventSource, handler });
+      registeredNames.add(eventName2);
     }
     logger.info("\u5DF2\u542F\u7528\u56DE\u590D\u540E\u7684\u540E\u53F0\u5386\u53F2\u603B\u7ED3\u3002");
     this.stopped = false;
@@ -5198,16 +5642,16 @@ function buildDebugReport(state, settings) {
 // src/llm/model-list.ts
 var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
 var MAX_RESPONSE_BYTES2 = 2 * 1024 * 1024;
-function isRecord9(value) {
+function isRecord10(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function errorMessage(payload, response, apiKey) {
   let detail = "";
-  if (isRecord9(payload)) {
+  if (isRecord10(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       detail = error;
-    } else if (isRecord9(error) && typeof error["message"] === "string") {
+    } else if (isRecord10(error) && typeof error["message"] === "string") {
       detail = error["message"];
     } else if (typeof payload["message"] === "string") {
       detail = payload["message"];
@@ -5219,13 +5663,13 @@ function errorMessage(payload, response, apiKey) {
   return suffix ? `${base} ${suffix}` : base;
 }
 function parseCustomModelList(payload) {
-  const root = isRecord9(payload) ? payload : null;
+  const root = isRecord10(payload) ? payload : null;
   const candidates = Array.isArray(root?.["models"]) ? root["models"] : Array.isArray(root?.["data"]) ? root["data"] : Array.isArray(payload) ? payload : [];
   const names = candidates.map((candidate) => {
     if (typeof candidate === "string") {
       return candidate.trim();
     }
-    if (!isRecord9(candidate)) {
+    if (!isRecord10(candidate)) {
       return "";
     }
     const value = candidate["id"] ?? candidate["model"] ?? candidate["name"];
@@ -5298,21 +5742,21 @@ async function fetchCustomLlmModels(config, fetchImpl = fetch, requestHeaders = 
 var EventSubscriptionScope = class {
   cleanups = [];
   disposed = false;
-  listen(target, eventName, handler) {
+  listen(target, eventName2, handler) {
     if (this.disposed) {
       return;
     }
-    target.addEventListener(eventName, handler);
-    this.cleanups.push(() => target.removeEventListener(eventName, handler));
+    target.addEventListener(eventName2, handler);
+    this.cleanups.push(() => target.removeEventListener(eventName2, handler));
   }
-  subscribe(eventSource, eventName, handler) {
+  subscribe(eventSource, eventName2, handler) {
     if (this.disposed) {
       return;
     }
-    eventSource.on(eventName, handler);
+    eventSource.on(eventName2, handler);
     this.cleanups.push(() => {
       const remove = eventSource.off ?? eventSource.removeListener;
-      remove?.call(eventSource, eventName, handler);
+      remove?.call(eventSource, eventName2, handler);
     });
   }
   dispose() {
@@ -5387,7 +5831,7 @@ async function loadTauriItemizedPromptRecord(chatId, recordId) {
   const value = await storage.getItem(
     `${TAURI_PROMPT_RECORD_PREFIX}${chatId}:${recordId}`
   );
-  return isRecord10(value) ? value : null;
+  return isRecord11(value) ? value : null;
 }
 function finiteTokens(value) {
   const number = typeof value === "number" ? value : Number(value);
@@ -5400,7 +5844,7 @@ function messageIdValue2(value) {
 function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord10(value) {
+function isRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function promptText(value) {
@@ -7892,7 +8336,7 @@ async function registerSettingsPanelOnce(generation) {
     const chatRefreshEvents = new Set([
       context.event_types?.["CHAT_CHANGED"] ?? context.eventTypes?.["CHAT_CHANGED"],
       context.event_types?.["CHAT_LOADED"] ?? context.eventTypes?.["CHAT_LOADED"]
-    ].filter((eventName) => Boolean(eventName)));
+    ].filter((eventName2) => Boolean(eventName2)));
     const promptRefreshEvents = new Set([
       context.event_types?.["MESSAGE_RECEIVED"] ?? context.eventTypes?.["MESSAGE_RECEIVED"],
       context.event_types?.["MESSAGE_SWIPED"] ?? context.eventTypes?.["MESSAGE_SWIPED"],
@@ -7903,16 +8347,16 @@ async function registerSettingsPanelOnce(generation) {
       context.event_types?.["ITEMIZED_PROMPTS_LOADED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_LOADED"],
       context.event_types?.["ITEMIZED_PROMPTS_SAVED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_SAVED"],
       context.event_types?.["ITEMIZED_PROMPTS_DELETED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_DELETED"]
-    ].filter((eventName) => Boolean(eventName)));
+    ].filter((eventName2) => Boolean(eventName2)));
     if (eventSource) {
-      for (const eventName of chatRefreshEvents) {
-        subscriptions.subscribe(eventSource, eventName, () => {
+      for (const eventName2 of chatRefreshEvents) {
+        subscriptions.subscribe(eventSource, eventName2, () => {
           promptTokenStatsCard.invalidate();
           globalThis.setTimeout(() => requestRefresh(panel), 0);
         });
       }
-      for (const eventName of promptRefreshEvents) {
-        subscriptions.subscribe(eventSource, eventName, () => {
+      for (const eventName2 of promptRefreshEvents) {
+        subscriptions.subscribe(eventSource, eventName2, () => {
           globalThis.setTimeout(() => requestRefresh(panel), 0);
         });
       }
