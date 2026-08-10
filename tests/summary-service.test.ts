@@ -124,6 +124,9 @@ describe('stage-summary prompt helpers', () => {
 
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('根据本批剧情的信息量、复杂度和后续影响自主决定篇幅');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不得为了缩短正文删除关键内容');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不用泛称替代仍会影响后续识别的专名');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('李玄清（此前被称为‘道长’）');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不用“关系升温”“发生冲突”“获得线索”“身份揭露”等抽象结论代替关键事实');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('完整、准确、无重复后自然收束');
     expect(instructions).not.toMatch(/\d+[～~-]\d+个中文字符/u);
     expect(instructions).not.toContain('输出预算');
