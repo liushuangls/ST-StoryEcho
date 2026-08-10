@@ -32,14 +32,14 @@ describe('latest SillyTavern prompt itemization', () => {
   it('uses the latest completed chat message and separates StoryEcho payloads', async () => {
     const skeleton = '<story_echo_skeleton>SKELETON</story_echo_skeleton>';
     const summary = '<story_echo_summary>SUM</story_echo_summary>';
+    const historyNotice = 'StoryEcho historical data precedence notice';
     const record = {
       mesId: 4,
       main_api: 'openai',
       tokenizer: 'DeepSeek tokenizer',
       presetName: 'default',
       rawPrompt: [
-        { role: 'system', content: skeleton },
-        { role: 'system', content: summary },
+        { role: 'system', content: `${historyNotice}\n${skeleton}\n${summary}` },
         { role: 'user', content: 'continue' },
       ],
       charDescription: 'character description',

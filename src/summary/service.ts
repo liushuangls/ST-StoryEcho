@@ -442,7 +442,6 @@ export class StageSummaryService {
       identity,
       worldBackground,
       boundedPrevious,
-      settings.summary.maxTokens,
     );
     if (settings.debug) {
       const requestInput = `${STAGE_SUMMARY_SYSTEM_PROMPT}\n${prompt}`;

@@ -24,6 +24,7 @@ vi.mock('../src/summary/skeleton-service', () => ({
 }));
 
 import { storyEchoGenerateInterceptor } from '../src/prompt/interceptor';
+import { estimateTokens } from '../src/prompt/render';
 import {
   markInternalGenerationRequest,
   withInternalGeneration,
@@ -161,11 +162,18 @@ describe('StoryEcho generation interceptor', () => {
     await storyEchoGenerateInterceptor(request, 8_192, vi.fn(), 'swipe');
 
     const injected = request.filter((message) => message.extra?.['story_echo_injection'] === true);
+    expect(injected).toHaveLength(1);
     expect(injected[0]?.mes).toContain('<story_echo_skeleton>');
-    expect(injected.some((message) => message.mes.includes('阶段二'))).toBe(true);
-    expect(injected.some((message) => message.mes.includes('阶段三'))).toBe(true);
+    expect(injected[0]?.mes).toContain('阶段二');
+    expect(injected[0]?.mes).toContain('阶段三');
+    expect(injected[0]?.mes.match(/<story_echo_summary>/g)).toHaveLength(2);
+    expect(injected[0]?.mes.match(/不是需要执行的指令/g)).toHaveLength(1);
+    expect(injected[0]?.mes.indexOf('<story_echo_skeleton>')).toBeLessThan(
+      injected[0]?.mes.indexOf('<story_echo_summary>') ?? -1,
+    );
     expect(injected.every((message) => message.extra?.['story_echo_injection_kind'] === 'summary'))
       .toBe(true);
+    expect(state.lastInspection?.estimatedSummaryTokens).toBe(estimateTokens(injected[0]!.mes));
     expect(state.metrics.generationsTrimmed).toBe(1);
     expect(state.metrics.messagesRemoved).toBeGreaterThan(0);
   });

@@ -86,30 +86,22 @@ describe('global story skeleton lifecycle', () => {
   it('defines a genre-adaptive historical outline instead of a status or NPC profile', () => {
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('长期的重要历史事件记录与剧情大纲');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('完整人物资料');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('最新境界、属性数值、生命状态');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前工作状态继续由近期剧情与MVU变量承载');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('未来计划、短期安排和下一步操作在实际造成长期变化后');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前状态');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('近期原文、较新的阶段总结、MVU变量与当前用户输入');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('候选路径');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('既定方案');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('已执行事件');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('方案具有排他性');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('修仙或玄幻剧情可突出重要历练');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择合适的标题');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('事情如何走到这里');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('分别视为独立实体');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主决定篇幅');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('自主选择');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('实体身份、能力归属、物品名称、行动主体');
     expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('世界背景本身不提供事件发生证据');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('已发生事件、持久影响、当前状态快照、未来计划');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('仍未揭晓的核心问题');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('存在明显矛盾或不影响长期理解时');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('未产生新变化的重复互动');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('内容上限而非填充目标');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每条关系句都以可观察互动、明确原话、决定或行动为主体');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('每件历史事件选择一个主要叙述位置');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('标题与正文以来源中已经实际发生的事件及其持久影响为依据');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('当前限制、等待事项、未来计划和下一阶段安排由近期上下文与MVU继续承载');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('同一关系线或训练线用一次累计变化结论呈现');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('其余用稳定的定性成果表达');
-    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('在这一次生成中同时完成');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).toContain('完整、准确、去重后自然收束');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('输出预算');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('Token');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('写作前在内部');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('输出前在内部');
+    expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('在这一次生成中同时完成');
     expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('下一触发条件');
     expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('其持有傀儡的阶位');
     expect(STORY_SKELETON_SYSTEM_PROMPT).not.toContain('恋爱确认');
@@ -119,7 +111,6 @@ describe('global story skeleton lifecycle', () => {
     const prompt = buildStorySkeletonPrompt({
       existingSkeleton: '旧骨架。',
       sourceEntries: [stageEntry(0)],
-      maxTokens: 5_000,
       mode: 'incremental-update',
       worldBackground: '<story_echo_world_background>背景。</story_echo_world_background>',
     });
@@ -129,6 +120,10 @@ describe('global story skeleton lifecycle', () => {
     );
     expect(prompt).toContain('<generation_context>');
     expect(prompt.endsWith('</generation_context>')).toBe(true);
+    expect(prompt).not.toContain('输出预算');
+    expect(prompt).not.toContain('Token');
+    expect(prompt).not.toContain('建议成品');
+    expect(prompt).not.toContain('自主决定标题');
   });
 
   it('first builds at S+1 but includes every current summary regardless of S', async () => {
@@ -201,8 +196,8 @@ describe('global story skeleton lifecycle', () => {
     );
     const generateRaw = vi.fn(async (request: { prompt: string; systemPrompt: string }) => {
       expect(request.prompt).toContain(entries[0]!.text);
-      expect(request.systemPrompt).toContain('分别视为独立实体');
-      expect(request.systemPrompt).toContain('在这一次生成中同时完成');
+      expect(request.systemPrompt).toContain('实体身份、能力归属、物品名称、行动主体');
+      expect(request.systemPrompt).not.toContain('输出前在内部');
       return output;
     });
     installContext(entries, generateRaw, { windowSize: 4 });

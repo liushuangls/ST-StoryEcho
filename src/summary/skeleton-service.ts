@@ -423,7 +423,6 @@ export class StorySkeletonService {
         prompt: buildStorySkeletonPrompt({
           existingSkeleton: acceptedPreviousSkeleton,
           sourceEntries: batch,
-          maxTokens: settings.summary.skeletonMaxTokens,
           mode,
           worldBackground,
         }),
@@ -522,7 +521,6 @@ export class StorySkeletonService {
         prompt: buildStorySkeletonPrompt({
           existingSkeleton: priorSkeleton.text,
           sourceEntries: [sourceEntry],
-          maxTokens: settings.summary.skeletonMaxTokens,
           mode: 'incremental-update',
           worldBackground,
         }),

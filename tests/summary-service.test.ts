@@ -32,6 +32,7 @@ import {
   boundedPreviousStageSummary,
   buildStageSummaryPrompt,
   MAX_PREVIOUS_STAGE_SUMMARY_CHARACTERS,
+  STAGE_SUMMARY_SYSTEM_PROMPT,
 } from '../src/summary/prompts';
 
 function settings(): StoryEchoSettings {
@@ -107,12 +108,30 @@ describe('stage-summary prompt helpers', () => {
       { userUiPersona: '用户', assistantCharacter: '角色' },
       '<story_echo_world_background>设定</story_echo_world_background>',
       '更早总结',
-      800,
     );
     expect(prompt).toContain('消息 10 到 11');
     expect(prompt).toContain('<history_messages>');
     expect(prompt).toContain('<previous_stage_summary>');
     expect(prompt).not.toContain('authoritative_facts');
+  });
+
+  it('uses content-adaptive instructions without exposing output budgets', () => {
+    const prompt = buildStageSummaryPrompt(
+      [{ is_user: true, mes: '开始行动' }, { is_user: false, mes: '行动完成' }],
+      10,
+    );
+    const instructions = `${STAGE_SUMMARY_SYSTEM_PROMPT}\n${prompt}`;
+
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('根据本批剧情的信息量、复杂度和后续影响自主决定篇幅');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不得为了缩短正文删除关键内容');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('完整、准确、无重复后自然收束');
+    expect(instructions).not.toMatch(/\d+[～~-]\d+个中文字符/u);
+    expect(instructions).not.toContain('输出预算');
+    expect(instructions).not.toContain('最大输出');
+    expect(instructions).not.toContain('Token');
+    expect(prompt).not.toContain('输出前核对');
+    expect(prompt).not.toContain('关系内容以');
+    expect(prompt).not.toContain('自主决定使用标题');
   });
 });
 

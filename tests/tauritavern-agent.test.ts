@@ -124,11 +124,16 @@ describe('TauriTavern Agent compatibility bridge', () => {
     const bridge = new TauriTavernAgentBridge(target);
     bridge.register(context);
     bridge.beginStoryEchoPreparation('chat-id');
-    bridge.markStoryEchoSummaryInjected('chat-id');
+    bridge.markStoryEchoSummaryInjected('chat-id', 3);
     handlers.get('completion-settings-ready')?.({
       messages: [{
         role: 'system',
-        content: '<story_echo_summary>older plot</story_echo_summary>',
+        content: [
+          'historical data notice',
+          '<story_echo_skeleton>old outline</story_echo_skeleton>',
+          '<story_echo_summary>older plot</story_echo_summary>',
+          '<story_echo_summary>newer plot</story_echo_summary>',
+        ].join('\n'),
       }],
     });
     target.dispatchEvent(customEvent('tauritavern-agent-run-state-changed', {

@@ -30,7 +30,6 @@ describe('context prompts', () => {
     const skeletonPrompt = buildStorySkeletonPrompt({
       existingSkeleton: '',
       sourceEntries: [],
-      maxTokens: 5_000,
       mode: 'initial-build',
     });
     for (const prompt of [

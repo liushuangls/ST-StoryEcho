@@ -27,6 +27,7 @@ import {
 import {
   estimateMessageTokens,
   estimateTokens,
+  renderStoryEchoHistory,
   renderStorySkeletonBlock,
   renderStageSummaryBlock,
 } from './render';
@@ -220,19 +221,18 @@ async function prepareStoryEchoPrompt(
         entry.sourceEndMessageId,
       ))
       .filter(Boolean);
+    const historyBlock = renderStoryEchoHistory(skeletonBlock, summaryBlocks);
     const estimatedRemovedTokens = estimateMessageTokens(chat, window.removableIndices);
-    const estimatedSummaryTokens = (skeletonBlock ? estimateTokens(skeletonBlock) : 0) +
-      summaryBlocks.reduce((total, block) => total + estimateTokens(block), 0);
+    const estimatedSummaryTokens = historyBlock ? estimateTokens(historyBlock) : 0;
 
     const retainedAnchor = chat[window.retainedStartIndex];
     removeMessagesAtIndices(chat, window.removableIndices);
-    if (skeletonBlock || summaryBlocks.length > 0) {
+    if (historyBlock) {
       const anchorIndex = retainedAnchor ? chat.indexOf(retainedAnchor) : 0;
       chat.splice(
         Math.max(0, anchorIndex),
         0,
-        ...(skeletonBlock ? [requestSystemMessage(skeletonBlock)] : []),
-        ...summaryBlocks.map(requestSystemMessage),
+        requestSystemMessage(historyBlock),
       );
       tauriTavernAgentBridge.markStoryEchoSummaryInjected(
         requestedChatId,
