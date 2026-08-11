@@ -52,4 +52,12 @@ describe('settings panel action layout', () => {
       '#story-echo-settings .story-echo-diagnostics-actions {\n    grid-template-columns: 1fr;',
     );
   });
+
+  it('draws an explicit red frame around output-truncated summaries', () => {
+    const truncatedRule = rule(
+      '#story-echo-settings .story-echo-summary-row-truncated {',
+    );
+
+    expect(truncatedRule).toContain('border: 2px solid #d9534f;');
+  });
 });

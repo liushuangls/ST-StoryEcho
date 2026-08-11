@@ -32,6 +32,27 @@ export function stageSummaryCharacterCount(entry: StageSummaryEntry): number {
   return Array.from(entry.text).length;
 }
 
+const TRUNCATED_SUMMARY_FINISH_REASONS = new Set([
+  'length',
+  'max_token',
+  'max_tokens',
+  'max_output_tokens',
+  'token_limit',
+  'output_token_limit',
+]);
+
+/** True when the provider stopped because its visible output budget was exhausted. */
+export function stageSummaryOutputTruncated(entry: StageSummaryEntry): boolean {
+  if (entry.manuallyEdited) {
+    return false;
+  }
+  const finishReason = entry.generation?.finishReason
+    ?.trim()
+    .toLocaleLowerCase()
+    .replace(/[\s-]+/gu, '_');
+  return Boolean(finishReason && TRUNCATED_SUMMARY_FINISH_REASONS.has(finishReason));
+}
+
 export function toggleSummarySelection(currentKey: string, clickedKey: string): string {
   return currentKey === clickedKey ? '' : clickedKey;
 }
@@ -621,6 +642,11 @@ export class StageSummaryMetadataManager {
       button.dataset.summaryKey = item.key;
       button.disabled = this.operationActive;
       button.classList.toggle('story-echo-summary-row-selected', item.key === this.selectedSummaryKey);
+      const outputTruncated = stageSummaryOutputTruncated(item.entry);
+      button.classList.toggle('story-echo-summary-row-truncated', outputTruncated);
+      if (outputTruncated) {
+        button.title = '该总结达到模型输出上限，内容可能在末尾截断。';
+      }
       button.setAttribute('aria-expanded', String(item.key === this.selectedSummaryKey));
       button.setAttribute('aria-controls', 'story-echo-summary-editor');
       const title = document.createElement('span');
@@ -633,6 +659,7 @@ export class StageSummaryMetadataManager {
         `#${item.index + 1}`,
         `消息 ${item.entry.sourceStartMessageId}～${item.entry.sourceEndMessageId}`,
         `${stageSummaryCharacterCount(item.entry)} 字`,
+        outputTruncated ? '输出截断' : '',
         stageSummaryDeliveryStatus(),
         formattedTime(item.entry.updatedAt),
         item.entry.manuallyEdited ? '人工编辑' : '',

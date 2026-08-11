@@ -6,14 +6,16 @@ import {
 } from '../src/summary/prompts';
 import {
   buildSummaryCompactionPrompt,
-  SUMMARY_COMPACTION_SYSTEM_PROMPT,
+  HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT,
+  LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT,
 } from '../src/summary/compaction-prompts';
 
 describe('context prompts', () => {
   it('contains only the retained context-management protocol tags', () => {
     const text = [
       STAGE_SUMMARY_SYSTEM_PROMPT,
-      SUMMARY_COMPACTION_SYSTEM_PROMPT,
+      LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT,
+      HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT,
       renderStageSummaryBlock('阶段纪要'),
     ].join('\n');
     expect(text).toContain('story_echo_summary');
@@ -39,7 +41,8 @@ describe('context prompts', () => {
     });
     for (const prompt of [
       `${STAGE_SUMMARY_SYSTEM_PROMPT}\n${stagePrompt}`,
-      `${SUMMARY_COMPACTION_SYSTEM_PROMPT}\n${compactionPrompt}`,
+      `${LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT}\n${compactionPrompt}`,
+      HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT,
     ]) {
       expect(prompt).toContain('标题');
       expect(prompt).toContain('自然段落');

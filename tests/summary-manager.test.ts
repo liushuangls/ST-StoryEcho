@@ -10,6 +10,7 @@ import {
   stageSummaryFullRebuildConfirmation,
   stageSummaryKey,
   stageSummaryManagerTemplate,
+  stageSummaryOutputTruncated,
   stageSummaryRebuildCheckpointText,
   stageSummaryRegenerationConfirmation,
   toggleSummarySelection,
@@ -47,6 +48,46 @@ describe('stage summary manager selection', () => {
 
   it('labels every active frontier entry as request-carried', () => {
     expect(stageSummaryDeliveryStatus()).toBe('随请求携带');
+  });
+
+  it('recognizes provider output-limit reasons without flagging normal or edited summaries', () => {
+    expect(stageSummaryOutputTruncated({
+      ...summary(0),
+      generation: {
+        provider: 'main',
+        requestedMaxTokens: 3_000,
+        responseCharacters: 100,
+        finishReason: 'length',
+      },
+    })).toBe(true);
+    expect(stageSummaryOutputTruncated({
+      ...summary(0),
+      generation: {
+        provider: 'main',
+        requestedMaxTokens: 3_000,
+        responseCharacters: 100,
+        finishReason: 'MAX-TOKENS',
+      },
+    })).toBe(true);
+    expect(stageSummaryOutputTruncated({
+      ...summary(0),
+      generation: {
+        provider: 'main',
+        requestedMaxTokens: 3_000,
+        responseCharacters: 100,
+        finishReason: 'stop',
+      },
+    })).toBe(false);
+    expect(stageSummaryOutputTruncated({
+      ...summary(0),
+      manuallyEdited: true,
+      generation: {
+        provider: 'main',
+        requestedMaxTokens: 3_000,
+        responseCharacters: 100,
+        finishReason: 'max_tokens',
+      },
+    })).toBe(false);
   });
 
   it('detects when a dirty editor target was replaced or updated', () => {

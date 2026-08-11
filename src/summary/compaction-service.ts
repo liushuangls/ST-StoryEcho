@@ -17,7 +17,7 @@ import { SettingsRepository } from '../settings/repository';
 import { StoryStateRepository } from '../state/repository';
 import {
   buildSummaryCompactionPrompt,
-  SUMMARY_COMPACTION_SYSTEM_PROMPT,
+  summaryCompactionSystemPrompt,
 } from './compaction-prompts';
 import {
   configuredSummaryCompactionThresholds,
@@ -148,7 +148,7 @@ export class SummaryCompactionService {
     const startedAt = performance.now();
     const worldBackground = await this.buildWorldBackground(state, sources, settings);
     const completion = await completeObservedInternalRequest(state, settings, {
-      system: SUMMARY_COMPACTION_SYSTEM_PROMPT,
+      system: summaryCompactionSystemPrompt(targetLevel),
       prompt: buildSummaryCompactionPrompt({ sources, targetLevel, worldBackground }),
       maxTokens: settings.summary.higherLevelMaxTokens,
       timeoutMs: SUMMARY_LLM_TIMEOUT_MS,

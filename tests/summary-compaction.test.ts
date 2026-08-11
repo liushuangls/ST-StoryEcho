@@ -36,7 +36,9 @@ import {
 } from '../src/summary/compaction-state';
 import {
   buildSummaryCompactionPrompt,
-  SUMMARY_COMPACTION_SYSTEM_PROMPT,
+  HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT,
+  LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT,
+  summaryCompactionSystemPrompt,
 } from '../src/summary/compaction-prompts';
 
 const thresholds = { level1: 10, higherLevels: 5 };
@@ -231,8 +233,11 @@ describe('SummaryCompactionService', () => {
     expect(mocks.complete).toHaveBeenCalledTimes(4);
     expect(onProgress).toHaveBeenCalledTimes(4);
     expect(onProgress).toHaveBeenCalledWith(expect.objectContaining({ pending: false }));
-    for (const [, request] of mocks.complete.mock.calls) {
+    for (const [index, [, request]] of mocks.complete.mock.calls.entries()) {
       expect(request).toMatchObject({ maxTokens: 8_000, timeoutMs: 300_000 });
+      expect(request.system).toBe(index < 3
+        ? LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT
+        : HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT);
     }
   });
 
@@ -434,17 +439,29 @@ describe('SummaryCompactionService', () => {
 });
 
 describe('summary compaction prompt', () => {
-  it('requests dense plain-text compression without exposing token budgets', () => {
+  it('uses a loss-bounded consolidation prompt for Level 2', () => {
     const prompt = buildSummaryCompactionPrompt({
       targetLevel: 2,
       sources: [bareEntry(0)],
     });
-    const all = `${SUMMARY_COMPACTION_SYSTEM_PROMPT}\n${prompt}`;
-    expect(all).toContain('高层级意味着更强压缩');
+    const all = `${summaryCompactionSystemPrompt(2)}\n${prompt}`;
+    expect(summaryCompactionSystemPrompt(2)).toBe(LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT);
+    expect(all).toContain('L2 是详细的中期归档层');
+    expect(all).toContain('起因—关键转折或选择—结果');
+    expect(all).toContain('逐条核对所有 source_summaries');
+    expect(all).toContain('成品理应明显长于任意一条来源总结');
+    expect(all).not.toContain('高层级意味着更强压缩');
     expect(all).toContain('source_summaries');
     expect(all).not.toContain('最大输出');
     expect(all).not.toContain('Token');
     expect(all).not.toContain('JSON 输出');
+  });
+
+  it('uses stronger long-term compression only for Level 3 and above', () => {
+    expect(summaryCompactionSystemPrompt(3)).toBe(HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT);
+    expect(summaryCompactionSystemPrompt(8)).toBe(HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT);
+    expect(summaryCompactionSystemPrompt(3)).toContain('高层级意味着更强压缩');
+    expect(summaryCompactionSystemPrompt(3)).toContain('最短因果链');
   });
 
   it('marks deleted sources as empty and includes optional world background', () => {
