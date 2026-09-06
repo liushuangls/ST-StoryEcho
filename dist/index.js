@@ -979,7 +979,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 3;
 var SETTINGS_VERSION = 12;
-var EXTENSION_VERSION = "0.21.15";
+var EXTENSION_VERSION = "0.21.16";
 
 // src/summary/constants.ts
 var SUMMARY_LLM_TIMEOUT_MS = 3e5;
@@ -1539,6 +1539,55 @@ function resetDiagnostics(state) {
   delete state.lastInspection;
 }
 
+// src/summary/truncation.ts
+var TRUNCATED_FINISH_REASONS = /* @__PURE__ */ new Set([
+  "length",
+  "max_token",
+  "max_tokens",
+  "max_output_tokens",
+  "token_limit",
+  "output_token_limit"
+]);
+var MAX_TRUNCATION_RANGES = 32;
+function stageSummaryOutputTruncated(entry) {
+  if (entry.manuallyEdited || entry.deleted) return false;
+  const reason = entry.generation?.finishReason?.trim().toLowerCase().replace(/[\s-]+/gu, "_");
+  return Boolean(reason && TRUNCATED_FINISH_REASONS.has(reason));
+}
+function normalizeTruncatedSourceRanges(value, start, end) {
+  if (!Array.isArray(value)) return [];
+  const ranges = value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const { sourceStartMessageId: first, sourceEndMessageId: last } = item;
+    if (!Number.isInteger(first) || !Number.isInteger(last) || first < start || last > end || first > last) {
+      return [];
+    }
+    return [{ sourceStartMessageId: first, sourceEndMessageId: last }];
+  }).sort((a, b) => a.sourceStartMessageId - b.sourceStartMessageId);
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && (range.sourceStartMessageId <= previous.sourceEndMessageId + 1 || merged.length >= MAX_TRUNCATION_RANGES)) {
+      previous.sourceEndMessageId = Math.max(previous.sourceEndMessageId, range.sourceEndMessageId);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+function stageSummarySourceTruncationRanges(entry) {
+  if (entry.deleted) return [];
+  return normalizeTruncatedSourceRanges(
+    entry.compaction?.sources.filter((source) => !source.deleted).flatMap((source) => source.truncatedSourceRanges ?? []),
+    entry.sourceStartMessageId,
+    entry.sourceEndMessageId
+  );
+}
+function summaryTruncationRanges(entry) {
+  const inherited = stageSummarySourceTruncationRanges(entry);
+  return stageSummaryOutputTruncated(entry) ? [{ sourceStartMessageId: entry.sourceStartMessageId, sourceEndMessageId: entry.sourceEndMessageId }] : inherited;
+}
+
 // src/state/repository.ts
 var MAX_EDITED_SUMMARY_CHARACTERS = 64e3;
 var LEGACY_SUMMARY_UPDATED_AT = "1970-01-01T00:00:00.000Z";
@@ -1579,6 +1628,11 @@ function normalizeCompactionSource(value) {
   if (!text && !deleted || sourceStartMessageId < 0 || sourceEndMessageId < sourceStartMessageId) {
     return null;
   }
+  const truncatedSourceRanges = deleted ? [] : normalizeTruncatedSourceRanges(
+    value["truncatedSourceRanges"],
+    sourceStartMessageId,
+    sourceEndMessageId
+  );
   return {
     text: deleted ? "" : text,
     level: positiveLevel(value["level"]),
@@ -1587,7 +1641,8 @@ function normalizeCompactionSource(value) {
     sourceHash: typeof value["sourceHash"] === "string" ? value["sourceHash"] : "",
     updatedAt: typeof value["updatedAt"] === "string" ? value["updatedAt"] : LEGACY_SUMMARY_UPDATED_AT,
     ...value["manuallyEdited"] === true ? { manuallyEdited: true } : {},
-    ...deleted ? { deleted: true } : {}
+    ...deleted ? { deleted: true } : {},
+    ...truncatedSourceRanges.length ? { truncatedSourceRanges } : {}
   };
 }
 function normalizeCompaction(value, parentLevel, parentStart, parentEnd) {
@@ -3287,6 +3342,7 @@ function renderStoryEchoHistory(summaryBlocks) {
 // src/reference/context.ts
 var WORLD_INFO_MODULE_URL = "/scripts/world-info.js";
 var MAX_REFERENCE_SOURCE_CHARACTERS = 1e5;
+var WORLD_INFO_READ_TIMEOUT_MS = 5e3;
 var worldInfoModulePromise;
 function clean(value) {
   return typeof value === "string" ? value.trim().slice(0, MAX_REFERENCE_SOURCE_CHARACTERS) : "";
@@ -3420,6 +3476,28 @@ async function sortedWorldInfoEntries(context) {
     throw error;
   }
 }
+async function boundedWorldInfoEntries(context, signal) {
+  throwIfStoryEchoTaskCancelled(signal);
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => {
+    controller.abort(new Error("\u4E16\u754C\u4E66\u8BFB\u53D6\u8D85\u8FC75\u79D2\uFF0C\u5DF2\u8DF3\u8FC7\u672C\u6B21\u80CC\u666F\u53C2\u8003\u3002"));
+  }, WORLD_INFO_READ_TIMEOUT_MS);
+  try {
+    return await runStoryEchoTaskAbortable(() => sortedWorldInfoEntries(context), controller.signal);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+function entryIdentity({ entry }) {
+  return [
+    clean(entry.world) || "\u672A\u547D\u540D\u4E16\u754C\u4E66",
+    entry.uid === void 0 ? "?" : String(entry.uid),
+    clean(entry.comment)
+  ].filter(Boolean).join("#");
+}
 function worldInfoEntryReference(matched, context, index) {
   const { entry, matchedKeys, activation } = matched;
   const header = [
@@ -3433,21 +3511,29 @@ ${escapeReferenceValue(
     safeSubstitute(context, clean(entry.content))
   )}`;
 }
-function fitWholeWorldInfoEntries(entries, context, maxCharacters) {
+function fitWholeWorldInfoEntries(entries, context, maxCharacters, maxEntries = Infinity) {
   const selected = [];
   const blocks = [];
+  const skipped = [];
+  let truncated = false;
   let characters = 0;
   for (const entry of entries) {
+    if (selected.length >= maxEntries) {
+      truncated = true;
+      break;
+    }
     const block = worldInfoEntryReference(entry, context, selected.length);
     const nextCharacters = characters + (blocks.length > 0 ? 2 : 0) + Array.from(block).length;
     if (nextCharacters > maxCharacters) {
-      return { entries: selected, text: blocks.join("\n\n"), truncated: true };
+      truncated = true;
+      if (skipped.length < 5) skipped.push(entryIdentity(entry).slice(0, 160));
+      continue;
     }
     selected.push(entry);
     blocks.push(block);
     characters = nextCharacters;
   }
-  return { entries: selected, text: blocks.join("\n\n"), truncated: false };
+  return { entries: selected, text: blocks.join("\n\n"), truncated, skipped };
 }
 function emptyReference(warnings = []) {
   return {
@@ -3462,7 +3548,8 @@ function emptyReference(warnings = []) {
     warnings
   };
 }
-async function buildHistoricalWorldInfoReferenceContext(messages, settings, context, maxCharacters) {
+async function buildHistoricalWorldInfoReferenceContext(messages, settings, context, maxCharacters, signal) {
+  throwIfStoryEchoTaskCancelled(signal);
   if (!settings.enabled) {
     return emptyReference();
   }
@@ -3473,11 +3560,11 @@ async function buildHistoricalWorldInfoReferenceContext(messages, settings, cont
     MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
     Math.max(0, Math.floor(settings.maxWorldInfoEntries))
   );
-  const constants = [];
-  const matches = [];
-  let matchOverflow = false;
+  let fittedConstants;
+  let fittedMatches;
   try {
-    const entries = (await sortedWorldInfoEntries(context)).filter((entry) => worldInfoEntryAvailable(entry, context, batchNames));
+    const constants = [];
+    const entries = (await boundedWorldInfoEntries(context, signal)).filter((entry) => worldInfoEntryAvailable(entry, context, batchNames));
     const seen = /* @__PURE__ */ new Set();
     const identityOf = (entry) => [
       clean(entry.world),
@@ -3495,38 +3582,35 @@ async function buildHistoricalWorldInfoReferenceContext(messages, settings, cont
         constants.push({ entry, matchedKeys: [], activation: "constant" });
       }
     }
-    for (const entry of entries) {
-      if (entry.constant === true) {
-        continue;
+    const matches = (function* () {
+      for (const entry of entries) {
+        if (entry.constant === true) continue;
+        const identity = identityOf(entry);
+        if (seen.has(identity)) continue;
+        const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
+        if (matchedKeys.length === 0) continue;
+        seen.add(identity);
+        yield { entry, matchedKeys, activation: "keyword" };
       }
-      const identity = identityOf(entry);
-      if (seen.has(identity)) {
-        continue;
-      }
-      const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
-      if (matchedKeys.length === 0) {
-        continue;
-      }
-      if (matches.length >= maximumMatches) {
-        matchOverflow = true;
-        continue;
-      }
-      seen.add(identity);
-      matches.push({ entry, matchedKeys, activation: "keyword" });
-    }
+    })();
+    fittedConstants = fitWholeWorldInfoEntries(constants, context, maxCharacters);
+    fittedMatches = fitWholeWorldInfoEntries(
+      matches,
+      context,
+      Math.max(0, maxCharacters - Array.from(fittedConstants.text).length),
+      maximumMatches
+    );
   } catch (error) {
+    throwIfStoryEchoTaskCancelled(signal);
     return emptyReference([
       `\u4E16\u754C\u4E66\u53C2\u8003\u8BFB\u53D6\u5931\u8D25\uFF1A${error instanceof Error ? error.message : String(error)}`
     ]);
   }
-  const fittedConstants = fitWholeWorldInfoEntries(constants, context, maxCharacters);
-  const constantCharacters = Array.from(fittedConstants.text).length;
-  const fittedMatches = fitWholeWorldInfoEntries(
-    matches,
-    context,
-    Math.max(0, maxCharacters - constantCharacters)
-  );
-  const truncated = fittedConstants.truncated || fittedMatches.truncated || matchOverflow;
+  const truncated = fittedConstants.truncated || fittedMatches.truncated;
+  const skipped = [...fittedConstants.skipped, ...fittedMatches.skipped].slice(0, 5);
+  if (skipped.length) {
+    warnings.push(`\u4E16\u754C\u4E66\u6761\u76EE\u8D85\u8FC7\u5269\u4F59\u5B57\u7B26\u9884\u7B97\uFF0C\u5DF2\u8DF3\u8FC7\u5E76\u7EE7\u7EED\u9009\u53D6\uFF08\u6700\u591A\u5217\u51FA5\u6761\uFF09\uFF1A${skipped.join("\u3001")}`);
+  }
   if (!fittedConstants.text && !fittedMatches.text) {
     return { ...emptyReference(warnings), truncated };
   }
@@ -3538,22 +3622,8 @@ async function buildHistoricalWorldInfoReferenceContext(messages, settings, cont
     ...fittedMatches.text ? ["<matched_world_info>", fittedMatches.text, "</matched_world_info>"] : [],
     "</story_echo_world_background>"
   ].join("\n");
-  let tokenCount = estimateTokens(text);
-  if (context.getTokenCountAsync) {
-    try {
-      const count = await context.getTokenCountAsync(text, 0);
-      if (Number.isFinite(count) && count >= 0) {
-        tokenCount = Math.ceil(count);
-      }
-    } catch {
-      warnings.push("\u9152\u9986Tokenizer\u4E0D\u53EF\u7528\uFF0C\u53C2\u8003\u4E0A\u4E0B\u6587Token\u7EDF\u8BA1\u4F7F\u7528\u672C\u5730\u4F30\u7B97\u3002");
-    }
-  }
-  const entryIdentity = ({ entry }) => [
-    clean(entry.world) || "\u672A\u547D\u540D\u4E16\u754C\u4E66",
-    entry.uid === void 0 ? "?" : String(entry.uid),
-    clean(entry.comment)
-  ].filter(Boolean).join("#");
+  const tokenCount = estimateTokens(text);
+  throwIfStoryEchoTaskCancelled(signal);
   const selected = [...fittedConstants.entries, ...fittedMatches.entries];
   return {
     text,
@@ -3567,20 +3637,22 @@ async function buildHistoricalWorldInfoReferenceContext(messages, settings, cont
     warnings
   };
 }
-async function buildSummaryWorldInfoReferenceContext(messages, settings, context = getContext()) {
+async function buildSummaryWorldInfoReferenceContext(messages, settings, context = getContext(), signal) {
   return buildHistoricalWorldInfoReferenceContext(
     messages,
     settings,
     context,
-    SUMMARY_WORLD_INFO_CHARACTER_BUDGET
+    SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
+    signal
   );
 }
-async function buildSummaryCompactionWorldInfoReferenceContext(messages, settings, context = getContext()) {
+async function buildSummaryCompactionWorldInfoReferenceContext(messages, settings, context = getContext(), signal) {
   return buildHistoricalWorldInfoReferenceContext(
     messages,
     settings,
     context,
-    SUMMARY_WORLD_INFO_CHARACTER_BUDGET
+    SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
+    signal
   );
 }
 
@@ -3655,6 +3727,7 @@ function thresholdForLevel(level, thresholds) {
   return Math.max(2, Math.floor(configured));
 }
 function summaryCompactionSource(entry) {
+  const truncatedSourceRanges = summaryTruncationRanges(entry);
   return {
     text: entry.text,
     level: entry.level,
@@ -3663,7 +3736,8 @@ function summaryCompactionSource(entry) {
     sourceHash: entry.sourceHash,
     updatedAt: entry.updatedAt,
     ...entry.manuallyEdited ? { manuallyEdited: true } : {},
-    ...entry.deleted ? { deleted: true } : {}
+    ...entry.deleted ? { deleted: true } : {},
+    ...truncatedSourceRanges.length ? { truncatedSourceRanges } : {}
   };
 }
 function summaryCompactionInput(sources) {
@@ -3675,14 +3749,16 @@ function summaryCompactionInput(sources) {
     sourceHash: source.sourceHash,
     updatedAt: source.updatedAt,
     manuallyEdited: Boolean(source.manuallyEdited),
-    deleted: Boolean(source.deleted)
+    deleted: Boolean(source.deleted),
+    // Omit absent markers so pre-marker provenance hashes remain valid.
+    ...source.truncatedSourceRanges?.length ? { truncatedSourceRanges: source.truncatedSourceRanges } : {}
   })));
 }
 function sameSummaryEntries(left, right) {
   return left.length === right.length && left.every((entry, index) => {
     const other = right[index];
     return Boolean(
-      other && entry.text === other.text && entry.level === other.level && entry.sourceStartMessageId === other.sourceStartMessageId && entry.sourceEndMessageId === other.sourceEndMessageId && entry.sourceHash === other.sourceHash && entry.updatedAt === other.updatedAt && Boolean(entry.manuallyEdited) === Boolean(other.manuallyEdited) && Boolean(entry.deleted) === Boolean(other.deleted) && entry.compaction?.inputHash === other.compaction?.inputHash
+      other && entry.text === other.text && entry.level === other.level && entry.sourceStartMessageId === other.sourceStartMessageId && entry.sourceEndMessageId === other.sourceEndMessageId && entry.sourceHash === other.sourceHash && entry.updatedAt === other.updatedAt && Boolean(entry.manuallyEdited) === Boolean(other.manuallyEdited) && Boolean(entry.deleted) === Boolean(other.deleted) && entry.compaction?.inputHash === other.compaction?.inputHash && JSON.stringify(summaryTruncationRanges(entry)) === JSON.stringify(summaryTruncationRanges(other))
     );
   });
 }
@@ -3868,9 +3944,6 @@ function isExplicitStoryPhaseBoundary(value) {
     const context = sentenceContext(value, match.index, match[0].length);
     return !HYPOTHETICAL_CUE.test(context) && !NEGATED_TRANSITION.test(context);
   });
-}
-function asksForEarlierStoryPhase(value) {
-  return EARLIER_STORY_PHASE_QUERY.some((pattern) => pattern.test(value));
 }
 function currentStoryPhaseStart(messages, currentInputMessageId) {
   const end = Math.min(messages.length - 1, Math.max(0, Math.floor(currentInputMessageId)));
@@ -4275,17 +4348,19 @@ var StageSummaryService = class {
     const startedAt = performance.now();
     const snapshotHash = await sha256(summarySourcePayload(chunk.snapshot, chunk.startMessageId));
     const identity = summaryIdentity(context);
+    const signal = storyEchoTaskCoordinator.activeTaskSignal();
     let worldBackground = "";
     try {
       const reference = await buildSummaryWorldInfoReferenceContext(
         chunk.snapshot,
         settings.summary.reference,
-        context
+        context,
+        signal
       );
       worldBackground = reference.text;
       recordDebugTrace(state, settings.debug, "summary", "\u9636\u6BB5\u603B\u7ED3\u4E16\u754C\u4E66\u80CC\u666F\u5DF2\u6784\u5EFA\u3002", {
         range: `${chunk.startMessageId}-${chunk.endMessageId}`,
-        tokens: reference.tokenCount,
+        estimatedTokens: reference.tokenCount,
         worldInfoEntries: reference.worldInfoEntries.join(",") || "-",
         constantWorldInfoEntries: reference.constantWorldInfoEntries?.length ?? 0,
         constantWorldInfoCharacters: reference.constantWorldInfoCharacters ?? 0,
@@ -4296,6 +4371,7 @@ var StageSummaryService = class {
         referencePreview: reference.text.slice(0, 4e3) || "-"
       });
     } catch (error) {
+      throwIfStoryEchoTaskCancelled(signal);
       recordDebugTrace(state, settings.debug, "error", "\u9636\u6BB5\u603B\u7ED3\u4E16\u754C\u4E66\u80CC\u666F\u6784\u5EFA\u5931\u8D25\uFF0C\u7EE7\u7EED\u4EC5\u4F7F\u7528\u804A\u5929\u6B63\u6587\u3002", {
         range: `${chunk.startMessageId}-${chunk.endMessageId}`,
         error: error instanceof Error ? error.message : String(error)
@@ -4867,19 +4943,23 @@ var SummaryCompactionService = class {
     if (referenceMessages.length === 0) {
       return "";
     }
+    const signal = storyEchoTaskCoordinator.activeTaskSignal();
     try {
       const reference = await buildSummaryCompactionWorldInfoReferenceContext(
         referenceMessages,
-        settings.summary.reference
+        settings.summary.reference,
+        getContext(),
+        signal
       );
       recordDebugTrace(state, settings.debug, "summary", "\u9AD8\u5C42\u603B\u7ED3\u4E16\u754C\u4E66\u80CC\u666F\u5DF2\u6784\u5EFA\u3002", {
-        tokens: reference.tokenCount,
+        estimatedTokens: reference.tokenCount,
         worldInfoEntries: reference.worldInfoEntries.join(",") || "-",
         truncated: reference.truncated,
         warnings: reference.warnings.join(" | ") || "-"
       });
       return reference.text;
     } catch (error) {
+      throwIfStoryEchoTaskCancelled(signal);
       recordDebugTrace(state, settings.debug, "error", "\u9AD8\u5C42\u603B\u7ED3\u4E16\u754C\u4E66\u80CC\u666F\u6784\u5EFA\u5931\u8D25\uFF0C\u7EE7\u7EED\u4EC5\u4F7F\u7528\u6765\u6E90\u603B\u7ED3\u3002", {
         error: error instanceof Error ? error.message : String(error)
       });
@@ -5581,19 +5661,11 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatI
       return;
     }
     const activeStageSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
-    const currentInput = sourceChat[minimumSourceWindow.currentInputIndex]?.mes ?? "";
     const storyPhaseBoundary = currentStoryPhaseStart(
       sourceChat,
       minimumSourceWindow.currentInputIndex
     );
-    const includeEarlierPhase = asksForEarlierStoryPhase(currentInput);
-    const summaryEntries = storyPhaseBoundary !== null && !includeEarlierPhase ? activeStageSummaries.filter((entry) => entry.level > 1 || entry.sourceStartMessageId >= storyPhaseBoundary) : activeStageSummaries;
-    if (summaryEntries.length < activeStageSummaries.length) {
-      recordDebugTrace(state, settings.debug, "interceptor", "\u5F53\u524D\u5267\u60C5\u9636\u6BB5\u5DF2\u7701\u7565\u8F83\u65E9\u9636\u6BB5\u603B\u7ED3\u3002", {
-        boundaryMessageId: storyPhaseBoundary ?? -1,
-        excludedSummaries: activeStageSummaries.length - summaryEntries.length
-      });
-    }
+    const summaryEntries = activeStageSummaries;
     if (summaryCompactionDue(
       state.stageSummary.entries,
       configuredSummaryCompactionThresholds(settings.summary)
@@ -6865,20 +6937,12 @@ function stageSummaryKey(entry) {
 function stageSummaryCharacterCount(entry) {
   return Array.from(entry.text).length;
 }
-var TRUNCATED_SUMMARY_FINISH_REASONS = /* @__PURE__ */ new Set([
-  "length",
-  "max_token",
-  "max_tokens",
-  "max_output_tokens",
-  "token_limit",
-  "output_token_limit"
-]);
-function stageSummaryOutputTruncated(entry) {
-  if (entry.manuallyEdited) {
-    return false;
-  }
-  const finishReason = entry.generation?.finishReason?.trim().toLocaleLowerCase().replace(/[\s-]+/gu, "_");
-  return Boolean(finishReason && TRUNCATED_SUMMARY_FINISH_REASONS.has(finishReason));
+function stageSummaryTruncationWarning(entry) {
+  const ranges = stageSummarySourceTruncationRanges(entry);
+  return [
+    stageSummaryOutputTruncated(entry) ? "\u8BE5\u603B\u7ED3\u8FBE\u5230\u6A21\u578B\u8F93\u51FA\u4E0A\u9650\uFF0C\u5185\u5BB9\u53EF\u80FD\u5728\u672B\u5C3E\u622A\u65AD\u3002" : "",
+    ranges.length ? `\u6765\u6E90\u53EF\u80FD\u4E0D\u5B8C\u6574\uFF1A\u6D88\u606F ${ranges.map((range) => `${range.sourceStartMessageId}\uFF5E${range.sourceEndMessageId}`).join("\u3001")} \u66FE\u53D7\u8F93\u51FA\u622A\u65AD\u5F71\u54CD\uFF1B\u672C\u6B21\u6B63\u5E38\u7ED3\u675F\u4E0D\u4EE3\u8868\u6765\u6E90\u5DF2\u8865\u5168\u3002` : ""
+  ].filter(Boolean).join("\n");
 }
 function toggleSummarySelection(currentKey, clickedKey) {
   return currentKey === clickedKey ? "" : clickedKey;
@@ -6947,6 +7011,7 @@ function sourceText(entry) {
     sourceHash: entry.sourceHash,
     characterCount: stageSummaryCharacterCount(entry),
     generation: entry.generation ?? null,
+    truncationWarning: stageSummaryTruncationWarning(entry) || null,
     compaction: entry.compaction ? {
       sourceLevel: entry.compaction.sourceLevel,
       sourceEntryCount: entry.compaction.sourceEntryCount,
@@ -6958,7 +7023,8 @@ function sourceText(entry) {
         sourceHash: source.sourceHash,
         characterCount: Array.from(source.text).length,
         manuallyEdited: Boolean(source.manuallyEdited),
-        deleted: Boolean(source.deleted)
+        deleted: Boolean(source.deleted),
+        truncatedSourceRanges: source.truncatedSourceRanges ?? []
       }))
     } : null,
     manuallyEdited: Boolean(entry.manuallyEdited),
@@ -7381,10 +7447,9 @@ ${consequence}
       button.disabled = this.operationActive;
       button.classList.toggle("story-echo-summary-row-selected", item.key === this.selectedSummaryKey);
       const outputTruncated = stageSummaryOutputTruncated(item.entry);
-      button.classList.toggle("story-echo-summary-row-truncated", outputTruncated);
-      if (outputTruncated) {
-        button.title = "\u8BE5\u603B\u7ED3\u8FBE\u5230\u6A21\u578B\u8F93\u51FA\u4E0A\u9650\uFF0C\u5185\u5BB9\u53EF\u80FD\u5728\u672B\u5C3E\u622A\u65AD\u3002";
-      }
+      const sourceTruncated = stageSummarySourceTruncationRanges(item.entry).length > 0;
+      button.classList.toggle("story-echo-summary-row-truncated", outputTruncated || sourceTruncated);
+      button.title = stageSummaryTruncationWarning(item.entry);
       button.setAttribute("aria-expanded", String(item.key === this.selectedSummaryKey));
       button.setAttribute("aria-controls", "story-echo-summary-editor");
       const title = document.createElement("span");
@@ -7398,6 +7463,7 @@ ${consequence}
         `\u6D88\u606F ${item.entry.sourceStartMessageId}\uFF5E${item.entry.sourceEndMessageId}`,
         `${stageSummaryCharacterCount(item.entry)} \u5B57`,
         outputTruncated ? "\u8F93\u51FA\u622A\u65AD" : "",
+        sourceTruncated ? "\u6765\u6E90\u53EF\u80FD\u4E0D\u5B8C\u6574" : "",
         stageSummaryDeliveryStatus(),
         formattedTime(item.entry.updatedAt),
         item.entry.manuallyEdited ? "\u4EBA\u5DE5\u7F16\u8F91" : ""

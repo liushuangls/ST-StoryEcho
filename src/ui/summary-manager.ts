@@ -19,8 +19,11 @@ import {
   summaryLevelCounts,
 } from '../summary/compaction-state';
 import { stageSummaryService } from '../summary/service';
+import { stageSummaryOutputTruncated, stageSummarySourceTruncationRanges } from '../summary/truncation';
 import { notify } from './notifications';
 import { paginateItems } from './pagination';
+
+export { stageSummaryOutputTruncated } from '../summary/truncation';
 
 export const SUMMARY_PAGE_SIZE = 10;
 
@@ -32,25 +35,14 @@ export function stageSummaryCharacterCount(entry: StageSummaryEntry): number {
   return Array.from(entry.text).length;
 }
 
-const TRUNCATED_SUMMARY_FINISH_REASONS = new Set([
-  'length',
-  'max_token',
-  'max_tokens',
-  'max_output_tokens',
-  'token_limit',
-  'output_token_limit',
-]);
-
-/** True when the provider stopped because its visible output budget was exhausted. */
-export function stageSummaryOutputTruncated(entry: StageSummaryEntry): boolean {
-  if (entry.manuallyEdited) {
-    return false;
-  }
-  const finishReason = entry.generation?.finishReason
-    ?.trim()
-    .toLocaleLowerCase()
-    .replace(/[\s-]+/gu, '_');
-  return Boolean(finishReason && TRUNCATED_SUMMARY_FINISH_REASONS.has(finishReason));
+export function stageSummaryTruncationWarning(entry: StageSummaryEntry): string {
+  const ranges = stageSummarySourceTruncationRanges(entry);
+  return [
+    stageSummaryOutputTruncated(entry) ? '该总结达到模型输出上限，内容可能在末尾截断。' : '',
+    ranges.length
+      ? `来源可能不完整：消息 ${ranges.map((range) => `${range.sourceStartMessageId}～${range.sourceEndMessageId}`).join('、')} 曾受输出截断影响；本次正常结束不代表来源已补全。`
+      : '',
+  ].filter(Boolean).join('\n');
 }
 
 export function toggleSummarySelection(currentKey: string, clickedKey: string): string {
@@ -158,6 +150,7 @@ function sourceText(entry: StageSummaryEntry): string {
     sourceHash: entry.sourceHash,
     characterCount: stageSummaryCharacterCount(entry),
     generation: entry.generation ?? null,
+    truncationWarning: stageSummaryTruncationWarning(entry) || null,
     compaction: entry.compaction ? {
       sourceLevel: entry.compaction.sourceLevel,
       sourceEntryCount: entry.compaction.sourceEntryCount,
@@ -170,6 +163,7 @@ function sourceText(entry: StageSummaryEntry): string {
         characterCount: Array.from(source.text).length,
         manuallyEdited: Boolean(source.manuallyEdited),
         deleted: Boolean(source.deleted),
+        truncatedSourceRanges: source.truncatedSourceRanges ?? [],
       })),
     } : null,
     manuallyEdited: Boolean(entry.manuallyEdited),
@@ -643,10 +637,9 @@ export class StageSummaryMetadataManager {
       button.disabled = this.operationActive;
       button.classList.toggle('story-echo-summary-row-selected', item.key === this.selectedSummaryKey);
       const outputTruncated = stageSummaryOutputTruncated(item.entry);
-      button.classList.toggle('story-echo-summary-row-truncated', outputTruncated);
-      if (outputTruncated) {
-        button.title = '该总结达到模型输出上限，内容可能在末尾截断。';
-      }
+      const sourceTruncated = stageSummarySourceTruncationRanges(item.entry).length > 0;
+      button.classList.toggle('story-echo-summary-row-truncated', outputTruncated || sourceTruncated);
+      button.title = stageSummaryTruncationWarning(item.entry);
       button.setAttribute('aria-expanded', String(item.key === this.selectedSummaryKey));
       button.setAttribute('aria-controls', 'story-echo-summary-editor');
       const title = document.createElement('span');
@@ -660,6 +653,7 @@ export class StageSummaryMetadataManager {
         `消息 ${item.entry.sourceStartMessageId}～${item.entry.sourceEndMessageId}`,
         `${stageSummaryCharacterCount(item.entry)} 字`,
         outputTruncated ? '输出截断' : '',
+        sourceTruncated ? '来源可能不完整' : '',
         stageSummaryDeliveryStatus(),
         formattedTime(item.entry.updatedAt),
         item.entry.manuallyEdited ? '人工编辑' : '',

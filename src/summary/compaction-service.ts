@@ -12,7 +12,8 @@ import { mergeDebugTraces, recordDebugTrace } from '../debug/metrics';
 import { completeObservedInternalRequest } from '../llm/observed-completion';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { buildSummaryCompactionWorldInfoReferenceContext } from '../reference/context';
-import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
+import { isStoryEchoTaskCancelledError, throwIfStoryEchoTaskCancelled } from '../runtime/task-cancellation';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SettingsRepository } from '../settings/repository';
 import { StoryStateRepository } from '../state/repository';
 import {
@@ -116,19 +117,23 @@ export class SummaryCompactionService {
     if (referenceMessages.length === 0) {
       return '';
     }
+    const signal = storyEchoTaskCoordinator.activeTaskSignal();
     try {
       const reference = await buildSummaryCompactionWorldInfoReferenceContext(
         referenceMessages,
         settings.summary.reference,
+        getContext(),
+        signal,
       );
       recordDebugTrace(state, settings.debug, 'summary', '高层总结世界书背景已构建。', {
-        tokens: reference.tokenCount,
+        estimatedTokens: reference.tokenCount,
         worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
         truncated: reference.truncated,
         warnings: reference.warnings.join(' | ') || '-',
       });
       return reference.text;
     } catch (error) {
+      throwIfStoryEchoTaskCancelled(signal);
       recordDebugTrace(state, settings.debug, 'error', '高层总结世界书背景构建失败，继续仅使用来源总结。', {
         error: error instanceof Error ? error.message : String(error),
       });

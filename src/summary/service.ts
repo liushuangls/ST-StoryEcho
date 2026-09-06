@@ -24,7 +24,8 @@ import { estimateTokens } from '../prompt/render';
 import { buildSummaryWorldInfoReferenceContext } from '../reference/context';
 import { SettingsRepository } from '../settings/repository';
 import { StoryStateRepository } from '../state/repository';
-import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
+import { isStoryEchoTaskCancelledError, throwIfStoryEchoTaskCancelled } from '../runtime/task-cancellation';
+import { storyEchoTaskCoordinator } from '../runtime/task-coordinator';
 import { SUMMARY_LLM_TIMEOUT_MS } from './constants';
 import { sameSummaryEntries } from './compaction-state';
 import {
@@ -484,17 +485,19 @@ export class StageSummaryService {
     const startedAt = performance.now();
     const snapshotHash = await sha256(summarySourcePayload(chunk.snapshot, chunk.startMessageId));
     const identity = summaryIdentity(context);
+    const signal = storyEchoTaskCoordinator.activeTaskSignal();
     let worldBackground = '';
     try {
       const reference = await buildSummaryWorldInfoReferenceContext(
         chunk.snapshot,
         settings.summary.reference,
         context,
+        signal,
       );
       worldBackground = reference.text;
       recordDebugTrace(state, settings.debug, 'summary', '阶段总结世界书背景已构建。', {
         range: `${chunk.startMessageId}-${chunk.endMessageId}`,
-        tokens: reference.tokenCount,
+        estimatedTokens: reference.tokenCount,
         worldInfoEntries: reference.worldInfoEntries.join(',') || '-',
         constantWorldInfoEntries: reference.constantWorldInfoEntries?.length ?? 0,
         constantWorldInfoCharacters: reference.constantWorldInfoCharacters ?? 0,
@@ -505,6 +508,7 @@ export class StageSummaryService {
         referencePreview: reference.text.slice(0, 4_000) || '-',
       });
     } catch (error) {
+      throwIfStoryEchoTaskCancelled(signal);
       recordDebugTrace(state, settings.debug, 'error', '阶段总结世界书背景构建失败，继续仅使用聊天正文。', {
         range: `${chunk.startMessageId}-${chunk.endMessageId}`,
         error: error instanceof Error ? error.message : String(error),

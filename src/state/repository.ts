@@ -13,6 +13,7 @@ import { normalizeInternalLlmAttempts } from '../debug/internal-llm-attempts';
 import { createMetrics, normalizeMetrics } from '../debug/metrics';
 import { normalizeLlmCompletionMetadata } from '../llm/completion-metadata';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
+import { normalizeTruncatedSourceRanges } from '../summary/truncation';
 
 export interface StageSummaryEdit {
   text: string;
@@ -71,6 +72,9 @@ function normalizeCompactionSource(value: unknown): SummaryCompactionSource | nu
   ) {
     return null;
   }
+  const truncatedSourceRanges = deleted ? [] : normalizeTruncatedSourceRanges(
+    value['truncatedSourceRanges'], sourceStartMessageId, sourceEndMessageId,
+  );
   return {
     text: deleted ? '' : text,
     level: positiveLevel(value['level']),
@@ -82,6 +86,7 @@ function normalizeCompactionSource(value: unknown): SummaryCompactionSource | nu
       : LEGACY_SUMMARY_UPDATED_AT,
     ...(value['manuallyEdited'] === true ? { manuallyEdited: true } : {}),
     ...(deleted ? { deleted: true } : {}),
+    ...(truncatedSourceRanges.length ? { truncatedSourceRanges } : {}),
   };
 }
 

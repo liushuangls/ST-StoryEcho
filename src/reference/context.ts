@@ -6,6 +6,7 @@ import {
   type SillyTavernWorldInfoEntry,
 } from '../platform/sillytavern';
 import { estimateTokens } from '../prompt/render';
+import { runStoryEchoTaskAbortable, throwIfStoryEchoTaskCancelled } from '../runtime/task-cancellation';
 import {
   MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
   SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
@@ -13,6 +14,7 @@ import {
 
 const WORLD_INFO_MODULE_URL = '/scripts/world-info.js';
 const MAX_REFERENCE_SOURCE_CHARACTERS = 100_000;
+export const WORLD_INFO_READ_TIMEOUT_MS = 5_000;
 
 interface WorldInfoModule {
   getSortedEntries?: () => Promise<SillyTavernWorldInfoEntry[]>;
@@ -226,6 +228,33 @@ async function sortedWorldInfoEntries(
   }
 }
 
+async function boundedWorldInfoEntries(
+  context: SillyTavernContext,
+  signal?: AbortSignal,
+): Promise<SillyTavernWorldInfoEntry[]> {
+  throwIfStoryEchoTaskCancelled(signal);
+  const controller = new AbortController();
+  const onAbort = (): void => controller.abort(signal?.reason);
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => {
+    controller.abort(new Error('世界书读取超过5秒，已跳过本次背景参考。'));
+  }, WORLD_INFO_READ_TIMEOUT_MS);
+  try {
+    return await runStoryEchoTaskAbortable(() => sortedWorldInfoEntries(context), controller.signal);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+function entryIdentity({ entry }: MatchedWorldInfoEntry): string {
+  return [
+    clean(entry.world) || '未命名世界书',
+    entry.uid === undefined ? '?' : String(entry.uid),
+    clean(entry.comment),
+  ].filter(Boolean).join('#');
+}
+
 function worldInfoEntryReference(
   matched: MatchedWorldInfoEntry,
   context: SillyTavernContext,
@@ -246,24 +275,33 @@ function worldInfoEntryReference(
 }
 
 function fitWholeWorldInfoEntries(
-  entries: readonly MatchedWorldInfoEntry[],
+  entries: Iterable<MatchedWorldInfoEntry>,
   context: SillyTavernContext,
   maxCharacters: number,
-): { entries: MatchedWorldInfoEntry[]; text: string; truncated: boolean } {
+  maxEntries = Infinity,
+): { entries: MatchedWorldInfoEntry[]; text: string; truncated: boolean; skipped: string[] } {
   const selected: MatchedWorldInfoEntry[] = [];
   const blocks: string[] = [];
+  const skipped: string[] = [];
+  let truncated = false;
   let characters = 0;
   for (const entry of entries) {
+    if (selected.length >= maxEntries) {
+      truncated = true;
+      break;
+    }
     const block = worldInfoEntryReference(entry, context, selected.length);
     const nextCharacters = characters + (blocks.length > 0 ? 2 : 0) + Array.from(block).length;
     if (nextCharacters > maxCharacters) {
-      return { entries: selected, text: blocks.join('\n\n'), truncated: true };
+      truncated = true;
+      if (skipped.length < 5) skipped.push(entryIdentity(entry).slice(0, 160));
+      continue;
     }
     selected.push(entry);
     blocks.push(block);
     characters = nextCharacters;
   }
-  return { entries: selected, text: blocks.join('\n\n'), truncated: false };
+  return { entries: selected, text: blocks.join('\n\n'), truncated, skipped };
 }
 
 function emptyReference(warnings: string[] = []): WorldInfoReferenceContext {
@@ -285,7 +323,9 @@ async function buildHistoricalWorldInfoReferenceContext(
   settings: StoryEchoSettings['summary']['reference'],
   context: SillyTavernContext,
   maxCharacters: number,
+  signal?: AbortSignal,
 ): Promise<WorldInfoReferenceContext> {
+  throwIfStoryEchoTaskCancelled(signal);
   if (!settings.enabled) {
     return emptyReference();
   }
@@ -301,12 +341,12 @@ async function buildHistoricalWorldInfoReferenceContext(
     MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
     Math.max(0, Math.floor(settings.maxWorldInfoEntries)),
   );
-  const constants: MatchedWorldInfoEntry[] = [];
-  const matches: MatchedWorldInfoEntry[] = [];
-  let matchOverflow = false;
+  let fittedConstants: ReturnType<typeof fitWholeWorldInfoEntries>;
+  let fittedMatches: ReturnType<typeof fitWholeWorldInfoEntries>;
 
   try {
-    const entries = (await sortedWorldInfoEntries(context))
+    const constants: MatchedWorldInfoEntry[] = [];
+    const entries = (await boundedWorldInfoEntries(context, signal))
       .filter((entry) => worldInfoEntryAvailable(entry, context, batchNames));
     const seen = new Set<string>();
     const identityOf = (entry: SillyTavernWorldInfoEntry): string => [
@@ -326,41 +366,38 @@ async function buildHistoricalWorldInfoReferenceContext(
         constants.push({ entry, matchedKeys: [], activation: 'constant' });
       }
     }
-    for (const entry of entries) {
-      if (entry.constant === true) {
-        continue;
+    const matches = (function* (): Generator<MatchedWorldInfoEntry> {
+      for (const entry of entries) {
+        if (entry.constant === true) continue;
+        const identity = identityOf(entry);
+        if (seen.has(identity)) continue;
+        const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
+        if (matchedKeys.length === 0) continue;
+        seen.add(identity);
+        yield { entry, matchedKeys, activation: 'keyword' };
       }
-      const identity = identityOf(entry);
-      if (seen.has(identity)) {
-        continue;
-      }
-      const matchedKeys = matchedWorldInfoKeys(entry, historyText, context, batchNames);
-      if (matchedKeys.length === 0) {
-        continue;
-      }
-      if (matches.length >= maximumMatches) {
-        matchOverflow = true;
-        continue;
-      }
-      seen.add(identity);
-      matches.push({ entry, matchedKeys, activation: 'keyword' });
-    }
+    })();
+    // Blue-light constants have priority. Oversized entries do not consume
+    // selection slots; green lights may only use the remaining character budget.
+    fittedConstants = fitWholeWorldInfoEntries(constants, context, maxCharacters);
+    fittedMatches = fitWholeWorldInfoEntries(
+      matches,
+      context,
+      Math.max(0, maxCharacters - Array.from(fittedConstants.text).length),
+      maximumMatches,
+    );
   } catch (error) {
+    throwIfStoryEchoTaskCancelled(signal);
     return emptyReference([
       `世界书参考读取失败：${error instanceof Error ? error.message : String(error)}`,
     ]);
   }
 
-  // Blue-light constants have priority. Green-light matches may only consume
-  // the formatted character budget left after the selected constants.
-  const fittedConstants = fitWholeWorldInfoEntries(constants, context, maxCharacters);
-  const constantCharacters = Array.from(fittedConstants.text).length;
-  const fittedMatches = fitWholeWorldInfoEntries(
-    matches,
-    context,
-    Math.max(0, maxCharacters - constantCharacters),
-  );
-  const truncated = fittedConstants.truncated || fittedMatches.truncated || matchOverflow;
+  const truncated = fittedConstants.truncated || fittedMatches.truncated;
+  const skipped = [...fittedConstants.skipped, ...fittedMatches.skipped].slice(0, 5);
+  if (skipped.length) {
+    warnings.push(`世界书条目超过剩余字符预算，已跳过并继续选取（最多列出5条）：${skipped.join('、')}`);
+  }
   if (!fittedConstants.text && !fittedMatches.text) {
     return { ...emptyReference(warnings), truncated };
   }
@@ -377,22 +414,10 @@ async function buildHistoricalWorldInfoReferenceContext(
       : []),
     '</story_echo_world_background>',
   ].join('\n');
-  let tokenCount = estimateTokens(text);
-  if (context.getTokenCountAsync) {
-    try {
-      const count = await context.getTokenCountAsync(text, 0);
-      if (Number.isFinite(count) && count >= 0) {
-        tokenCount = Math.ceil(count);
-      }
-    } catch {
-      warnings.push('酒馆Tokenizer不可用，参考上下文Token统计使用本地估算。');
-    }
-  }
-  const entryIdentity = ({ entry }: MatchedWorldInfoEntry): string => [
-    clean(entry.world) || '未命名世界书',
-    entry.uid === undefined ? '?' : String(entry.uid),
-    clean(entry.comment),
-  ].filter(Boolean).join('#');
+  // Diagnostic only: never put a host tokenizer/network request on the
+  // generation path. The real LLM request has its own output budget.
+  const tokenCount = estimateTokens(text);
+  throwIfStoryEchoTaskCancelled(signal);
   const selected = [...fittedConstants.entries, ...fittedMatches.entries];
   return {
     text,
@@ -411,12 +436,14 @@ export async function buildSummaryWorldInfoReferenceContext(
   messages: TavernChatMessage[],
   settings: StoryEchoSettings['summary']['reference'],
   context = getContext(),
+  signal?: AbortSignal,
 ): Promise<WorldInfoReferenceContext> {
   return buildHistoricalWorldInfoReferenceContext(
     messages,
     settings,
     context,
     SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
+    signal,
   );
 }
 
@@ -424,11 +451,13 @@ export async function buildSummaryCompactionWorldInfoReferenceContext(
   messages: TavernChatMessage[],
   settings: StoryEchoSettings['summary']['reference'],
   context = getContext(),
+  signal?: AbortSignal,
 ): Promise<WorldInfoReferenceContext> {
   return buildHistoricalWorldInfoReferenceContext(
     messages,
     settings,
     context,
     SUMMARY_WORLD_INFO_CHARACTER_BUDGET,
+    signal,
   );
 }

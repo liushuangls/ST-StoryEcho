@@ -1,9 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SillyTavernContext, SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import {
   buildSummaryCompactionWorldInfoReferenceContext,
   buildSummaryWorldInfoReferenceContext,
+  WORLD_INFO_READ_TIMEOUT_MS,
 } from '../src/reference/context';
+import { estimateTokens } from '../src/prompt/render';
+import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
+
+afterEach(() => vi.useRealTimers());
 
 function context(entries: SillyTavernWorldInfoEntry[]): SillyTavernContext {
   return {
@@ -26,6 +31,95 @@ const messages = [
 ];
 
 describe('world-book reference context', () => {
+  it('never waits for the host tokenizer for diagnostic counts', async () => {
+    const host = context([{ uid: 1, content: '钟楼背景', constant: true }]);
+    host.getTokenCountAsync = vi.fn(() => new Promise<number>(() => {}));
+    const result = await buildSummaryWorldInfoReferenceContext(messages, { enabled: true, maxWorldInfoEntries: 5 }, host);
+    expect(result.tokenCount).toBe(estimateTokens(result.text));
+    expect(host.getTokenCountAsync).not.toHaveBeenCalled();
+  });
+
+  it('bounds a stalled world-book read and handles its later rejection', async () => {
+    vi.useFakeTimers();
+    let rejectRead!: (error: Error) => void;
+    const host = context([]);
+    host.getSortedWorldInfoEntries = vi.fn(() => new Promise<SillyTavernWorldInfoEntry[]>((_resolve, reject) => { rejectRead = reject; }));
+    const pending = buildSummaryWorldInfoReferenceContext(messages, { enabled: true, maxWorldInfoEntries: 5 }, host);
+    await vi.advanceTimersByTimeAsync(WORLD_INFO_READ_TIMEOUT_MS);
+    const result = await pending;
+    expect(result.text).toBe('');
+    expect(result.warnings.join()).toContain('世界书读取超过5秒');
+    expect(vi.getTimerCount()).toBe(0);
+    rejectRead(new Error('late rejection'));
+    await Promise.resolve();
+  });
+
+  it('cleans up the read deadline and abort listener after a normal result', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+    const result = await buildSummaryWorldInfoReferenceContext(messages, { enabled: true, maxWorldInfoEntries: 5 }, context([
+      { uid: 1, content: '正常背景', constant: true },
+    ]), controller.signal);
+    expect(result.text).toContain('正常背景');
+    expect(vi.getTimerCount()).toBe(0);
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
+
+  it('still reports malformed lazy world-book matches as reference failures', async () => {
+    const result = await buildSummaryWorldInfoReferenceContext(messages, { enabled: true, maxWorldInfoEntries: 5 }, context([
+      { uid: 1, content: '背景', key: [null as unknown as string] },
+    ]));
+    expect(result.text).toBe('');
+    expect(result.warnings.join()).toContain('世界书参考读取失败');
+  });
+
+  it.each([false, true])('propagates cancellation instead of falling back (already aborted: %s)', async (alreadyAborted) => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const reason = new StoryEchoTaskCancelledError('切换聊天');
+    const host = context([]);
+    host.getSortedWorldInfoEntries = vi.fn(() => new Promise<SillyTavernWorldInfoEntry[]>(() => {}));
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
+    if (alreadyAborted) controller.abort(reason);
+    const pending = buildSummaryCompactionWorldInfoReferenceContext(messages, { enabled: true, maxWorldInfoEntries: 5 }, host, controller.signal);
+    const rejected = expect(pending).rejects.toBe(reason);
+    if (!alreadyAborted) controller.abort(reason);
+    await rejected;
+    expect(vi.getTimerCount()).toBe(0);
+    if (alreadyAborted) expect(host.getSortedWorldInfoEntries).not.toHaveBeenCalled();
+    else expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
+
+  it('skips oversized entries without consuming the green-light selection limit', async () => {
+    const result = await buildSummaryWorldInfoReferenceContext(messages, { enabled: true, maxWorldInfoEntries: 1 }, context([
+      { uid: 1, content: '超'.repeat(51_000), constant: true },
+      { uid: 2, content: '蓝灯规则', constant: true },
+      { uid: 3, content: '大'.repeat(51_000), key: ['钟楼'] },
+      { uid: 4, content: '小条目描述银色钥匙的用途', key: ['钟楼'] },
+      { uid: 5, content: '超过条数限制', key: ['钟楼'] },
+    ]));
+    expect(result.constantWorldInfoEntries).toEqual(['未命名世界书#2']);
+    expect(result.matchedWorldInfoEntries).toEqual(['未命名世界书#4']);
+    expect(result.text).toContain('小条目描述银色钥匙的用途');
+    expect(result.text).not.toContain('超过条数限制');
+    expect(result.warnings.join()).toContain('未命名世界书#1');
+    expect(result.warnings.join()).toContain('未命名世界书#3');
+    expect(result.truncated).toBe(true);
+  });
+
+  it('continues after a block exceeds the remaining budget, without partial blocks', async () => {
+    const result = await buildSummaryCompactionWorldInfoReferenceContext(messages, { enabled: true, maxWorldInfoEntries: 2 }, context([
+      { uid: 1, content: '蓝'.repeat(45_000), constant: true },
+      { uid: 2, content: '大'.repeat(6_000), key: ['钟楼'] },
+      { uid: 3, content: '小'.repeat(3_000), key: ['钟楼'] },
+    ]));
+    expect(result.matchedWorldInfoEntries).toEqual(['未命名世界书#3']);
+    expect(result.text).not.toContain('大');
+    expect(result.text).toContain('小'.repeat(3_000));
+    expect(result.constantWorldInfoCharacters + result.matchedWorldInfoCharacters).toBeLessThanOrEqual(50_000);
+  });
+
   it('includes blue-light entries and directly matched green-light entries', async () => {
     const result = await buildSummaryWorldInfoReferenceContext(
       messages,

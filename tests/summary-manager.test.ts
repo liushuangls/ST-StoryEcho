@@ -11,6 +11,7 @@ import {
   stageSummaryKey,
   stageSummaryManagerTemplate,
   stageSummaryOutputTruncated,
+  stageSummaryTruncationWarning,
   stageSummaryRebuildCheckpointText,
   stageSummaryRegenerationConfirmation,
   toggleSummarySelection,
@@ -88,6 +89,23 @@ describe('stage summary manager selection', () => {
         finishReason: 'max_tokens',
       },
     })).toBe(false);
+  });
+
+  it('distinguishes source incompleteness from output truncation even after manual editing', () => {
+    const parent: StageSummaryEntry = {
+      ...summary(0), level: 2, sourceEndMessageId: 19,
+      generation: { provider: 'main', requestedMaxTokens: 8000, responseCharacters: 10, finishReason: 'stop' },
+      compaction: {
+        sourceLevel: 1, sourceEntryCount: 2, inputHash: 'hash',
+        sources: [{ ...summary(0), truncatedSourceRanges: [{ sourceStartMessageId: 0, sourceEndMessageId: 9 }] }, summary(1)],
+      },
+    };
+    expect(stageSummaryOutputTruncated(parent)).toBe(false);
+    expect(stageSummaryTruncationWarning(parent)).toContain('来源可能不完整：消息 0～9');
+    expect(stageSummaryTruncationWarning(parent)).not.toContain('该总结达到模型输出上限');
+    expect(stageSummaryTruncationWarning({ ...parent, manuallyEdited: true })).toContain('来源可能不完整');
+    expect(stageSummaryTruncationWarning({ ...parent, generation: { ...parent.generation!, finishReason: 'length' } }))
+      .toContain('该总结达到模型输出上限');
   });
 
   it('detects when a dirty editor target was replaced or updated', () => {

@@ -4,6 +4,9 @@ import type { StoryEchoChatState } from '../src/core/types';
 import { StoryStateRepository } from '../src/state/repository';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState } from './fixtures';
+import { summaryCompactionInput, summaryCompactionSource } from '../src/summary/compaction-state';
+import { stageSummarySourceTruncationRanges } from '../src/summary/truncation';
+import { sha256 } from '../src/core/hash';
 
 function install(
   stored: unknown,
@@ -47,6 +50,26 @@ afterEach(() => {
 });
 
 describe('StoryStateRepository', () => {
+  it('preserves inherited truncation markers and provenance hashes across save/reload', async () => {
+    const sources = [
+      summaryCompactionSource({ ...entry(0, 9), generation: {
+        provider: 'main', requestedMaxTokens: 3000, finishReason: 'length', responseCharacters: 9,
+      } }),
+      summaryCompactionSource(entry(10, 19)),
+    ];
+    const inputHash = await sha256(summaryCompactionInput(sources));
+    const state = chatState({ stageSummary: {
+      entries: [{ ...entry(0, 19), level: 2, compaction: { sourceLevel: 1, sourceEntryCount: 2, inputHash, sources } }],
+      coveredThroughMessageId: 19, coveredThroughHash: 'hash-0',
+    } });
+    install(state);
+    const repository = new StoryStateRepository();
+    await repository.save(repository.getExisting()!);
+    const parent = repository.getExisting()!.stageSummary.entries[0]!;
+    expect(stageSummarySourceTruncationRanges(parent)).toEqual([{ sourceStartMessageId: 0, sourceEndMessageId: 9 }]);
+    expect(await sha256(summaryCompactionInput(parent.compaction!.sources))).toBe(inputHash);
+  });
+
   it('creates an isolated context state for a new chat', async () => {
     const { chatMetadata, saveMetadata } = install(undefined);
     const state = await new StoryStateRepository().getOrCreate();

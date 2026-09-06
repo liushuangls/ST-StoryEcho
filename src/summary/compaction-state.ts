@@ -3,6 +3,7 @@ import type {
   StoryEchoSettings,
   SummaryCompactionSource,
 } from '../core/types';
+import { summaryTruncationRanges } from './truncation';
 
 export interface SummaryCompactionCandidate {
   level: number;
@@ -30,6 +31,7 @@ function thresholdForLevel(level: number, thresholds: SummaryCompactionThreshold
 }
 
 export function summaryCompactionSource(entry: StageSummaryEntry): SummaryCompactionSource {
+  const truncatedSourceRanges = summaryTruncationRanges(entry);
   return {
     text: entry.text,
     level: entry.level,
@@ -39,6 +41,7 @@ export function summaryCompactionSource(entry: StageSummaryEntry): SummaryCompac
     updatedAt: entry.updatedAt,
     ...(entry.manuallyEdited ? { manuallyEdited: true } : {}),
     ...(entry.deleted ? { deleted: true } : {}),
+    ...(truncatedSourceRanges.length ? { truncatedSourceRanges } : {}),
   };
 }
 
@@ -52,6 +55,10 @@ export function summaryCompactionInput(sources: readonly SummaryCompactionSource
     updatedAt: source.updatedAt,
     manuallyEdited: Boolean(source.manuallyEdited),
     deleted: Boolean(source.deleted),
+    // Omit absent markers so pre-marker provenance hashes remain valid.
+    ...(source.truncatedSourceRanges?.length
+      ? { truncatedSourceRanges: source.truncatedSourceRanges }
+      : {}),
   })));
 }
 
@@ -71,7 +78,8 @@ export function sameSummaryEntries(
       entry.updatedAt === other.updatedAt &&
       Boolean(entry.manuallyEdited) === Boolean(other.manuallyEdited) &&
       Boolean(entry.deleted) === Boolean(other.deleted) &&
-      entry.compaction?.inputHash === other.compaction?.inputHash
+      entry.compaction?.inputHash === other.compaction?.inputHash &&
+      JSON.stringify(summaryTruncationRanges(entry)) === JSON.stringify(summaryTruncationRanges(other))
     );
   });
 }

@@ -7,10 +7,7 @@ import type {
 } from '../core/types';
 import { emitDiagnosticsUpdated } from '../debug/events';
 import { recordDebugTrace } from '../debug/metrics';
-import {
-  asksForEarlierStoryPhase,
-  currentStoryPhaseStart,
-} from '../history/story-phase';
+import { currentStoryPhaseStart } from '../history/story-phase';
 import { isInternalGenerationRequest } from '../llm/internal-generation';
 import { getContext, getCurrentChatId } from '../platform/sillytavern';
 import { tauriTavernAgentBridge } from '../platform/tauritavern-agent';
@@ -181,25 +178,14 @@ async function prepareStoryEchoPrompt(
     }
 
     const activeStageSummaries = state.stageSummary.entries.filter((entry) => !entry.deleted);
-    const currentInput = sourceChat[minimumSourceWindow.currentInputIndex]?.mes ?? '';
     const storyPhaseBoundary = currentStoryPhaseStart(
       sourceChat,
       minimumSourceWindow.currentInputIndex,
     );
-    const includeEarlierPhase = asksForEarlierStoryPhase(currentInput);
-    // Higher levels preserve compressed long-term continuity. Only Level 1
-    // scene detail is isolated when a new story phase explicitly begins.
-    const summaryEntries = storyPhaseBoundary !== null && !includeEarlierPhase
-      ? activeStageSummaries.filter((entry) => (
-          entry.level > 1 || entry.sourceStartMessageId >= storyPhaseBoundary
-        ))
-      : activeStageSummaries;
-    if (summaryEntries.length < activeStageSummaries.length) {
-      recordDebugTrace(state, settings.debug, 'interceptor', '当前剧情阶段已省略较早阶段总结。', {
-        boundaryMessageId: storyPhaseBoundary ?? -1,
-        excludedSummaries: activeStageSummaries.length - summaryEntries.length,
-      });
-    }
+    // A chapter change is not a reset of commitments, identities or custody.
+    // Every live frontier entry is the sole representation of its removed raw
+    // range, regardless of level. History labels separate it from the new scene.
+    const summaryEntries = activeStageSummaries;
     if (summaryCompactionDue(
       state.stageSummary.entries,
       configuredSummaryCompactionThresholds(settings.summary),

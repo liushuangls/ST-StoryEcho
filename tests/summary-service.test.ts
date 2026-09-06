@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StoryEchoChatState, StoryEchoSettings, TavernChatMessage } from '../src/core/types';
 import { LlmRequestRetryError, LlmRequestTimeoutError } from '../src/llm/errors';
 import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
+import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
+import { getContext, type SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { chatState } from './fixtures';
 
@@ -83,6 +85,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  storyEchoTaskCoordinator.resetForTests();
   vi.unstubAllGlobals();
 });
 
@@ -144,6 +147,28 @@ describe('stage-summary prompt helpers', () => {
 });
 
 describe('StageSummaryService', () => {
+  it('releases a cancelled world-book preparation without starting the LLM', async () => {
+    const chat = completedChat(2);
+    const currentSettings = settings();
+    currentSettings.summary.reference.enabled = true;
+    install(chat, currentSettings);
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    getContext().getSortedWorldInfoEntries = () => {
+      markStarted();
+      return new Promise<SillyTavernWorldInfoEntry[]>(() => {});
+    };
+    const pending = storyEchoTaskCoordinator.enqueueBackground('summary', () => new StageSummaryService().processAllThrough(chat.length - 1));
+    const rejected = expect(pending).rejects.toBeInstanceOf(StoryEchoTaskCancelledError);
+    await started;
+    const foreground = storyEchoTaskCoordinator.enqueueForeground('test foreground', async () => true);
+    await rejected;
+    await expect(foreground).resolves.toBe(true);
+    expect(mocks.complete).not.toHaveBeenCalled();
+    expect(mocks.state?.stageSummary.entries).toHaveLength(0);
+    expect(mocks.state?.metrics.summaryFailures).toBe(0);
+  });
+
   it('waits until the configured number of complete turns exists', async () => {
     const chat = completedChat(1);
     install(chat);

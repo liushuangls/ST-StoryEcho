@@ -1,5 +1,9 @@
 node_modules/
 coverage/
+evals/results/
+.env
+.env.*
+!.env.example
 .idea/
 *.log
 .DS_Store

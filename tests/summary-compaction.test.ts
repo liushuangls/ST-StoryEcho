@@ -8,6 +8,10 @@ import type {
 } from '../src/core/types';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
 import { summarySourcePayload } from '../src/summary/source';
+import { stageSummaryOutputTruncated, stageSummarySourceTruncationRanges } from '../src/summary/truncation';
+import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
+import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
+import { getContext, type SillyTavernWorldInfoEntry } from '../src/platform/sillytavern';
 import { chatState } from './fixtures';
 
 const mocks = vi.hoisted(() => ({
@@ -33,6 +37,8 @@ import { SummaryCompactionService } from '../src/summary/compaction-service';
 import {
   findSummaryCompactionCandidate,
   summaryCompactionDue,
+  summaryCompactionInput,
+  summaryCompactionSource,
 } from '../src/summary/compaction-state';
 import {
   buildSummaryCompactionPrompt,
@@ -127,10 +133,26 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  storyEchoTaskCoordinator.resetForTests();
   vi.unstubAllGlobals();
 });
 
 describe('summary compaction planning', () => {
+  it('preserves legacy input hashes when no truncation markers exist', () => {
+    const sources = [bareEntry(0), bareEntry(1)].map(summaryCompactionSource);
+    const legacyInput = JSON.stringify(sources.map((source) => ({
+      text: source.text,
+      level: source.level,
+      sourceStartMessageId: source.sourceStartMessageId,
+      sourceEndMessageId: source.sourceEndMessageId,
+      sourceHash: source.sourceHash,
+      updatedAt: source.updatedAt,
+      manuallyEdited: Boolean(source.manuallyEdited),
+      deleted: Boolean(source.deleted),
+    })));
+    expect(summaryCompactionInput(sources)).toBe(legacyInput);
+  });
+
   it('uses separate L1 and L2+ fan-in thresholds', () => {
     const l1 = Array.from({ length: 11 }, (_, index) => bareEntry(index));
     expect(findSummaryCompactionCandidate(l1, thresholds)).toMatchObject({
@@ -239,6 +261,62 @@ describe('SummaryCompactionService', () => {
         ? LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT
         : HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT);
     }
+  });
+
+  it('cancels high-level world-book preparation without submitting a completion', async () => {
+    const messages = chat(3);
+    const entries = await entriesForChat(messages);
+    install(messages, entries);
+    const host = getContext();
+    const currentSettings = settings();
+    currentSettings.summary.reference.enabled = true;
+    host.extensionSettings['story_echo'] = currentSettings;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    host.getSortedWorldInfoEntries = () => {
+      markStarted();
+      return new Promise<SillyTavernWorldInfoEntry[]>(() => {});
+    };
+    // install() returns a fresh host facade; preserve the one with the stalled hook.
+    vi.stubGlobal('SillyTavern', { getContext: () => host });
+    const pending = storyEchoTaskCoordinator.enqueueBackground('compaction', () => new SummaryCompactionService().processNextIfNeeded());
+    const rejected = expect(pending).rejects.toBeInstanceOf(StoryEchoTaskCancelledError);
+    await started;
+    const foreground = storyEchoTaskCoordinator.enqueueForeground('test foreground', async () => true);
+    await rejected;
+    await expect(foreground).resolves.toBe(true);
+    expect(mocks.complete).not.toHaveBeenCalled();
+    expect(mocks.state?.stageSummary.entries).toEqual(entries);
+    expect(mocks.state?.metrics.summaryCompactionFailures).toBe(0);
+  });
+
+  it('carries truncated L1 source risk through L2, L3 and regeneration without changing the prompt', async () => {
+    const messages = chat(7);
+    const entries = await entriesForChat(messages);
+    entries[0]!.generation = {
+      provider: 'main', requestedMaxTokens: 3000, responseCharacters: 6, finishReason: 'max_tokens',
+    };
+    install(messages, entries);
+    const service = new SummaryCompactionService();
+    const result = await service.processAllPending();
+    const parent = result.state!.stageSummary.entries[0]!;
+    expect(parent.level).toBe(3);
+    expect(stageSummaryOutputTruncated(parent)).toBe(false);
+    expect(stageSummarySourceTruncationRanges(parent)).toEqual([
+      { sourceStartMessageId: 0, sourceEndMessageId: 0 },
+    ]);
+    const regenerated = await service.regenerateEntry(parent.sourceStartMessageId, parent.updatedAt);
+    expect(stageSummarySourceTruncationRanges(regenerated.entry)).toEqual([
+      { sourceStartMessageId: 0, sourceEndMessageId: 0 },
+    ]);
+    for (const [, request] of mocks.complete.mock.calls) {
+      expect(request.prompt).not.toContain('truncatedSourceRanges');
+      expect(request.prompt).not.toContain('来源可能不完整');
+    }
+    regenerated.entry.compaction!.sources[0]!.truncatedSourceRanges = [];
+    const requestCount = mocks.complete.mock.calls.length;
+    await expect(service.regenerateEntry(parent.sourceStartMessageId)).rejects.toThrow('来源记录校验失败');
+    expect(mocks.complete).toHaveBeenCalledTimes(requestCount);
   });
 
   it('preserves an interrupted full-rebuild checkpoint while compacting active summaries', async () => {

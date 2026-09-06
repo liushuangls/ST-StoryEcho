@@ -83,6 +83,11 @@ export interface StoryEchoSettings {
   };
 }
 
+export interface SummarySourceRange {
+  sourceStartMessageId: number;
+  sourceEndMessageId: number;
+}
+
 export interface SummaryCompactionSource {
   text: string;
   level: number;
@@ -92,6 +97,8 @@ export interface SummaryCompactionSource {
   updatedAt: string;
   manuallyEdited?: boolean;
   deleted?: boolean;
+  /** Conservative ranges affected by truncated output at any descendant level. */
+  truncatedSourceRanges?: SummarySourceRange[];
 }
 
 export interface SummaryCompactionProvenance {

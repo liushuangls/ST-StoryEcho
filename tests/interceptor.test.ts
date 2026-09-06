@@ -92,6 +92,29 @@ afterEach(() => {
 });
 
 describe('StoryEcho generation interceptor', () => {
+  it.each(['normal', 'swipe', 'regenerate'])('keeps earlier L1 commitments after a chapter change during %s', async (type) => {
+    const state = chatState();
+    state.stageSummary = {
+      entries: [summary('沈青承诺三日后在白塔把银钥匙交给白鹭，尚未兑现，钥匙仍由沈青保管。', 0, 1)],
+      coveredThroughMessageId: 1,
+      coveredThroughHash: 'hash-0-1',
+    };
+    const original = install(state, settings(), [
+      { is_user: true, mes: '三日后在白塔交付银钥匙。' },
+      { is_user: false, mes: '沈青仍保管钥匙。' },
+      { is_user: true, mes: '上一段剧情已经结束，现在进入新的篇章。' },
+      { is_user: false, mes: '众人走入山谷。' },
+      { is_user: true, mes: '银钥匙现在由谁保管？白塔的约定还有效吗？' },
+    ]);
+    const request = structuredClone(original);
+    await storyEchoGenerateInterceptor(request, 8192, vi.fn(), type);
+    const injected = request.filter((message) => message.extra?.['story_echo_injection']);
+    expect(injected).toHaveLength(1);
+    expect(injected[0]?.mes).toContain(state.stageSummary.entries[0]!.text);
+    expect(request.slice(1)).toEqual(original.slice(2));
+    expect(state.lastInspection?.estimatedSummaryTokens).toBeGreaterThan(0);
+  });
+
   it('does nothing while the only feature switch is disabled', async () => {
     const state = chatState();
     const original = install(state, settings(false));
