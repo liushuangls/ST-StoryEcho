@@ -14,7 +14,6 @@ import {
 } from './evaluator';
 import {
   requestPromptEvalCompletion,
-  type PromptEvalClientConfig,
   type PromptEvalCompletion,
 } from './openai-compatible-client';
 import type {
@@ -27,16 +26,11 @@ import {
   measurePromptEvalText,
   PROMPT_EVAL_COMPRESSION_METRIC,
 } from './measurements';
+import { clientConfiguration } from './config';
+import { assertCompatibleEvaluationProtocol, caseEvaluationHash, evalHash, PROMPT_EVAL_PROTOCOL_HASH } from './protocol';
+import { assertPromptEvalComplete, isPromptEvalTruncated } from './completion';
 
-const RESULT_SCHEMA_VERSION = 3;
-const TRUNCATED_FINISH_REASONS = new Set([
-  'length',
-  'max_token',
-  'max_tokens',
-  'max_output_tokens',
-  'token_limit',
-  'output_token_limit',
-]);
+const RESULT_SCHEMA_VERSION = 4;
 
 interface StoredCompletion {
   finishReason: string;
@@ -52,6 +46,7 @@ interface PromptEvalCaseResult {
   name: string;
   kind: PromptEvalKind;
   promptHash: string;
+  evaluationHash: string;
   passed: boolean;
   outputTruncated: boolean;
   sourceCharacters: number;
@@ -59,7 +54,7 @@ interface PromptEvalCaseResult {
   requestCharacters: number;
   outputCharacters: number;
   compressionRatio: number;
-  idealCompressionRatio: { min: number; max: number };
+  idealCompressionRatio?: { min: number; max: number };
   generatedSummary?: string;
   generation?: StoredCompletion;
   judge?: StoredCompletion;
@@ -72,10 +67,12 @@ interface PromptEvalCaseResult {
 interface PromptEvalRunResult {
   schemaVersion: number;
   compressionMetric: typeof PROMPT_EVAL_COMPRESSION_METRIC;
+  evaluationProtocolHash: string;
   storyEchoVersion: string;
   generatedAt: string;
   generatorModel: string;
   judgeModel: string;
+  judgeConnectionHash: string;
   selfJudging: boolean;
   caseFilter: string[];
   cases: PromptEvalCaseResult[];
@@ -93,13 +90,14 @@ interface PromptEvalAggregate {
   uncertaintyPrecision: number;
   focusAndUsability: number;
   forbiddenClaimSafety: number;
-  compressionEfficiency: number;
+  compressionEfficiency: number | null;
   errorPenalty: number;
   overall: number;
 }
 
 interface BaselineCase {
   id: string;
+  evaluationHash: string;
   passed: boolean;
   scores?: PromptEvalScores;
 }
@@ -107,6 +105,7 @@ interface BaselineCase {
 interface BaselineRun {
   generatorModel?: string;
   judgeModel?: string;
+  judgeConnectionHash: string;
   cases: BaselineCase[];
 }
 
@@ -116,8 +115,8 @@ function baselineScores(value: unknown): PromptEvalScores | undefined {
   }
   const record = value as Record<string, unknown>;
   const score = (name: string): number | undefined => {
-    const candidate = Number(record[name]);
-    return Number.isFinite(candidate) && candidate >= 0 && candidate <= 100
+    const candidate = record[name];
+    return typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0 && candidate <= 100
       ? candidate
       : undefined;
   };
@@ -126,7 +125,7 @@ function baselineScores(value: unknown): PromptEvalScores | undefined {
   const uncertaintyPrecision = score('uncertaintyPrecision');
   const focusAndUsability = score('focusAndUsability');
   const forbiddenClaimSafety = score('forbiddenClaimSafety');
-  const compressionEfficiency = score('compressionEfficiency');
+  const compressionEfficiency = record['compressionEfficiency'] === null ? null : score('compressionEfficiency');
   const errorPenalty = score('errorPenalty');
   const overall = score('overall');
   if (
@@ -154,26 +153,6 @@ function baselineScores(value: unknown): PromptEvalScores | undefined {
   };
 }
 
-function requiredEnvironment(name: string): string {
-  const value = process.env[name]?.trim() ?? '';
-  if (!value) {
-    throw new Error(`缺少环境变量 ${name}。`);
-  }
-  return value;
-}
-
-function positiveIntegerEnvironment(name: string, fallback: number): number {
-  const raw = process.env[name]?.trim();
-  if (!raw) {
-    return fallback;
-  }
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`环境变量 ${name} 必须是正数。`);
-  }
-  return Math.floor(value);
-}
-
 function nonNegativeNumberEnvironment(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) {
@@ -186,51 +165,11 @@ function nonNegativeNumberEnvironment(name: string, fallback: number): number {
   return value;
 }
 
-function normalizedMaxTokenField(
-  value: string | undefined,
-  fallback: PromptEvalClientConfig['maxTokenField'] = 'max_tokens',
-): PromptEvalClientConfig['maxTokenField'] {
-  value = value?.trim() || fallback;
-  if (!['max_tokens', 'max_completion_tokens'].includes(value)) {
-    throw new Error(
-      '评测 Token 字段只能是 max_tokens 或 max_completion_tokens。',
-    );
-  }
-  return value as PromptEvalClientConfig['maxTokenField'];
-}
-
-function clientConfiguration(prefix: '' | 'JUDGE_', fallback?: PromptEvalClientConfig): PromptEvalClientConfig {
-  const environmentPrefix = `STORY_ECHO_EVAL_${prefix}`;
-  return {
-    apiKey: process.env[`${environmentPrefix}API_KEY`]?.trim()
-      || fallback?.apiKey
-      || requiredEnvironment('STORY_ECHO_EVAL_API_KEY'),
-    baseUrl: process.env[`${environmentPrefix}BASE_URL`]?.trim()
-      || fallback?.baseUrl
-      || 'https://api.openai.com/v1',
-    model: process.env[`${environmentPrefix}MODEL`]?.trim()
-      || fallback?.model
-      || requiredEnvironment('STORY_ECHO_EVAL_MODEL'),
-    timeoutMs: positiveIntegerEnvironment(
-      `${environmentPrefix}TIMEOUT_MS`,
-      fallback?.timeoutMs ?? 300_000,
-    ),
-    maxTokenField: normalizedMaxTokenField(
-      process.env[`${environmentPrefix}MAX_TOKEN_FIELD`],
-      fallback?.maxTokenField,
-    ),
-  };
-}
-
 function selectedCaseIds(): string[] {
   return (process.env['STORY_ECHO_EVAL_CASES'] ?? '')
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
-}
-
-function normalizedFinishReason(value: string): string {
-  return value.trim().toLowerCase().replace(/[\s-]+/gu, '_');
 }
 
 function storedCompletion(completion: PromptEvalCompletion): StoredCompletion {
@@ -278,7 +217,9 @@ async function loadBaseline(path: string): Promise<BaselineRun> {
   }
   const record = parsed as Record<string, unknown>;
   assertCompatibleCompressionMetric(record['compressionMetric']);
+  assertCompatibleEvaluationProtocol(record['evaluationProtocolHash']);
   return {
+    judgeConnectionHash: String(record['judgeConnectionHash'] ?? ''),
     ...(typeof record['generatorModel'] === 'string'
       ? { generatorModel: record['generatorModel'] }
       : {}),
@@ -297,6 +238,7 @@ async function loadBaseline(path: string): Promise<BaselineRun> {
       const scores = baselineScores(item['scores']);
       return [{
         id: item['id'] as string,
+        evaluationHash: String(item['evaluationHash'] ?? ''),
         passed: item['passed'] === true,
         ...(scores ? { scores } : {}),
       }];
@@ -340,7 +282,7 @@ function printCaseResult(result: PromptEvalCaseResult): void {
   const truncation = result.outputTruncated ? '，输出截断' : '';
   const regression = result.baselineRegression ? `，${result.baselineRegression}` : '';
   console.log(
-    `[${status}] ${result.id}: 综合 ${scores.overall}，事实 ${scores.factRetention}，因果 ${scores.causalContinuity}，不确定性 ${scores.uncertaintyPrecision}，聚焦 ${scores.focusAndUsability}，安全 ${scores.forbiddenClaimSafety}，压缩效率 ${scores.compressionEfficiency}，错误扣分 ${scores.errorPenalty}，压缩比 ${result.compressionRatio}${truncation}${regression}`,
+    `[${status}] ${result.id}: 综合 ${scores.overall}，事实 ${scores.factRetention}，因果 ${scores.causalContinuity}，不确定性 ${scores.uncertaintyPrecision}，聚焦 ${scores.focusAndUsability}，安全 ${scores.forbiddenClaimSafety}，密度参考 ${scores.compressionEfficiency ?? '未标定'}，错误扣分 ${scores.errorPenalty}，压缩比 ${result.compressionRatio}${truncation}${regression}`,
   );
   if (!result.passed && result.judgement) {
     for (const item of result.judgement.hallucinations) {
@@ -373,9 +315,9 @@ function aggregateResults(cases: readonly PromptEvalCaseResult[]): PromptEvalAgg
     uncertaintyPrecision: roundedAverage(scored.map((item) => item.scores.uncertaintyPrecision)),
     focusAndUsability: roundedAverage(scored.map((item) => item.scores.focusAndUsability)),
     forbiddenClaimSafety: roundedAverage(scored.map((item) => item.scores.forbiddenClaimSafety)),
-    compressionEfficiency: roundedAverage(
-      scored.map((item) => item.scores.compressionEfficiency),
-    ),
+    compressionEfficiency: scored.some((item) => item.scores.compressionEfficiency !== null)
+      ? roundedAverage(scored.flatMap((item) => item.scores.compressionEfficiency === null ? [] : [item.scores.compressionEfficiency]))
+      : null,
     errorPenalty: roundedAverage(scored.map((item) => item.scores.errorPenalty)),
     overall: roundedAverage(scored.map((item) => item.scores.overall)),
   };
@@ -401,10 +343,12 @@ async function main(): Promise<void> {
   const result: PromptEvalRunResult = {
     schemaVersion: RESULT_SCHEMA_VERSION,
     compressionMetric: PROMPT_EVAL_COMPRESSION_METRIC,
+    evaluationProtocolHash: PROMPT_EVAL_PROTOCOL_HASH,
     storyEchoVersion: EXTENSION_VERSION,
     generatedAt: new Date().toISOString(),
     generatorModel: generator.model,
     judgeModel: judge.model,
+    judgeConnectionHash: evalHash({ model: judge.model, baseUrl: judge.baseUrl }),
     selfJudging,
     caseFilter: requestedIds,
     cases: [],
@@ -427,6 +371,19 @@ async function main(): Promise<void> {
       console.log(`基线文件尚不存在，将在本次全部通过后创建 ${resolve(baselineEnvironment)}`);
     }
   }
+  if (baseline) {
+    if (baseline.judgeModel !== judge.model || baseline.judgeConnectionHash !== result.judgeConnectionHash) {
+      throw new Error('基线 Judge 模型或连接不同，不能直接比较质量分。');
+    }
+    const baselineById = new Map(baseline.cases.map((item) => [item.id, item]));
+    for (const definition of selected) {
+      const prior = baselineById.get(definition.id);
+      if (prior?.evaluationHash !== caseEvaluationHash(buildPromptEvalCase(definition))) {
+        throw new Error(`基线缺少用例或来源/评分规则已变化：${definition.id}；请重新建立基线。`);
+      }
+      if (!prior.scores) throw new Error(`基线用例缺少有效分数：${definition.id}；不能跳过回归比较。`);
+    }
+  }
   for (const definition of selected) {
     const testCase = buildPromptEvalCase(definition);
     const requestPromptHash = promptHash(testCase.system, testCase.prompt);
@@ -440,14 +397,13 @@ async function main(): Promise<void> {
       });
       const measurements = measurePromptEvalText(testCase, generation.text);
       const { compressionRatio } = measurements;
-      const outputTruncated = TRUNCATED_FINISH_REASONS.has(
-        normalizedFinishReason(generation.finishReason),
-      );
+      const outputTruncated = isPromptEvalTruncated(generation.finishReason);
       const judgeCompletion = await requestPromptEvalCompletion(judge, {
         system: PROMPT_EVAL_JUDGE_SYSTEM_PROMPT,
         prompt: buildPromptEvalJudgePrompt(testCase, generation.text),
         maxTokens: 5_000,
       });
+      assertPromptEvalComplete(judgeCompletion);
       const judgement = parsePromptEvalJudgement(
         judgeCompletion.text,
         testCase.rubric,
@@ -455,7 +411,7 @@ async function main(): Promise<void> {
       );
       const initialScores = scorePromptEvalJudgement(judgement, testCase.rubric, {
         compressionRatio,
-        idealCompressionRatio: testCase.idealCompressionRatio,
+        ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
       });
       const scores: PromptEvalScores = {
         ...initialScores,
@@ -466,10 +422,11 @@ async function main(): Promise<void> {
         name: testCase.name,
         kind: testCase.kind,
         promptHash: requestPromptHash,
+        evaluationHash: caseEvaluationHash(testCase),
         passed: scores.passed,
         outputTruncated,
         ...measurements,
-        idealCompressionRatio: testCase.idealCompressionRatio,
+        ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
         generatedSummary: generation.text,
         generation: storedCompletion(generation),
         judge: storedCompletion(judgeCompletion),
@@ -478,18 +435,17 @@ async function main(): Promise<void> {
       };
       result.cases.push(caseResult);
     } catch (error) {
-      const outputTruncated = Boolean(generation && TRUNCATED_FINISH_REASONS.has(
-        normalizedFinishReason(generation.finishReason),
-      ));
+      const outputTruncated = Boolean(generation && isPromptEvalTruncated(generation.finishReason));
       const caseResult: PromptEvalCaseResult = {
         id: testCase.id,
         name: testCase.name,
         kind: testCase.kind,
         promptHash: requestPromptHash,
+        evaluationHash: caseEvaluationHash(testCase),
         passed: false,
         outputTruncated,
         ...measurePromptEvalText(testCase, generation?.text ?? ''),
-        idealCompressionRatio: testCase.idealCompressionRatio,
+        ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
         ...(generation ? {
           generatedSummary: generation.text,
           generation: storedCompletion(generation),
@@ -508,9 +464,6 @@ async function main(): Promise<void> {
     ) {
       console.warn(`警告：基线生成模型是 ${baseline.generatorModel}，本次是 ${result.generatorModel}。`);
     }
-    if (baseline.judgeModel && baseline.judgeModel !== result.judgeModel) {
-      console.warn(`警告：基线 Judge 是 ${baseline.judgeModel}，本次是 ${result.judgeModel}。`);
-    }
     applyBaseline(
       result,
       baseline,
@@ -523,7 +476,7 @@ async function main(): Promise<void> {
   }
   result.aggregate = aggregateResults(result.cases);
   console.log(
-    `汇总：${result.aggregate.passedCases}/${result.aggregate.totalCases} 通过，综合均分 ${result.aggregate.overall}，事实 ${result.aggregate.factRetention}，因果 ${result.aggregate.causalContinuity}，不确定性 ${result.aggregate.uncertaintyPrecision}，聚焦 ${result.aggregate.focusAndUsability}，安全 ${result.aggregate.forbiddenClaimSafety}，压缩效率 ${result.aggregate.compressionEfficiency}，平均错误扣分 ${result.aggregate.errorPenalty}。`,
+    `汇总：${result.aggregate.passedCases}/${result.aggregate.totalCases} 通过，综合均分 ${result.aggregate.overall}，事实 ${result.aggregate.factRetention}，因果 ${result.aggregate.causalContinuity}，不确定性 ${result.aggregate.uncertaintyPrecision}，聚焦 ${result.aggregate.focusAndUsability}，安全 ${result.aggregate.forbiddenClaimSafety}，密度参考 ${result.aggregate.compressionEfficiency ?? '未标定'}，平均错误扣分 ${result.aggregate.errorPenalty}。`,
   );
 
   const outputPath = resolve(

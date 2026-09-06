@@ -79,8 +79,9 @@ export function promptEvalChatCompletionsUrl(baseUrl: string): string {
 }
 
 function safeErrorDetail(text: string, apiKey: string): string {
-  const normalized = text.replace(/\s+/gu, ' ').trim().slice(0, 1_000);
-  return apiKey ? normalized.split(apiKey).join('[REDACTED]') : normalized;
+  // Redact before truncating so a key straddling the output limit cannot leak a prefix.
+  const redacted = apiKey ? text.split(apiKey).join('[REDACTED]') : text;
+  return redacted.replace(/\s+/gu, ' ').trim().slice(0, 1_000);
 }
 
 export async function requestPromptEvalCompletion(

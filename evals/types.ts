@@ -64,7 +64,7 @@ export interface BuiltPromptEvalCase {
   /** Only the narrative bodies being summarized; excludes reference material and JSON metadata. */
   sourceCharacters: number;
   rubric: PromptEvalRubric;
-  idealCompressionRatio: PromptEvalCompressionRange;
+  idealCompressionRatio?: PromptEvalCompressionRange;
 }
 
 export type PositiveCriterionVerdict =
@@ -113,7 +113,8 @@ export interface PromptEvalScores {
   uncertaintyPrecision: number;
   focusAndUsability: number;
   forbiddenClaimSafety: number;
-  compressionEfficiency: number;
+  /** Diagnostic only; null until a fixture has a reviewed density range. */
+  compressionEfficiency: number | null;
   errorPenalty: number;
   overall: number;
   passed: boolean;

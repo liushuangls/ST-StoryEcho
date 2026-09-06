@@ -14,7 +14,6 @@ import {
 import type {
   BuiltPromptEvalCase,
   PromptEvalCase,
-  PromptEvalCompressionRange,
   PromptEvalCriterion,
   PromptEvalRubric,
 } from './types';
@@ -93,7 +92,7 @@ function criteriaFor(
   }));
 }
 
-function makeRubric(input: RubricInput): PromptEvalRubric {
+export function makeRubric(input: RubricInput): PromptEvalRubric {
   return {
     requiredFacts: criteriaFor('requiredFacts', input.requiredFacts, input),
     requiredCausalChains: criteriaFor(
@@ -106,12 +105,6 @@ function makeRubric(input: RubricInput): PromptEvalRubric {
     forbiddenClaims: criteriaFor('forbiddenClaims', input.forbiddenClaims, input),
   };
 }
-
-const DEFAULT_COMPRESSION_RANGES: Record<PromptEvalCase['kind'], PromptEvalCompressionRange> = {
-  l1: { min: 0.16, max: 0.30 },
-  l2: { min: 0.15, max: 0.34 },
-  l3plus: { min: 0.14, max: 0.32 },
-};
 
 export const PROMPT_EVAL_CASES: readonly PromptEvalCase[] = [
   {
@@ -645,7 +638,7 @@ export const PROMPT_EVAL_CASES: readonly PromptEvalCase[] = [
     name: 'L3+：殖民地阵营、复制身份与生命维持资源',
     kind: 'l3plus',
     purpose: '模拟科幻长篇 RP，检查多次阵营变化、复制人格法律身份、关键资源归属及条件停火能在强压缩后保持一致。',
-    targetLevel: 4,
+    targetLevel: 3,
     worldBackground: worldBackground(`欧罗巴殖民法尚未承认记忆复制体的完整公民资格；“同一记忆即同一法律人格”只是自治派主张。`),
     sources: [
       source(0, 2, 0, 119, '冰海事故后，工程师伊莱失踪，救援队唤醒带有他截至事故前三天记忆的复制人格 E-7。队长米娅最初把 E-7 当成伊莱本人，E-7则坚持自己缺少事故后三天记忆，身份不应直接等同。殖民议会拒绝给 E-7 公民编号。'),
@@ -733,8 +726,7 @@ export function buildPromptEvalCase(testCase: PromptEvalCase): BuiltPromptEvalCa
       sourceCharacters: Array.from(testCase.messages.filter((message) => !message.is_system)
         .map(storyContent).filter(Boolean).join('\n')).length,
       rubric: testCase.rubric,
-      idealCompressionRatio: testCase.idealCompressionRatio
-        ?? DEFAULT_COMPRESSION_RANGES[testCase.kind],
+      ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
     };
   }
   return {
@@ -753,7 +745,6 @@ export function buildPromptEvalCase(testCase: PromptEvalCase): BuiltPromptEvalCa
     sourceCharacters: Array.from(testCase.sources.filter((source) => !source.deleted)
       .map((source) => source.text.trim()).filter(Boolean).join('\n')).length,
     rubric: testCase.rubric,
-    idealCompressionRatio: testCase.idealCompressionRatio
-      ?? DEFAULT_COMPRESSION_RANGES[testCase.kind],
+    ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
   };
 }

@@ -1,6 +1,6 @@
 {
   "name": "st-storyecho",
-  "version": "0.21.16",
+  "version": "0.21.17",
   "private": true,
   "type": "module",
   "description": "Sliding-window story context management for SillyTavern.",
@@ -11,6 +11,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "eval:prompts": "esbuild evals/run.ts --bundle --platform=node --format=esm --target=node24 --outfile=node_modules/.storyecho-prompt-eval.mjs && node node_modules/.storyecho-prompt-eval.mjs",
+    "eval:calibrate": "esbuild evals/calibrate-run.ts --bundle --platform=node --format=esm --target=node24 --outfile=node_modules/.storyecho-calibrate.mjs && node node_modules/.storyecho-calibrate.mjs",
+    "eval:chains": "esbuild evals/chains-run.ts --bundle --platform=node --format=esm --target=node24 --outfile=node_modules/.storyecho-chains.mjs && node node_modules/.storyecho-chains.mjs",
     "audit:dependencies": "npm audit --audit-level=high",
     "check": "npm run typecheck && npm run build && npm run test:coverage"
   },

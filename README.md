@@ -125,7 +125,7 @@ STORY_ECHO_EVAL_BASE_URL='https://api.openai.com/v1' \
 npm run eval:prompts
 ```
 
-生成模型与 Judge 可以分别配置，评测夹具、评分阈值、用例筛选和本地基线用法见[提示词质量评测](docs/PROMPT_EVALS.md)。评测结果默认写入被 Git 忽略的 `evals/results/`。
+生成模型与 Judge 可以分别配置。另有 `npm run eval:calibrate` 检查 Judge 对好坏对照的判定及分数稳定性，`npm run eval:chains` 检查真实生成的 L1→L2→L3 是否仍能回答连续性问题。评测夹具、评分阈值、用例筛选和本地基线用法见[提示词质量评测](docs/PROMPT_EVALS.md)。这些命令仅用于本地，结果默认写入被 Git 忽略的 `evals/results/`。
 
 ## 设计文档
 

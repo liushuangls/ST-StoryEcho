@@ -16,6 +16,11 @@ import {
   requestPromptEvalCompletion,
 } from '../evals/openai-compatible-client';
 import type { PromptEvalJudgement } from '../evals/types';
+import { CALIBRATION_CONTROLS, calibrationCase, calibrationMismatches } from '../evals/calibration';
+import { assertCompatibleEvaluationProtocol, caseEvaluationHash, PROMPT_EVAL_PROTOCOL_HASH } from '../evals/protocol';
+import { clientConfiguration } from '../evals/config';
+import { candidateEvidenceSegments, resolveEvidenceIds } from '../evals/evidence';
+import { assertPromptEvalComplete, isPromptEvalTruncated } from '../evals/completion';
 
 describe('prompt quality regression fixtures', () => {
   it('covers twelve varied Tavern-style L1, L2, and L3+ cases with valid rubrics', () => {
@@ -52,6 +57,9 @@ describe('prompt quality regression fixtures', () => {
         expect(testCase.prompt).toContain('<history_messages>');
         expect(testCase.maxTokens).toBe(3_000);
       } else {
+        if (definition.kind !== 'l1') {
+          expect(definition.sources.every((source) => source.level === definition.targetLevel - 1)).toBe(true);
+        }
         expect(testCase.prompt).toContain('<source_summaries>');
         expect(testCase.maxTokens).toBe(8_000);
       }
@@ -171,7 +179,7 @@ describe('prompt quality judge', () => {
       uncertaintyPrecision: 100,
       focusAndUsability: 100,
       forbiddenClaimSafety: 100,
-      compressionEfficiency: 100,
+      compressionEfficiency: null,
       errorPenalty: 0,
       overall: 100,
       passed: true,
@@ -219,7 +227,7 @@ describe('prompt quality judge', () => {
     expect(scores.overall).toBeLessThan(100);
   });
 
-  it('scores overlong and overcompressed outputs below the ideal density band', () => {
+  it('reports density separately without rewarding or penalizing factual fidelity by length alone', () => {
     const overlong = scorePromptEvalJudgement(passing, definition.rubric, {
       compressionRatio: 0.60,
       idealCompressionRatio: { min: 0.16, max: 0.30 },
@@ -230,8 +238,9 @@ describe('prompt quality judge', () => {
     });
     expect(overlong.compressionEfficiency).toBe(0);
     expect(tooShort.compressionEfficiency).toBe(50);
-    expect(overlong.overall).toBeLessThan(100);
-    expect(tooShort.passed).toBe(false);
+    expect(overlong.overall).toBe(100);
+    expect(tooShort.passed).toBe(true);
+    expect(scorePromptEvalJudgement(passing, definition.rubric, { compressionRatio: 0.8 }).compressionEfficiency).toBeNull();
   });
 
   it('rejects Judge evidence that was not quoted from the candidate summary', () => {
@@ -261,11 +270,115 @@ describe('prompt quality judge', () => {
     )).not.toThrow();
   });
 
+  it.each([
+    '候选总结片段一但钥匙属于顾岚',
+    '候选总结片段一……完全捏造的一段话',
+    '候选总结片段二……候选总结片段一',
+    '温度是-3.5度',
+    '温度是35度',
+  ])('rejects partially matching or altered evidence: %s', (evidence) => {
+    const invalid = structuredClone(passing);
+    invalid.requiredFacts[0]!.evidence = evidence;
+    expect(() => parsePromptEvalJudgement(JSON.stringify(invalid), definition.rubric,
+      '候选总结片段一；候选总结片段二。温度是3.5度。')).toThrow('逐字片段');
+  });
+
+  it('allows short exact names and whitespace-only differences', () => {
+    const valid = structuredClone(passing);
+    valid.requiredFacts[0]!.evidence = '陈默';
+    valid.requiredFacts[1]!.evidence = 'E-19证物袋';
+    expect(() => parsePromptEvalJudgement(JSON.stringify(valid), definition.rubric,
+      '候选总结：陈默保管 E-19 证物袋。')).not.toThrow();
+  });
+
+  it('resolves numbered evidence without allowing the judge to rewrite the candidate', () => {
+    const ids = JSON.parse(JSON.stringify(passing)) as Record<string, { evidence?: string; evidenceIds?: number[] }[]>;
+    for (const dimension of ['requiredFacts', 'requiredCausalChains', 'uncertaintyRules', 'focusRules']) {
+      for (const item of ids[dimension]!) {
+        delete item.evidence;
+        item.evidenceIds = [2, 1];
+      }
+    }
+    const parsed = parsePromptEvalJudgement(JSON.stringify(ids), definition.rubric, '陈默保管钥匙。顾岚未证实所有权。');
+    expect(parsed.requiredFacts[0]!.evidence).toBe('陈默保管钥匙。……顾岚未证实所有权。');
+    ids['requiredFacts']![0]!.evidenceIds = [999];
+    expect(() => parsePromptEvalJudgement(JSON.stringify(ids), definition.rubric, '陈默保管钥匙。')).toThrow('evidenceIds');
+  });
+
   it('treats the candidate and source as data in the judge request', () => {
     const prompt = buildPromptEvalJudgePrompt(testCase, '候选总结');
     expect(prompt).toContain('<source_evidence>');
     expect(prompt).toContain('<rubric>');
     expect(prompt).toContain('<candidate_summary>\n候选总结\n</candidate_summary>');
+  });
+});
+
+describe('calibration controls and protocol', () => {
+  it('rejects all supported truncated finish reasons even when the JSON looks complete', () => {
+    for (const finishReason of ['length', 'max_token', 'MAX-TOKENS', 'max output tokens', 'token_limit', 'output_token_limit']) {
+      expect(isPromptEvalTruncated(finishReason)).toBe(true);
+      expect(() => assertPromptEvalComplete({ text: '{}', finishReason, durationMs: 1 })).toThrow('输出上限');
+    }
+    expect(isPromptEvalTruncated('stop')).toBe(false);
+    expect(() => assertPromptEvalComplete({ text: ' ', finishReason: 'stop', durationMs: 1 })).toThrow('为空');
+  });
+  it('keeps numbered snippets exact, Unicode safe and bounded', () => {
+    const source = `温度是-3.5度。${'🎭'.repeat(300)}\n陈默保管钥匙！`;
+    const segments = candidateEvidenceSegments(source);
+    expect(segments.every((item) => source.includes(item.text))).toBe(true);
+    expect(segments.every((item) => Array.from(item.text).length <= 240)).toBe(true);
+    expect(resolveEvidenceIds([1], source)).toBe('温度是-3.5度。');
+    for (const bad of [[0], [1, 1], ['1'], [1.5], [-1], Array.from({ length: 25 }, (_, i) => i + 1)]) {
+      expect(() => resolveEvidenceIds(bad, source)).toThrow('evidenceIds');
+    }
+  });
+  it('has blinded positive/omission/contradiction/verbose-error controls across three levels', () => {
+    expect(CALIBRATION_CONTROLS).toHaveLength(12);
+    expect(new Set(CALIBRATION_CONTROLS.map((item) => item.id)).size).toBe(12);
+    for (const control of CALIBRATION_CONTROLS) {
+      const built = calibrationCase(control);
+      const prompt = buildPromptEvalJudgePrompt(built, control.candidate);
+      expect(prompt).not.toContain(control.id);
+      expect(prompt).not.toContain('expectedPass');
+      expect(prompt).not.toContain('expectedVerdicts');
+      expect(control.expectedPass).toBe(control.variant === 'reference');
+      if (!control.expectedPass) expect(control.expectedVerdicts.length).toBeGreaterThan(0);
+      for (const expected of control.expectedVerdicts) {
+        expect(built.rubric[expected.dimension][expected.index]).toBeDefined();
+      }
+    }
+  });
+
+  it('cannot pass a negative control just because the overall score looks high', () => {
+    const control = CALIBRATION_CONTROLS.find((item) => item.variant === 'omission')!;
+    const rubric = calibrationCase(control).rubric;
+    const positive = (criteria: readonly unknown[]) => criteria.map((_, criterionIndex) => ({ criterionIndex, verdict: 'complete' as const, evidence: '证据', reason: '理由' }));
+    const judgement: PromptEvalJudgement = {
+      requiredFacts: positive(rubric.requiredFacts), requiredCausalChains: positive(rubric.requiredCausalChains),
+      uncertaintyRules: positive(rubric.uncertaintyRules), focusRules: positive(rubric.focusRules),
+      forbiddenClaims: rubric.forbiddenClaims.map((_, criterionIndex) => ({ criterionIndex, verdict: 'clear', evidence: '', reason: '' })),
+      hallucinations: [], chronologyErrors: [], notes: '',
+    };
+    expect(calibrationMismatches(control, judgement, scorePromptEvalJudgement(judgement, rubric)).length).toBeGreaterThan(1);
+  });
+
+  it('fingerprints rubric/source changes but permits production prompt A/B comparisons', () => {
+    const built = buildPromptEvalCase(PROMPT_EVAL_CASES[0]!);
+    expect(caseEvaluationHash({ ...built, system: 'changed', prompt: 'changed' })).toBe(caseEvaluationHash(built));
+    expect(caseEvaluationHash({ ...built, sourceEvidence: 'changed' })).not.toBe(caseEvaluationHash(built));
+    expect(caseEvaluationHash({ ...built, rubric: { ...built.rubric, focusRules: [] } })).not.toBe(caseEvaluationHash(built));
+    expect(() => assertCompatibleEvaluationProtocol(undefined)).toThrow('协议');
+    expect(() => assertCompatibleEvaluationProtocol(PROMPT_EVAL_PROTOCOL_HASH)).not.toThrow();
+  });
+
+  it('does not forward the generator key to a separately configured Judge host', () => {
+    vi.stubEnv('STORY_ECHO_EVAL_JUDGE_BASE_URL', 'https://another.example/v1');
+    vi.stubEnv('STORY_ECHO_EVAL_JUDGE_API_KEY', '');
+    try {
+      expect(() => clientConfiguration('JUDGE_', {
+        apiKey: 'generator-secret', baseUrl: 'https://original.example/v1', model: 'model', timeoutMs: 1000, maxTokenField: 'max_tokens',
+      })).toThrow('必须显式配置');
+    } finally { vi.unstubAllEnvs(); }
   });
 });
 
@@ -332,6 +445,21 @@ describe('local OpenAI-compatible eval client', () => {
       maxTokens: 123,
     }, fetchMock);
   });
+
+  it('redacts a reflected key before truncating an HTTP error detail', async () => {
+    const apiKey = 'secret-eval-' + 'z'.repeat(80);
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      message: 'x'.repeat(960) + apiKey,
+    }), { status: 400, headers: { 'Content-Type': 'application/json' } }));
+    try {
+      await requestPromptEvalCompletion({ apiKey, baseUrl: 'https://api.example.com/v1', model: 'model', timeoutMs: 1000, maxTokenField: 'max_tokens' },
+        { system: '', prompt: '', maxTokens: 100 }, fetchMock);
+      expect.fail('Expected HTTP error');
+    } catch (error) {
+      expect(String(error)).toContain('HTTP 400');
+      expect(String(error)).not.toContain('secret-eval-');
+    }
+  });
 });
 
 describe('eval isolation from CI', () => {
@@ -341,8 +469,14 @@ describe('eval isolation from CI', () => {
     };
     const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
     expect(packageJson.scripts['eval:prompts']).toContain('evals/run.ts');
+    expect(packageJson.scripts['eval:calibrate']).toContain('evals/calibrate-run.ts');
+    expect(packageJson.scripts['eval:chains']).toContain('evals/chains-run.ts');
     expect(packageJson.scripts['check']).not.toContain('eval:prompts');
     expect(workflow).not.toContain('eval:prompts');
+    expect(packageJson.scripts['check']).not.toContain('eval:calibrate');
+    expect(workflow).not.toContain('eval:calibrate');
+    expect(packageJson.scripts['check']).not.toContain('eval:chains');
+    expect(workflow).not.toContain('eval:chains');
     expect(readFileSync('.gitignore', 'utf8')).toContain('evals/results/');
   });
 });
