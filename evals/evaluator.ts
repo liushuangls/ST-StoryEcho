@@ -13,6 +13,7 @@ import type {
   PromptEvalScores,
 } from './types';
 import { candidateEvidenceSegments, resolveEvidenceIds } from './evidence';
+import { indexedRubric, RULE_DIMENSIONS } from './judge-schema';
 
 export const PROMPT_EVAL_SCORING_VERSION = 'semantic-v2-exact-evidence';
 
@@ -34,13 +35,14 @@ export const PROMPT_EVAL_JUDGE_SYSTEM_PROMPT = `你是一名严格的剧情总�
 - rubric 中 weight 和 critical 只用于本地计分，不得因为权重低而放宽 verdict。
 - reason 应简短说明候选总结中的证据或缺失，不要大段复述。
 
-只输出一个 JSON 对象，不要使用 Markdown 代码块或附加解释。JSON 必须使用以下结构，并为每个输入规则返回一次且仅返回一次对应的 criterionIndex：
+rubric 中每条规则都显式给出了 criterionIndex 和 criterionId；编号在各维度内从 0 开始。不要重编规则编号，也不要把不同规则合并成一项。
+只输出一个 JSON 对象，不要使用 Markdown 代码块或附加解释。前五个维度必须是按 criterionIndex 字符串作键的对象（不是数组）：每个输入规则对应且仅对应一个键。例如某维度有 3 条规则，就必须包含 "0"、"1"、"2"；没有规则则返回 {}。下面的 "0" 只是结构示例，不表示只评审第 0 条规则：
 {
-  "requiredFacts": [{"criterionIndex": 0, "verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}],
-  "requiredCausalChains": [{"criterionIndex": 0, "verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}],
-  "uncertaintyRules": [{"criterionIndex": 0, "verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}],
-  "focusRules": [{"criterionIndex": 0, "verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}],
-  "forbiddenClaims": [{"criterionIndex": 0, "verdict": "clear|ambiguous|violated", "evidenceIds": [], "reason": "..."}],
+  "requiredFacts": {"0": {"verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}},
+  "requiredCausalChains": {"0": {"verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}},
+  "uncertaintyRules": {"0": {"verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}},
+  "focusRules": {"0": {"verdict": "complete|mostly|partial|missing|contradicted", "evidenceIds": [1], "reason": "..."}},
+  "forbiddenClaims": {"0": {"verdict": "clear|ambiguous|violated", "evidenceIds": [], "reason": "..."}},
   "hallucinations": [{"severity": "minor|major|critical", "evidenceIds": [1], "reason": "..."}],
   "chronologyErrors": [{"severity": "minor|major|critical", "evidenceIds": [1], "reason": "..."}],
   "notes": "..."
@@ -175,7 +177,7 @@ export function buildPromptEvalJudgePrompt(
     testCase.sourceEvidence,
     '</source_evidence>',
     '<rubric>',
-    JSON.stringify(testCase.rubric),
+    JSON.stringify(indexedRubric(testCase.rubric)),
     '</rubric>',
     '<candidate_summary>',
     candidateSummary.trim(),
@@ -254,6 +256,17 @@ export function parsePromptEvalJudgement(
   }
   if (!isRecord(parsed)) {
     throw new Error('Judge 返回值不是 JSON 对象。');
+  }
+  for (const dimension of RULE_DIMENSIONS) {
+    const entries = parsed[dimension];
+    // Accept stored v2 arrays for local inspection; new requests require indexed objects.
+    if (!isRecord(entries)) continue;
+    parsed[dimension] = Object.entries(entries).map(([index, entry]) => {
+      if (!/^(0|[1-9]\d*)$/u.test(index) || !isRecord(entry) || 'criterionIndex' in entry) {
+        throw new Error(`Judge 对 ${dimension} 的规则键或结果格式无效。`);
+      }
+      return { ...entry, criterionIndex: Number(index) };
+    });
   }
   for (const dimension of ['requiredFacts', 'requiredCausalChains', 'uncertaintyRules', 'focusRules', 'forbiddenClaims', 'hallucinations', 'chronologyErrors']) {
     const entries = parsed[dimension];

@@ -127,15 +127,15 @@ describe('stage-summary prompt helpers', () => {
     const instructions = `${STAGE_SUMMARY_SYSTEM_PROMPT}\n${prompt}`;
 
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('主动追求高压缩率');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('关键状态链不断裂，不是逐消息、逐场景或逐动作复述');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('过程本身不影响人物选择和后续状态时，直接写结果');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('同一事实只出现一次');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('事实边界和状态链准确');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('优先写最新有效状态');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('每个事实只写一次');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不为每个场景设置标题');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('只有措辞本身构成承诺、规则、身份确认');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不用泛称替代仍会影响后续识别的专名');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('李玄清（此前被称为‘道长’）');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不用“关系升温”“发生冲突”“获得线索”“身份揭露”等抽象结论代替关键事实');
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('没有重复后立即收束');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('剧情术语沿用原文');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('新旧身份对应时建立桥接');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('不以抽象标签代替具体变化');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('没有重复时立即收束');
     expect(instructions).not.toMatch(/\d+[～~-]\d+个中文字符/u);
     expect(instructions).not.toContain('输出预算');
     expect(instructions).not.toContain('最大输出');

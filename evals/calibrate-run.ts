@@ -1,13 +1,14 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { CALIBRATION_CONTROLS, calibrationCase, calibrationMismatches } from './calibration';
-import { clientConfiguration, positiveIntegerEnvironment } from './config';
+import { clientConfiguration, judgeOutputMode, positiveIntegerEnvironment } from './config';
 import { buildPromptEvalJudgePrompt, parsePromptEvalJudgement, PROMPT_EVAL_JUDGE_SYSTEM_PROMPT, scorePromptEvalJudgement } from './evaluator';
 import { measurePromptEvalText } from './measurements';
 import { requestPromptEvalCompletion } from './openai-compatible-client';
 import { evalHash, PROMPT_EVAL_PROTOCOL_HASH } from './protocol';
 import type { PromptEvalJudgement, PromptEvalScores } from './types';
-import { assertPromptEvalComplete } from './completion';
+import { singleJudgeResponseFormat } from './judge-schema';
+import { completeJudgeRequest, completionDiagnostic, JudgeEvaluationError, redactEvalSecrets, type JudgeFailureDiagnostic } from './judge-diagnostics';
 
 interface ControlResult {
   id: string;
@@ -18,6 +19,7 @@ interface ControlResult {
   judgement?: PromptEvalJudgement;
   scores?: PromptEvalScores;
   error?: string;
+  diagnostic?: JudgeFailureDiagnostic;
   mismatches: string[];
   durationMs?: number;
   totalTokens?: number;
@@ -26,15 +28,18 @@ interface ControlResult {
 async function main(): Promise<void> {
   const generator = clientConfiguration('');
   const judge = clientConfiguration('JUDGE_', generator);
+  const outputMode = judgeOutputMode();
   const repetitions = positiveIntegerEnvironment('STORY_ECHO_EVAL_CALIBRATION_REPEATS', 2);
   if (repetitions > 5) throw new Error('校准最多重复 5 次，避免意外产生大量请求。');
   const output = resolve(process.env['STORY_ECHO_EVAL_CALIBRATION_OUTPUT']?.trim() || 'evals/results/calibration-latest.json');
   const result = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     evaluationProtocolHash: PROMPT_EVAL_PROTOCOL_HASH,
     controlsHash: evalHash(CALIBRATION_CONTROLS),
     generatedAt: new Date().toISOString(),
     judgeModel: judge.model,
+    judgeOutputMode: outputMode,
+    judgeConnectionHash: evalHash({ model: judge.model, baseUrl: judge.baseUrl, outputMode }),
     labelSource: 'developer-authored-synthetic-not-human-gold',
     plannedRequests: repetitions * CALIBRATION_CONTROLS.length,
     repetitions,
@@ -58,20 +63,22 @@ async function main(): Promise<void> {
         expectedPass: control.expectedPass, candidate: control.candidate, mismatches: [],
       };
       try {
-        const completion = await requestPromptEvalCompletion(judge, {
+        const { completion, judgement } = await completeJudgeRequest((request) => requestPromptEvalCompletion(judge, request), {
           system: PROMPT_EVAL_JUDGE_SYSTEM_PROMPT,
           prompt: buildPromptEvalJudgePrompt(built, control.candidate),
           maxTokens: 8_000,
-        });
+          ...(outputMode === 'json_schema' ? { responseFormat: singleJudgeResponseFormat(built.rubric, control.candidate) } : {}),
+        }, (text) => parsePromptEvalJudgement(text, built.rubric, control.candidate));
         row.durationMs = completion.durationMs;
         if (completion.totalTokens !== undefined) row.totalTokens = completion.totalTokens;
-        assertPromptEvalComplete(completion);
-        row.judgement = parsePromptEvalJudgement(completion.text, built.rubric, control.candidate);
+        row.judgement = judgement;
         row.scores = scorePromptEvalJudgement(row.judgement, built.rubric, measurePromptEvalText(built, control.candidate));
         row.mismatches = calibrationMismatches(control, row.judgement, row.scores);
+        if (row.mismatches.length) row.diagnostic = completionDiagnostic(completion);
         console.log(`[${row.mismatches.length ? 'MISMATCH' : 'OK'}] ${control.id} #${repetition}: ${row.scores.overall}，判定 ${row.scores.passed ? '通过' : '不通过'}`);
       } catch (error) {
-        row.error = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+        row.error = redactEvalSecrets(error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+        if (error instanceof JudgeEvaluationError) row.diagnostic = error.diagnostic;
         console.error(`[ERROR] ${control.id} #${repetition}: ${row.error}`);
       }
       result.cases.push(row);

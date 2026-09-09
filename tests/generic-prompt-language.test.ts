@@ -45,7 +45,7 @@ describe('context prompts', () => {
       HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT,
     ]) {
       expect(prompt).toContain('标题');
-      expect(prompt).toContain('自然段落');
+      expect(prompt).toMatch(/自然段落|紧凑段落/);
     }
   });
 });

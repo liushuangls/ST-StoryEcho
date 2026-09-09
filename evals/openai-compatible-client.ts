@@ -1,6 +1,22 @@
 import { readResponseTextWithLimit } from '../src/http/response';
+import { createHash, randomUUID } from 'node:crypto';
+import type { JudgeResponseFormat } from './judge-schema';
+import { JudgeEvaluationError, redactEvalSecrets, responseDiagnostic } from './judge-diagnostics';
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+export interface PromptEvalTransportDiagnostic {
+  clientRequestId: string;
+  /** SHA-256 of the exact HTTP JSON body, excluding headers and credentials. */
+  wireRequestHash: string;
+  wireRequestBytes: number;
+  httpStatus?: number;
+  serverRequestId?: string;
+  responseId?: string;
+  returnedModel?: string;
+  systemFingerprint?: string;
+  responseBodyHash?: string;
+}
 
 export interface PromptEvalClientConfig {
   apiKey: string;
@@ -17,6 +33,15 @@ export interface PromptEvalCompletion {
   completionTokens?: number;
   totalTokens?: number;
   durationMs: number;
+  transport?: PromptEvalTransportDiagnostic;
+}
+
+export interface PromptEvalRequest {
+  system: string;
+  prompt: string;
+  maxTokens: number;
+  /** Judge only. Generation requests keep their natural-language output. */
+  responseFormat?: JudgeResponseFormat;
 }
 
 type FetchLike = typeof fetch;
@@ -80,17 +105,13 @@ export function promptEvalChatCompletionsUrl(baseUrl: string): string {
 
 function safeErrorDetail(text: string, apiKey: string): string {
   // Redact before truncating so a key straddling the output limit cannot leak a prefix.
-  const redacted = apiKey ? text.split(apiKey).join('[REDACTED]') : text;
+  const redacted = redactEvalSecrets(text, [apiKey]);
   return redacted.replace(/\s+/gu, ' ').trim().slice(0, 1_000);
 }
 
 export async function requestPromptEvalCompletion(
   config: PromptEvalClientConfig,
-  request: {
-    system: string;
-    prompt: string;
-    maxTokens: number;
-  },
+  request: PromptEvalRequest,
   fetchImpl: FetchLike = fetch,
 ): Promise<PromptEvalCompletion> {
   const apiKey = config.apiKey.trim();
@@ -103,10 +124,7 @@ export async function requestPromptEvalCompletion(
   if (!config.model.trim()) {
     throw new Error('评测模型名不能为空。');
   }
-  const controller = new AbortController();
-  const timeoutMs = Math.min(900_000, Math.max(1_000, Math.floor(config.timeoutMs)));
-  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
-  const startedAt = performance.now();
+  const url = promptEvalChatCompletionsUrl(config.baseUrl);
   const maxTokens = Math.min(16_000, Math.max(16, Math.floor(request.maxTokens)));
   const body: Record<string, unknown> = {
     model: config.model.trim(),
@@ -117,6 +135,7 @@ export async function requestPromptEvalCompletion(
     temperature: 0,
     stream: false,
     [config.maxTokenField]: maxTokens,
+    ...(request.responseFormat ? { response_format: request.responseFormat } : {}),
   };
   // DeepSeek V4 enables thinking by default and counts those tokens against
   // max_tokens. Match StoryEcho's production request so this harness measures
@@ -125,21 +144,41 @@ export async function requestPromptEvalCompletion(
   if (isDeepSeekTarget(config.model, config.baseUrl)) {
     body['thinking'] = { type: 'disabled' };
   }
+  const serializedBody = JSON.stringify(body);
+  const transport: PromptEvalTransportDiagnostic = {
+    clientRequestId: randomUUID(),
+    wireRequestHash: createHash('sha256').update(serializedBody).digest('hex'),
+    wireRequestBytes: Buffer.byteLength(serializedBody, 'utf8'),
+  };
+  const metadata = (value: unknown): string | undefined => {
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return redactEvalSecrets(value, [apiKey]).replace(/[\x00-\x1f\x7f]/gu, '').trim().slice(0, 256);
+  };
+  const controller = new AbortController();
+  const timeoutMs = Math.min(900_000, Math.max(1_000, Math.floor(config.timeoutMs)));
+  const timeout = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = performance.now();
+  let responseText: string | undefined;
   try {
-    const response = await fetchImpl(promptEvalChatCompletionsUrl(config.baseUrl), {
+    const response = await fetchImpl(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
+        'X-Client-Request-Id': transport.clientRequestId,
       },
-      body: JSON.stringify(body),
+      body: serializedBody,
       signal: controller.signal,
     });
-    const responseText = await readResponseTextWithLimit(
+    transport.httpStatus = response.status;
+    const serverRequestId = metadata(response.headers.get('x-request-id'));
+    if (serverRequestId) transport.serverRequestId = serverRequestId;
+    responseText = await readResponseTextWithLimit(
       response,
       MAX_RESPONSE_BYTES,
       '评测接口响应过大。',
     );
+    transport.responseBodyHash = createHash('sha256').update(redactEvalSecrets(responseText, [apiKey])).digest('hex');
     let payload: unknown;
     try {
       payload = responseText ? JSON.parse(responseText) as unknown : null;
@@ -153,8 +192,18 @@ export async function requestPromptEvalCompletion(
       throw new Error(`评测请求失败（HTTP ${response.status}）。${detail ? ` ${detail}` : ''}`);
     }
     const root = isRecord(payload) ? payload : {};
+    const responseId = metadata(root['id']);
+    const returnedModel = metadata(root['model']);
+    const systemFingerprint = metadata(root['system_fingerprint']);
+    if (responseId) transport.responseId = responseId;
+    if (returnedModel) transport.returnedModel = returnedModel;
+    if (systemFingerprint) transport.systemFingerprint = systemFingerprint;
     const choices = Array.isArray(root['choices']) ? root['choices'] : [];
     const choice = isRecord(choices[0]) ? choices[0] : {};
+    const message = isRecord(choice['message']) ? choice['message'] : {};
+    if (message['refusal'] || choice['finish_reason'] === 'content_filter') {
+      throw new Error('评测模型拒绝回答或响应被过滤，不能用作有效评审。');
+    }
     const usage = isRecord(root['usage']) ? root['usage'] : {};
     const promptTokens = finiteTokenCount(usage['prompt_tokens']);
     const completionTokens = finiteTokenCount(usage['completion_tokens']);
@@ -179,12 +228,15 @@ export async function requestPromptEvalCompletion(
       ...(completionTokens !== undefined ? { completionTokens } : {}),
       ...(totalTokens !== undefined ? { totalTokens } : {}),
       durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      transport,
     };
   } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error(`评测请求在 ${timeoutMs}ms 后超时。`);
-    }
-    throw error;
+    const message = controller.signal.aborted ? `评测请求在 ${timeoutMs}ms 后超时。` : error instanceof Error ? error.message : String(error);
+    throw new JudgeEvaluationError(redactEvalSecrets(message, [apiKey]), {
+      ...(responseText !== undefined ? responseDiagnostic(responseText, [apiKey]) : {}),
+      durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      transport,
+    });
   } finally {
     globalThis.clearTimeout(timeout);
   }

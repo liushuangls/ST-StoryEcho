@@ -25,6 +25,22 @@ export interface PromptEvalCompressionRange {
   max: number;
 }
 
+export type PromptEvalHardCheckMode = 'all' | 'any' | 'none';
+
+/** A deterministic source probe that is never sent to the generator or Judge. */
+export interface PromptEvalHardCheck {
+  id: string;
+  description: string;
+  mode: PromptEvalHardCheckMode;
+  needles: readonly string[];
+}
+
+export interface PromptEvalHardCheckResult extends PromptEvalHardCheck {
+  passed: boolean;
+  matched: readonly string[];
+  missing: readonly string[];
+}
+
 interface PromptEvalCaseBase {
   id: string;
   name: string;
@@ -32,6 +48,7 @@ interface PromptEvalCaseBase {
   purpose: string;
   rubric: PromptEvalRubric;
   idealCompressionRatio?: PromptEvalCompressionRange;
+  hardChecks?: readonly PromptEvalHardCheck[];
 }
 
 export interface Level1PromptEvalCase extends PromptEvalCaseBase {
@@ -65,6 +82,7 @@ export interface BuiltPromptEvalCase {
   sourceCharacters: number;
   rubric: PromptEvalRubric;
   idealCompressionRatio?: PromptEvalCompressionRange;
+  hardChecks?: readonly PromptEvalHardCheck[];
 }
 
 export type PositiveCriterionVerdict =

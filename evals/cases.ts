@@ -727,6 +727,7 @@ export function buildPromptEvalCase(testCase: PromptEvalCase): BuiltPromptEvalCa
         .map(storyContent).filter(Boolean).join('\n')).length,
       rubric: testCase.rubric,
       ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
+      ...(testCase.hardChecks ? { hardChecks: testCase.hardChecks } : {}),
     };
   }
   return {
@@ -746,5 +747,6 @@ export function buildPromptEvalCase(testCase: PromptEvalCase): BuiltPromptEvalCa
       .map((source) => source.text.trim()).filter(Boolean).join('\n')).length,
     rubric: testCase.rubric,
     ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
+    ...(testCase.hardChecks ? { hardChecks: testCase.hardChecks } : {}),
   };
 }

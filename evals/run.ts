@@ -4,7 +4,6 @@ import { dirname, resolve } from 'node:path';
 import { EXTENSION_VERSION } from '../src/core/constants';
 import {
   buildPromptEvalCase,
-  PROMPT_EVAL_CASES,
 } from './cases';
 import {
   buildPromptEvalJudgePrompt,
@@ -26,11 +25,17 @@ import {
   measurePromptEvalText,
   PROMPT_EVAL_COMPRESSION_METRIC,
 } from './measurements';
-import { clientConfiguration } from './config';
+import { clientConfiguration, judgeOutputMode } from './config';
 import { assertCompatibleEvaluationProtocol, caseEvaluationHash, evalHash, PROMPT_EVAL_PROTOCOL_HASH } from './protocol';
-import { assertPromptEvalComplete, isPromptEvalTruncated } from './completion';
+import { isPromptEvalTruncated } from './completion';
+import { applyPromptEvalVariant, promptEvalVariant, type PromptEvalVariant } from './variants';
+import { singleJudgeResponseFormat, type JudgeOutputMode } from './judge-schema';
+import { completeJudgeRequest, JudgeEvaluationError, type JudgeFailureDiagnostic } from './judge-diagnostics';
+import { selectGenerationCases } from './case-catalog';
+import { evaluatePromptEvalHardChecks, promptEvalHardChecksPassed } from './hard-checks';
+import type { PromptEvalHardCheckResult } from './types';
 
-const RESULT_SCHEMA_VERSION = 4;
+const RESULT_SCHEMA_VERSION = 5;
 
 interface StoredCompletion {
   finishReason: string;
@@ -60,8 +65,10 @@ interface PromptEvalCaseResult {
   judge?: StoredCompletion;
   judgement?: PromptEvalJudgement;
   scores?: PromptEvalScores;
+  hardChecks?: PromptEvalHardCheckResult[];
   baselineRegression?: string;
   error?: string;
+  diagnostic?: JudgeFailureDiagnostic;
 }
 
 interface PromptEvalRunResult {
@@ -72,8 +79,10 @@ interface PromptEvalRunResult {
   generatedAt: string;
   generatorModel: string;
   judgeModel: string;
+  judgeOutputMode: JudgeOutputMode;
   judgeConnectionHash: string;
   selfJudging: boolean;
+  promptVariant: PromptEvalVariant;
   caseFilter: string[];
   cases: PromptEvalCaseResult[];
   aggregate?: PromptEvalAggregate;
@@ -292,6 +301,9 @@ function printCaseResult(result: PromptEvalCaseResult): void {
       console.error(`  时序错误（${item.severity}）：${item.reason}；片段：${item.evidence}`);
     }
   }
+  for (const item of result.hardChecks ?? []) {
+    if (!item.passed) console.error(`  硬断言失败（${item.id}）：${item.description}`);
+  }
 }
 
 function roundedAverage(values: number[]): number {
@@ -324,18 +336,13 @@ function aggregateResults(cases: readonly PromptEvalCaseResult[]): PromptEvalAgg
 }
 
 async function main(): Promise<void> {
+  const variant = promptEvalVariant(process.env['STORY_ECHO_EVAL_VARIANT']);
   const generator = clientConfiguration('');
   const judge = clientConfiguration('JUDGE_', generator);
+  const outputMode = judgeOutputMode();
   const selfJudging = generator.model.trim().toLowerCase() === judge.model.trim().toLowerCase();
   const requestedIds = selectedCaseIds();
-  const availableIds = new Set(PROMPT_EVAL_CASES.map((testCase) => testCase.id));
-  const unknownIds = requestedIds.filter((id) => !availableIds.has(id));
-  if (unknownIds.length > 0) {
-    throw new Error(`未知评测用例：${unknownIds.join(', ')}`);
-  }
-  const selected = PROMPT_EVAL_CASES.filter(
-    (testCase) => requestedIds.length === 0 || requestedIds.includes(testCase.id),
-  );
+  const selected = selectGenerationCases(requestedIds);
   if (selected.length === 0) {
     throw new Error('没有选中任何提示词评测用例。');
   }
@@ -348,8 +355,10 @@ async function main(): Promise<void> {
     generatedAt: new Date().toISOString(),
     generatorModel: generator.model,
     judgeModel: judge.model,
-    judgeConnectionHash: evalHash({ model: judge.model, baseUrl: judge.baseUrl }),
+    judgeOutputMode: outputMode,
+    judgeConnectionHash: evalHash({ model: judge.model, baseUrl: judge.baseUrl, outputMode }),
     selfJudging,
+    promptVariant: variant,
     caseFilter: requestedIds,
     cases: [],
     passed: false,
@@ -385,7 +394,7 @@ async function main(): Promise<void> {
     }
   }
   for (const definition of selected) {
-    const testCase = buildPromptEvalCase(definition);
+    const testCase = applyPromptEvalVariant(buildPromptEvalCase(definition), variant);
     const requestPromptHash = promptHash(testCase.system, testCase.prompt);
     console.log(`[RUN] ${testCase.id}: ${testCase.name}`);
     let generation: PromptEvalCompletion | undefined;
@@ -398,24 +407,20 @@ async function main(): Promise<void> {
       const measurements = measurePromptEvalText(testCase, generation.text);
       const { compressionRatio } = measurements;
       const outputTruncated = isPromptEvalTruncated(generation.finishReason);
-      const judgeCompletion = await requestPromptEvalCompletion(judge, {
+      const hardChecks = evaluatePromptEvalHardChecks(generation.text, testCase.hardChecks);
+      const { completion: judgeCompletion, judgement } = await completeJudgeRequest((request) => requestPromptEvalCompletion(judge, request), {
         system: PROMPT_EVAL_JUDGE_SYSTEM_PROMPT,
         prompt: buildPromptEvalJudgePrompt(testCase, generation.text),
         maxTokens: 5_000,
-      });
-      assertPromptEvalComplete(judgeCompletion);
-      const judgement = parsePromptEvalJudgement(
-        judgeCompletion.text,
-        testCase.rubric,
-        generation.text,
-      );
+        ...(outputMode === 'json_schema' ? { responseFormat: singleJudgeResponseFormat(testCase.rubric, generation.text) } : {}),
+      }, (text) => parsePromptEvalJudgement(text, testCase.rubric, generation!.text));
       const initialScores = scorePromptEvalJudgement(judgement, testCase.rubric, {
         compressionRatio,
         ...(testCase.idealCompressionRatio ? { idealCompressionRatio: testCase.idealCompressionRatio } : {}),
       });
       const scores: PromptEvalScores = {
         ...initialScores,
-        passed: initialScores.passed && !outputTruncated,
+        passed: initialScores.passed && !outputTruncated && promptEvalHardChecksPassed(hardChecks),
       };
       const caseResult: PromptEvalCaseResult = {
         id: testCase.id,
@@ -432,6 +437,7 @@ async function main(): Promise<void> {
         judge: storedCompletion(judgeCompletion),
         judgement,
         scores,
+        ...(hardChecks.length ? { hardChecks } : {}),
       };
       result.cases.push(caseResult);
     } catch (error) {
@@ -451,6 +457,7 @@ async function main(): Promise<void> {
           generation: storedCompletion(generation),
         } : {}),
         error: boundedError(error),
+        ...(error instanceof JudgeEvaluationError ? { diagnostic: error.diagnostic } : {}),
       };
       result.cases.push(caseResult);
     }

@@ -1,4 +1,18 @@
 import type { PromptEvalClientConfig } from './openai-compatible-client';
+import type { JudgeOutputMode } from './judge-schema';
+import type { PairwisePromptLayout } from './pairwise';
+
+export function pairwisePromptLayout(): PairwisePromptLayout {
+  const layout = process.env['STORY_ECHO_EVAL_PAIRWISE_LAYOUT']?.trim() || 'segments-json';
+  if (layout !== 'segments-json' && layout !== 'full-text-with-index' && layout !== 'inline-segments') throw new Error('未知 A/B 输入布局。');
+  return layout;
+}
+
+export function judgeOutputMode(): JudgeOutputMode {
+  const mode = process.env['STORY_ECHO_EVAL_JUDGE_OUTPUT_MODE']?.trim() || 'text';
+  if (mode !== 'text' && mode !== 'json_schema') throw new Error('Judge 输出模式只能是 text 或 json_schema。');
+  return mode;
+}
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim() ?? '';
