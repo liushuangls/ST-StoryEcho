@@ -113,6 +113,9 @@ export interface SillyTavernContext {
   getCharacterCardFields?(options?: { chid?: number }): SillyTavernCharacterCardFields;
   getTokenCountAsync?(text: string, padding?: number): Promise<number>;
   substituteParams?(text: string): string;
+  /** Luker inter-extension registry; absent in stock SillyTavern builds. */
+  registerExtensionApi?(name: string, api: object): void;
+  getExtensionApi?(name: string): object | undefined;
   /** Test/future API seam; current SillyTavern builds expose this from world-info.js. */
   getSortedWorldInfoEntries?(): Promise<SillyTavernWorldInfoEntry[]>;
   Popup?: SillyTavernPopupApi;

@@ -1,4 +1,8 @@
 import { DISPLAY_NAME } from '../core/constants';
+import {
+  beginStoryEchoExternalGeneration,
+  recordStoryEchoLastInjection,
+} from '../api/read-api';
 import { logger } from '../core/logger';
 import type {
   InspectionRecord,
@@ -103,6 +107,7 @@ async function prepareStoryEchoPrompt(
   _contextSize: number,
   _abort: () => void,
   requestedChatId: string | null,
+  injectionGenerationToken: number,
   type?: string,
 ): Promise<void> {
   const settings = settingsRepository.get();
@@ -217,6 +222,18 @@ async function prepareStoryEchoPrompt(
         requestedChatId,
         summaryBlocks.length,
       );
+      if (requestedChatId) {
+        recordStoryEchoLastInjection({
+          generationToken: injectionGenerationToken,
+          chatId: requestedChatId,
+          chatUuid: state.chatUuid,
+          generationType: type || 'normal',
+          retainedStartMessageId: retainedSourceStart,
+          removedMessageCount: window.removableIndices.length,
+          text: historyBlock,
+          summaries: summaryEntries,
+        });
+      }
     }
 
     state.lastInspection = createInspection(
@@ -274,10 +291,13 @@ export async function storyEchoGenerateInterceptor(
 ): Promise<void> {
   tauriTavernAgentBridge.beginStoryEchoPreparation(null);
   const settings = settingsRepository.get();
+  if (isInternalGenerationRequest(chat)) {
+    return;
+  }
+  const injectionGenerationToken = beginStoryEchoExternalGeneration();
   if (
     !settings.enabled ||
-    !isSupportedGenerationType(type) ||
-    isInternalGenerationRequest(chat)
+    !isSupportedGenerationType(type)
   ) {
     return;
   }
@@ -298,7 +318,14 @@ export async function storyEchoGenerateInterceptor(
         logger.info('等待队列期间聊天已切换，已取消过期的上下文准备任务。');
         return false;
       }
-      await prepareStoryEchoPrompt(chat, contextSize, abort, requestedChatId, type);
+      await prepareStoryEchoPrompt(
+        chat,
+        contextSize,
+        abort,
+        requestedChatId,
+        injectionGenerationToken,
+        type,
+      );
       return true;
     },
     { holdForegroundLease: (prepared) => prepared },

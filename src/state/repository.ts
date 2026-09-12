@@ -1,5 +1,6 @@
 import { CHAT_STATE_VERSION, MODULE_ID } from '../core/constants';
 import { createUuid } from '../core/uuid';
+import { emitStoryEchoPublicApiChanged } from '../api/change-events';
 import type {
   InspectionRecord,
   StageSummaryEntry,
@@ -389,6 +390,7 @@ export class StoryStateRepository {
       const state = createState(currentChatId);
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
+      emitStoryEchoPublicApiChanged('state');
       return state;
     }
 
@@ -406,6 +408,7 @@ export class StoryStateRepository {
       delete state.lastInspection;
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
+      emitStoryEchoPublicApiChanged('state');
       return state;
     }
 
@@ -413,6 +416,7 @@ export class StoryStateRepository {
     if (stored['schemaVersion'] !== CHAT_STATE_VERSION) {
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
+      emitStoryEchoPublicApiChanged('state');
     }
     return state;
   }
@@ -424,6 +428,7 @@ export class StoryStateRepository {
     }
     context.chatMetadata[MODULE_ID] = state;
     await context.saveMetadata();
+    emitStoryEchoPublicApiChanged('state');
   }
 
   async adoptRenamedChat(oldOwnerChatId: string, newOwnerChatId: string): Promise<boolean> {
@@ -440,6 +445,7 @@ export class StoryStateRepository {
     state.ownerChatId = newOwnerChatId;
     context.chatMetadata[MODULE_ID] = state;
     await context.saveMetadata();
+    emitStoryEchoPublicApiChanged('state');
     return true;
   }
 
@@ -515,5 +521,6 @@ export class StoryStateRepository {
     const context = getContext();
     delete context.chatMetadata[MODULE_ID];
     await context.saveMetadata();
+    emitStoryEchoPublicApiChanged('state');
   }
 }

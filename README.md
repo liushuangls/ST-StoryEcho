@@ -104,6 +104,31 @@ StoryEcho 在请求期临时插入一条中立的 system/narrator 消息，不�
 
 从旧版本升级时，旧阶段总结迁移为 L1；旧全局骨架直接丢弃。旧的记忆、向量队列及 Embedding 配置同样不会保留。
 
+## 只读公共 API
+
+其他扩展可以读取 StoryEcho 当前聊天的总结前沿、覆盖状态和最近一次实际注入，但不能通过该接口修改任何状态。Luker 会将接口注册为 `story-echo`；普通 SillyTavern 可以使用同一个全局后备入口：
+
+```js
+const context = globalThis.SillyTavern?.getContext?.();
+const api = context?.getExtensionApi?.('story-echo')
+  ?? globalThis.StoryEcho?.api;
+
+const frontier = api?.getFrontier() ?? [];
+const coverage = api?.getCoverage() ?? null;
+const lastInjection = api?.getLastInjection() ?? null;
+
+const unsubscribe = api?.onStateChanged((change) => {
+  console.log(change.reason, change.frontier);
+});
+```
+
+- `getFrontier()` 返回当前有效、按剧情时间排列且可能随请求携带的总结；
+- `getCoverage()` 返回当前聊天、覆盖游标、层级数量及重建状态；读取尚无 StoryEcho 状态的聊天不会创建状态或写入元数据；
+- `getLastInjection()` 返回当前页面会话中、当前聊天最近一次真正插入请求的 StoryEcho 文本；刷新页面或切换聊天后为 `null`，不把重复正文写入聊天元数据；
+- `onStateChanged()` 在上述公开快照发生变化时通知调用者，并返回可重复调用的取消订阅函数。
+
+所有返回对象及数组都是冻结的防御性副本。API 版本见 `api.apiVersion`，StoryEcho 版本见 `api.extensionVersion`。
+
 ## 开发
 
 ```bash
@@ -132,6 +157,7 @@ npm run eval:prompts
 - [产品规格](docs/PRODUCT_SPEC.md)
 - [架构说明](docs/ARCHITECTURE.md)
 - [安全边界](docs/SECURITY.md)
+- [只读公共 API](docs/PUBLIC_API.md)
 - [当前状态](docs/STATUS.md)
 - [提示词质量评测](docs/PROMPT_EVALS.md)
 

@@ -25,6 +25,10 @@ import {
   withInternalGeneration,
 } from '../src/llm/internal-generation';
 import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
+import {
+  clearStoryEchoLastInjection,
+  storyEchoReadApi,
+} from '../src/api/read-api';
 
 function sourceChat(): TavernChatMessage[] {
   return [
@@ -87,6 +91,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearStoryEchoLastInjection();
   storyEchoTaskCoordinator.resetForTests();
   vi.unstubAllGlobals();
 });
@@ -187,6 +192,16 @@ describe('StoryEcho generation interceptor', () => {
     expect(state.lastInspection?.estimatedSummaryTokens).toBe(estimateTokens(injected[0]!.mes));
     expect(state.metrics.generationsTrimmed).toBe(1);
     expect(state.metrics.messagesRemoved).toBeGreaterThan(0);
+    expect(storyEchoReadApi.getLastInjection()).toMatchObject({
+      chatId: 'chat-id',
+      generationType: 'swipe',
+      text: injected[0]?.mes,
+      summaries: [
+        { text: '长期压缩历史', level: 2 },
+        { text: '阶段二', level: 1 },
+        { text: '阶段三', level: 1 },
+      ],
+    });
   });
 
   it('does not emit the removed skeleton protocol', async () => {
@@ -202,5 +217,22 @@ describe('StoryEcho generation interceptor', () => {
 
     expect(request.some((message) => message.mes.includes('story_echo_skeleton'))).toBe(false);
     expect(request.some((message) => message.mes.includes('已验证总结'))).toBe(true);
+  });
+
+  it('does not expose a previous injection after a later external request skips StoryEcho', async () => {
+    const state = chatState();
+    state.stageSummary = {
+      entries: [summary('已注入的历史', 0, 5)],
+      coveredThroughMessageId: 5,
+      coveredThroughHash: 'hash-0-5',
+    };
+    const original = install(state);
+    await storyEchoGenerateInterceptor(structuredClone(original), 8_192, vi.fn(), 'normal');
+    expect(storyEchoReadApi.getLastInjection()).not.toBeNull();
+
+    install(state, settings(false), original);
+    await storyEchoGenerateInterceptor(structuredClone(original), 8_192, vi.fn(), 'normal');
+
+    expect(storyEchoReadApi.getLastInjection()).toBeNull();
   });
 });

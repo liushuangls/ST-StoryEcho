@@ -8,6 +8,16 @@ const mocks = vi.hoisted(() => ({
   unregisterScheduler: vi.fn(),
   registerSettingsPanel: vi.fn<() => Promise<void>>(),
   unregisterSettingsPanel: vi.fn(),
+  activatePublicApi: vi.fn(),
+  deactivatePublicApi: vi.fn(),
+  registerPublicApi: vi.fn(() => false),
+}));
+
+vi.mock('../src/api/read-api', () => ({
+  activateStoryEchoPublicApi: mocks.activatePublicApi,
+  deactivateStoryEchoPublicApi: mocks.deactivatePublicApi,
+  registerStoryEchoPublicApi: mocks.registerPublicApi,
+  storyEchoReadApi: Object.freeze({ apiVersion: 1 }),
 }));
 
 vi.mock('../src/background/scheduler', () => ({
@@ -44,6 +54,10 @@ beforeEach(() => {
   mocks.unregisterScheduler.mockReset();
   mocks.registerSettingsPanel.mockReset();
   mocks.unregisterSettingsPanel.mockReset();
+  mocks.activatePublicApi.mockReset();
+  mocks.deactivatePublicApi.mockReset();
+  mocks.registerPublicApi.mockReset();
+  mocks.registerPublicApi.mockReturnValue(false);
   mocks.registerSettingsPanel.mockResolvedValue();
 });
 
@@ -69,6 +83,8 @@ describe('extension activation', () => {
     expect(mocks.registerScheduler).toHaveBeenCalledTimes(2);
     expect(mocks.registerScheduler).toHaveBeenNthCalledWith(2, { silent: true });
     expect(mocks.registerSettingsPanel).toHaveBeenCalledOnce();
+    expect(mocks.activatePublicApi).toHaveBeenCalledOnce();
+    expect(mocks.registerPublicApi).toHaveBeenCalledTimes(2);
   });
 
   it('removes partially registered listeners before retrying a registration exception', async () => {
@@ -119,6 +135,7 @@ describe('extension activation', () => {
     expect(mocks.registerScheduler).toHaveBeenCalledOnce();
     expect(mocks.unregisterScheduler).toHaveBeenCalledOnce();
     expect(mocks.unregisterSettingsPanel).toHaveBeenCalledOnce();
+    expect(mocks.deactivatePublicApi).toHaveBeenCalledOnce();
     expect(globalThis.storyEchoGenerateInterceptor).toBeUndefined();
 
     mocks.registerScheduler.mockReturnValue(true);

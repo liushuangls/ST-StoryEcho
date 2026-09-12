@@ -1,4 +1,10 @@
 import { backgroundProcessingScheduler } from './background/scheduler';
+import {
+  activateStoryEchoPublicApi,
+  deactivateStoryEchoPublicApi,
+  registerStoryEchoPublicApi,
+  storyEchoReadApi,
+} from './api/read-api';
 import { logger } from './core/logger';
 import type { TavernChatMessage } from './core/types';
 import { storyEchoGenerateInterceptor as intercept } from './prompt/interceptor';
@@ -31,6 +37,7 @@ function waitForSchedulerRetry(): Promise<void> {
 
 function attemptSchedulerRegistration(silent = false): boolean {
   try {
+    registerStoryEchoPublicApi();
     return silent
       ? backgroundProcessingScheduler.register({ silent: true })
       : backgroundProcessingScheduler.register();
@@ -83,6 +90,7 @@ export function onActivate(): Promise<void> {
     activationGeneration += 1;
   }
   globalThis.storyEchoGenerateInterceptor = intercept;
+  activateStoryEchoPublicApi();
   if (!activationLogged) {
     activationLogged = true;
     logger.info('扩展已加载。');
@@ -102,6 +110,7 @@ export function onDisable(): void {
   schedulerRegistrationPromise = undefined;
   backgroundProcessingScheduler.unregister();
   unregisterSettingsPanel();
+  deactivateStoryEchoPublicApi();
   if (globalThis.storyEchoGenerateInterceptor === intercept) {
     globalThis.storyEchoGenerateInterceptor = undefined;
   }
@@ -110,5 +119,7 @@ export function onDisable(): void {
 export function onEnable(): Promise<void> {
   return onActivate();
 }
+
+export { storyEchoReadApi };
 
 void onActivate();

@@ -36,6 +36,9 @@ describe('extension manifest', () => {
 
     const bundle = readFileSync(resolve(jsAsset), 'utf8');
     expect(bundle).toContain('globalThis.storyEchoGenerateInterceptor');
+    expect(bundle).toContain('globalThis.StoryEcho');
+    expect(bundle).toContain('STORY_ECHO_PUBLIC_API_VERSION');
+    expect(bundle).toContain('storyEchoReadApi');
     expect(bundle).toContain('stageSummaryMetadataManager');
     expect(bundle).not.toContain('memoryMetadataManager');
     expect(bundle).toMatch(/export\s*\{[\s\S]*onActivate/);

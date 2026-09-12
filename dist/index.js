@@ -981,6 +981,29 @@ var CHAT_STATE_VERSION = 3;
 var SETTINGS_VERSION = 12;
 var EXTENSION_VERSION = "0.21.18";
 
+// src/api/change-events.ts
+var listeners = /* @__PURE__ */ new Set();
+function emitStoryEchoPublicApiChanged(reason) {
+  for (const listener of listeners) {
+    try {
+      listener(reason);
+    } catch {
+      console.warn("[StoryEcho] Public API change listener failed.");
+    }
+  }
+}
+function subscribeStoryEchoPublicApiChanged(listener) {
+  listeners.add(listener);
+  let subscribed = true;
+  return () => {
+    if (!subscribed) {
+      return;
+    }
+    subscribed = false;
+    listeners.delete(listener);
+  };
+}
+
 // src/summary/constants.ts
 var SUMMARY_LLM_TIMEOUT_MS = 3e5;
 var SUMMARY_WORLD_INFO_CHARACTER_BUDGET = 5e4;
@@ -1151,6 +1174,7 @@ var SettingsRepository = class {
     mutator(settings);
     normalizeSettings(settings);
     getContext().saveSettingsDebounced();
+    emitStoryEchoPublicApiChanged("settings");
     return settings;
   }
   reset() {
@@ -1158,6 +1182,7 @@ var SettingsRepository = class {
     const settings = cloneDefaults();
     context.extensionSettings[MODULE_ID] = settings;
     context.saveSettingsDebounced();
+    emitStoryEchoPublicApiChanged("settings");
     return settings;
   }
 };
@@ -1868,6 +1893,7 @@ var StoryStateRepository = class {
       const state2 = createState(currentChatId);
       context.chatMetadata[MODULE_ID] = state2;
       await context.saveMetadata();
+      emitStoryEchoPublicApiChanged("state");
       return state2;
     }
     let state = normalizeState(stored);
@@ -1884,11 +1910,13 @@ var StoryStateRepository = class {
       delete state.lastInspection;
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
+      emitStoryEchoPublicApiChanged("state");
       return state;
     }
     if (stored["schemaVersion"] !== CHAT_STATE_VERSION) {
       context.chatMetadata[MODULE_ID] = state;
       await context.saveMetadata();
+      emitStoryEchoPublicApiChanged("state");
     }
     return state;
   }
@@ -1899,6 +1927,7 @@ var StoryStateRepository = class {
     }
     context.chatMetadata[MODULE_ID] = state;
     await context.saveMetadata();
+    emitStoryEchoPublicApiChanged("state");
   }
   async adoptRenamedChat(oldOwnerChatId, newOwnerChatId) {
     const context = getContext();
@@ -1910,6 +1939,7 @@ var StoryStateRepository = class {
     state.ownerChatId = newOwnerChatId;
     context.chatMetadata[MODULE_ID] = state;
     await context.saveMetadata();
+    emitStoryEchoPublicApiChanged("state");
     return true;
   }
   async updateStageSummaryEntry(target, edit) {
@@ -1973,6 +2003,7 @@ var StoryStateRepository = class {
     const context = getContext();
     delete context.chatMetadata[MODULE_ID];
     await context.saveMetadata();
+    emitStoryEchoPublicApiChanged("state");
   }
 };
 
@@ -5547,9 +5578,310 @@ var BackgroundProcessingScheduler = class {
 };
 var backgroundProcessingScheduler = new BackgroundProcessingScheduler();
 
+// src/api/read-api.ts
+var STORY_ECHO_PUBLIC_API_NAME = "story-echo";
+var STORY_ECHO_PUBLIC_API_VERSION = 1;
+var EMPTY_FRONTIER = Object.freeze([]);
+var stateRepository = new StoryStateRepository();
+var apiActive = false;
+var lastInjection = null;
+var latestExternalGenerationToken = 0;
+var hostEventBinding = null;
+var registeredHostApis = /* @__PURE__ */ new WeakSet();
+function isRecord10(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function frozenRange(range) {
+  return Object.freeze({
+    sourceStartMessageId: range.sourceStartMessageId,
+    sourceEndMessageId: range.sourceEndMessageId
+  });
+}
+function summaryView(entry) {
+  const truncatedSourceRanges = stageSummarySourceTruncationRanges(entry).map(frozenRange);
+  return Object.freeze({
+    text: entry.text,
+    level: entry.level,
+    sourceStartMessageId: entry.sourceStartMessageId,
+    sourceEndMessageId: entry.sourceEndMessageId,
+    sourceHash: entry.sourceHash,
+    updatedAt: entry.updatedAt,
+    characterCount: entry.characterCount ?? Array.from(entry.text).length,
+    manuallyEdited: Boolean(entry.manuallyEdited),
+    outputTruncated: stageSummaryOutputTruncated(entry),
+    truncatedSourceRanges: Object.freeze(truncatedSourceRanges)
+  });
+}
+function currentContext() {
+  try {
+    return getContext();
+  } catch {
+    return null;
+  }
+}
+function contextManagementEnabled(context) {
+  const settings = context.extensionSettings[MODULE_ID];
+  return isRecord10(settings) && settings["enabled"] === true;
+}
+function getFrontier() {
+  try {
+    const state = stateRepository.getExisting();
+    if (!state) {
+      return EMPTY_FRONTIER;
+    }
+    return Object.freeze(
+      state.stageSummary.entries.filter((entry) => !entry.deleted).map(summaryView)
+    );
+  } catch {
+    return EMPTY_FRONTIER;
+  }
+}
+function getCoverage() {
+  try {
+    const context = currentContext();
+    if (!context) {
+      return null;
+    }
+    const chatId = getCurrentChatId(context);
+    if (!chatId) {
+      return null;
+    }
+    const state = stateRepository.getExisting();
+    const entries = state?.stageSummary.entries ?? [];
+    const activeEntries = entries.filter((entry) => !entry.deleted);
+    const countByLevel = /* @__PURE__ */ new Map();
+    for (const entry of activeEntries) {
+      countByLevel.set(entry.level, (countByLevel.get(entry.level) ?? 0) + 1);
+    }
+    const levelCounts = [...countByLevel.entries()].sort(([left], [right]) => left - right).map(([level, count]) => Object.freeze({ level, count }));
+    return Object.freeze({
+      active: apiActive,
+      enabled: contextManagementEnabled(context),
+      chatId,
+      chatUuid: state?.chatUuid ?? null,
+      coveredThroughMessageId: state?.stageSummary.coveredThroughMessageId ?? -1,
+      coveredThroughHash: state?.stageSummary.coveredThroughHash ?? "",
+      updatedAt: state?.stageSummary.updatedAt ?? null,
+      frontierEntryCount: activeEntries.length,
+      storedEntryCount: entries.length,
+      deletedEntryCount: entries.length - activeEntries.length,
+      levelCounts: Object.freeze(levelCounts),
+      rebuildInProgress: Boolean(state?.stageSummary.rebuildCheckpoint),
+      rebuildDraftEntryCount: state?.stageSummary.rebuildCheckpoint?.entries.length ?? 0
+    });
+  } catch {
+    return null;
+  }
+}
+function cloneLastInjection(value) {
+  return Object.freeze({
+    chatId: value.chatId,
+    chatUuid: value.chatUuid,
+    createdAt: value.createdAt,
+    generationType: value.generationType,
+    retainedStartMessageId: value.retainedStartMessageId,
+    removedMessageCount: value.removedMessageCount,
+    text: value.text,
+    summaries: Object.freeze(value.summaries.map((entry) => Object.freeze({
+      ...entry,
+      truncatedSourceRanges: Object.freeze(entry.truncatedSourceRanges.map(frozenRange))
+    })))
+  });
+}
+function getLastInjection() {
+  if (!lastInjection) {
+    return null;
+  }
+  const context = currentContext();
+  if (!context || getCurrentChatId(context) !== lastInjection.chatId) {
+    return null;
+  }
+  return cloneLastInjection(lastInjection);
+}
+function publicChangeView(reason) {
+  return Object.freeze({
+    reason,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    active: apiActive,
+    coverage: getCoverage(),
+    frontier: getFrontier(),
+    lastInjection: getLastInjection()
+  });
+}
+function publicSnapshotSignature(change) {
+  return JSON.stringify({
+    active: change.active,
+    coverage: change.coverage,
+    frontier: change.frontier,
+    lastInjection: change.lastInjection
+  });
+}
+function onStateChanged(listener) {
+  if (typeof listener !== "function") {
+    return () => void 0;
+  }
+  let signature = publicSnapshotSignature(publicChangeView("state"));
+  return subscribeStoryEchoPublicApiChanged((reason) => {
+    const change = publicChangeView(reason);
+    const nextSignature = publicSnapshotSignature(change);
+    if (nextSignature === signature) {
+      return;
+    }
+    signature = nextSignature;
+    listener(change);
+  });
+}
+var storyEchoReadApi = Object.freeze({
+  apiVersion: STORY_ECHO_PUBLIC_API_VERSION,
+  extensionVersion: EXTENSION_VERSION,
+  getFrontier,
+  getCoverage,
+  getLastInjection,
+  onStateChanged
+});
+var publicGlobal = Object.freeze({
+  version: EXTENSION_VERSION,
+  api: storyEchoReadApi
+});
+function exposeGlobalApi() {
+  try {
+    if (globalThis.StoryEcho !== publicGlobal) {
+      globalThis.StoryEcho = publicGlobal;
+    }
+    return true;
+  } catch {
+    console.warn("[StoryEcho] Could not expose the global read-only API.");
+    return false;
+  }
+}
+function unbindHostEvents() {
+  if (!hostEventBinding) {
+    return;
+  }
+  const remove = hostEventBinding.eventSource.off ?? hostEventBinding.eventSource.removeListener;
+  for (const registration of hostEventBinding.registrations) {
+    try {
+      remove?.call(hostEventBinding.eventSource, registration.eventName, registration.handler);
+    } catch {
+      console.warn("[StoryEcho] Could not remove a public API host listener.");
+    }
+  }
+  hostEventBinding = null;
+}
+function bindHostEvents(context) {
+  const eventSource = context.eventSource;
+  if (!eventSource || hostEventBinding?.eventSource === eventSource) {
+    return Boolean(eventSource);
+  }
+  unbindHostEvents();
+  const eventNames = new Set([
+    context.event_types?.["CHAT_CHANGED"] ?? context.eventTypes?.["CHAT_CHANGED"],
+    context.event_types?.["CHAT_LOADED"] ?? context.eventTypes?.["CHAT_LOADED"]
+  ].filter((eventName2) => Boolean(eventName2)));
+  const registrations = [];
+  try {
+    for (const eventName2 of eventNames) {
+      const handler = () => {
+        latestExternalGenerationToken += 1;
+        lastInjection = null;
+        queueMicrotask(() => emitStoryEchoPublicApiChanged("chat"));
+      };
+      eventSource.on(eventName2, handler);
+      registrations.push({ eventName: eventName2, handler });
+    }
+  } catch {
+    const remove = eventSource.off ?? eventSource.removeListener;
+    for (const registration of registrations) {
+      try {
+        remove?.call(eventSource, registration.eventName, registration.handler);
+      } catch {
+      }
+    }
+    console.warn("[StoryEcho] Could not register public API host listeners.");
+    return false;
+  }
+  hostEventBinding = { eventSource, registrations };
+  return true;
+}
+function registerStoryEchoPublicApi() {
+  exposeGlobalApi();
+  const context = currentContext();
+  if (!context) {
+    return false;
+  }
+  bindHostEvents(context);
+  const register = context.registerExtensionApi;
+  if (!register) {
+    return false;
+  }
+  try {
+    if (context.getExtensionApi?.call(context, STORY_ECHO_PUBLIC_API_NAME) === storyEchoReadApi) {
+      registeredHostApis.add(register);
+      return true;
+    }
+    if (!context.getExtensionApi && registeredHostApis.has(register)) {
+      return true;
+    }
+    register.call(context, STORY_ECHO_PUBLIC_API_NAME, storyEchoReadApi);
+    registeredHostApis.add(register);
+    return true;
+  } catch {
+    console.warn("[StoryEcho] Could not register the read-only API with this host.");
+    return false;
+  }
+}
+function activateStoryEchoPublicApi() {
+  exposeGlobalApi();
+  const changed = !apiActive;
+  apiActive = true;
+  registerStoryEchoPublicApi();
+  if (changed) {
+    emitStoryEchoPublicApiChanged("lifecycle");
+  }
+}
+function deactivateStoryEchoPublicApi() {
+  const changed = apiActive || lastInjection !== null;
+  apiActive = false;
+  latestExternalGenerationToken += 1;
+  lastInjection = null;
+  unbindHostEvents();
+  if (changed) {
+    emitStoryEchoPublicApiChanged("lifecycle");
+  }
+}
+function clearStoryEchoLastInjection() {
+  latestExternalGenerationToken += 1;
+  if (!lastInjection) {
+    return;
+  }
+  lastInjection = null;
+  emitStoryEchoPublicApiChanged("injection");
+}
+function beginStoryEchoExternalGeneration() {
+  clearStoryEchoLastInjection();
+  return latestExternalGenerationToken;
+}
+function recordStoryEchoLastInjection(record) {
+  if (record.generationToken !== latestExternalGenerationToken) {
+    return false;
+  }
+  lastInjection = Object.freeze({
+    chatId: record.chatId,
+    chatUuid: record.chatUuid,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    generationType: record.generationType,
+    retainedStartMessageId: record.retainedStartMessageId,
+    removedMessageCount: record.removedMessageCount,
+    text: record.text,
+    summaries: Object.freeze(record.summaries.map(summaryView))
+  });
+  emitStoryEchoPublicApiChanged("injection");
+  return true;
+}
+
 // src/prompt/interceptor.ts
 var settingsRepository = new SettingsRepository();
-var stateRepository = new StoryStateRepository();
+var stateRepository2 = new StoryStateRepository();
 function isSupportedGenerationType(type) {
   return !type || type === "normal" || type === "regenerate" || type === "swipe";
 }
@@ -5588,7 +5920,7 @@ function requestSystemMessage(mes) {
     }
   };
 }
-async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatId, type) {
+async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatId, injectionGenerationToken, type) {
   const settings = settingsRepository.get();
   if (!settings.enabled || !isSupportedGenerationType(type)) {
     return;
@@ -5604,7 +5936,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatI
     if (!minimumSourceWindow || minimumSourceWindow.removableIndices.length === 0) {
       return;
     }
-    let state = await stateRepository.getOrCreate();
+    let state = await stateRepository2.getOrCreate();
     if (!state) {
       return;
     }
@@ -5651,7 +5983,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatI
         summaryCoveredThrough: state.stageSummary.coveredThroughMessageId,
         desiredCoveredThrough
       });
-      await stateRepository.save(state);
+      await stateRepository2.save(state);
       emitDiagnosticsUpdated();
       return;
     }
@@ -5689,6 +6021,18 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatI
         requestedChatId,
         summaryBlocks.length
       );
+      if (requestedChatId) {
+        recordStoryEchoLastInjection({
+          generationToken: injectionGenerationToken,
+          chatId: requestedChatId,
+          chatUuid: state.chatUuid,
+          generationType: type || "normal",
+          retainedStartMessageId: retainedSourceStart,
+          removedMessageCount: window.removableIndices.length,
+          text: historyBlock,
+          summaries: summaryEntries
+        });
+      }
     }
     state.lastInspection = createInspection(
       type,
@@ -5725,7 +6069,7 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatI
       durationMs: Math.round(performance.now() - startedAt)
     });
     try {
-      await stateRepository.save(state);
+      await stateRepository2.save(state);
       emitDiagnosticsUpdated();
     } catch (error) {
       logger.warn("\u4FDD\u5B58\u4E0A\u4E0B\u6587\u68C0\u67E5\u8BB0\u5F55\u5931\u8D25\u3002", error);
@@ -5737,7 +6081,11 @@ async function prepareStoryEchoPrompt(chat, _contextSize, _abort, requestedChatI
 async function storyEchoGenerateInterceptor(chat, contextSize, abort, type) {
   tauriTavernAgentBridge.beginStoryEchoPreparation(null);
   const settings = settingsRepository.get();
-  if (!settings.enabled || !isSupportedGenerationType(type) || isInternalGenerationRequest(chat)) {
+  if (isInternalGenerationRequest(chat)) {
+    return;
+  }
+  const injectionGenerationToken = beginStoryEchoExternalGeneration();
+  if (!settings.enabled || !isSupportedGenerationType(type)) {
     return;
   }
   const requestedContext = getContext();
@@ -5747,14 +6095,21 @@ async function storyEchoGenerateInterceptor(chat, contextSize, abort, type) {
   await storyEchoTaskCoordinator.enqueueForeground(
     "\u751F\u6210\u524D\u4E0A\u4E0B\u6587\u51C6\u5907",
     async () => {
-      const currentContext = getContext();
-      const currentChatId = getCurrentChatId(currentContext);
-      const sameChat = requestedChatId ? currentChatId === requestedChatId : currentContext.chat === requestedSourceChat;
+      const currentContext2 = getContext();
+      const currentChatId = getCurrentChatId(currentContext2);
+      const sameChat = requestedChatId ? currentChatId === requestedChatId : currentContext2.chat === requestedSourceChat;
       if (!sameChat) {
         logger.info("\u7B49\u5F85\u961F\u5217\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u8FC7\u671F\u7684\u4E0A\u4E0B\u6587\u51C6\u5907\u4EFB\u52A1\u3002");
         return false;
       }
-      await prepareStoryEchoPrompt(chat, contextSize, abort, requestedChatId, type);
+      await prepareStoryEchoPrompt(
+        chat,
+        contextSize,
+        abort,
+        requestedChatId,
+        injectionGenerationToken,
+        type
+      );
       return true;
     },
     { holdForegroundLease: (prepared) => prepared }
@@ -5836,16 +6191,16 @@ function buildRecentErrorReport(state, settings, limit = RECENT_ERROR_REPORT_LIM
 // src/llm/model-list.ts
 var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
 var MAX_RESPONSE_BYTES2 = 2 * 1024 * 1024;
-function isRecord10(value) {
+function isRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function errorMessage(payload, response, apiKey) {
   let detail = "";
-  if (isRecord10(payload)) {
+  if (isRecord11(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       detail = error;
-    } else if (isRecord10(error) && typeof error["message"] === "string") {
+    } else if (isRecord11(error) && typeof error["message"] === "string") {
       detail = error["message"];
     } else if (typeof payload["message"] === "string") {
       detail = payload["message"];
@@ -5857,13 +6212,13 @@ function errorMessage(payload, response, apiKey) {
   return suffix ? `${base} ${suffix}` : base;
 }
 function parseCustomModelList(payload) {
-  const root = isRecord10(payload) ? payload : null;
+  const root = isRecord11(payload) ? payload : null;
   const candidates = Array.isArray(root?.["models"]) ? root["models"] : Array.isArray(root?.["data"]) ? root["data"] : Array.isArray(payload) ? payload : [];
   const names = candidates.map((candidate) => {
     if (typeof candidate === "string") {
       return candidate.trim();
     }
-    if (!isRecord10(candidate)) {
+    if (!isRecord11(candidate)) {
       return "";
     }
     const value = candidate["id"] ?? candidate["model"] ?? candidate["name"];
@@ -6025,7 +6380,7 @@ async function loadTauriItemizedPromptRecord(chatId, recordId) {
   const value = await storage.getItem(
     `${TAURI_PROMPT_RECORD_PREFIX}${chatId}:${recordId}`
   );
-  return isRecord11(value) ? value : null;
+  return isRecord12(value) ? value : null;
 }
 function finiteTokens(value) {
   const number = typeof value === "number" ? value : Number(value);
@@ -6038,7 +6393,7 @@ function messageIdValue2(value) {
 function stringValue2(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord11(value) {
+function isRecord12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function promptText(value) {
@@ -7527,7 +7882,7 @@ ${consequence}
 // src/ui/settings-panel.ts
 var PANEL_ID = "story-echo-settings";
 var settingsRepository2 = new SettingsRepository();
-var stateRepository2 = new StoryStateRepository();
+var stateRepository3 = new StoryStateRepository();
 var stageSummaryMetadataManager;
 var registeredPanel;
 var settingsPanelCleanup;
@@ -8049,7 +8404,7 @@ function bindSettings(panel) {
         if (target < 0) {
           throw new Error("\u5F53\u524D\u6CA1\u6709\u7A97\u53E3\u5916\u5386\u53F2\u53EF\u5904\u7406\u3002");
         }
-        let state = await stateRepository2.getOrCreate();
+        let state = await stateRepository3.getOrCreate();
         state = await stageSummaryService.reconcileHistory(state ?? void 0);
         const summary = await stageSummaryService.processAllThrough(target);
         const compaction = await summaryCompactionService.processAllPending();
@@ -8065,7 +8420,7 @@ function bindSettings(panel) {
     }
   });
   element3(panel, "#story-echo-copy-report").addEventListener("click", async () => {
-    const state = stateRepository2.getExisting();
+    const state = stateRepository3.getExisting();
     if (!state) {
       notify.info("\u5F53\u524D\u804A\u5929\u5C1A\u65E0 StoryEcho \u72B6\u6001\u3002");
       return;
@@ -8078,7 +8433,7 @@ function bindSettings(panel) {
     }
   });
   element3(panel, "#story-echo-copy-recent-errors").addEventListener("click", async () => {
-    const state = stateRepository2.getExisting();
+    const state = stateRepository3.getExisting();
     if (!state) {
       notify.info("\u5F53\u524D\u804A\u5929\u5C1A\u65E0 StoryEcho \u72B6\u6001\u3002");
       return;
@@ -8106,10 +8461,10 @@ function bindSettings(panel) {
         if (!requestedChatId || getCurrentChatId() !== requestedChatId) {
           throw new Error("\u7B49\u5F85\u6E05\u7A7A\u7EDF\u8BA1\u671F\u95F4\u804A\u5929\u5DF2\u5207\u6362\uFF0C\u5DF2\u53D6\u6D88\u64CD\u4F5C\u3002");
         }
-        const state = stateRepository2.getExisting();
+        const state = stateRepository3.getExisting();
         if (state) {
           resetDiagnostics(state);
-          await stateRepository2.save(state);
+          await stateRepository3.save(state);
         }
       });
       await refreshStatus(panel);
@@ -8210,7 +8565,7 @@ async function refreshStatus(panel) {
   try {
     const settings = settingsRepository2.get();
     syncVisibility(panel, settings);
-    const state = stateRepository2.getExisting();
+    const state = stateRepository3.getExisting();
     if (!state) {
       status.textContent = [
         getCurrentChatId() ? "\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316 StoryEcho \u6570\u636E\u3002" : "\u5F53\u524D\u6CA1\u6709\u6253\u5F00\u804A\u5929\u3002",
@@ -8291,7 +8646,7 @@ async function registerSettingsPanelOnce(generation) {
   const panel = panelTemplate();
   host.append(panel);
   registeredPanel = panel;
-  const summaryManager = new StageSummaryMetadataManager(stateRepository2);
+  const summaryManager = new StageSummaryMetadataManager(stateRepository3);
   stageSummaryMetadataManager = summaryManager;
   const subscriptions = new EventSubscriptionScope();
   let visibilityObserver;
@@ -8409,6 +8764,7 @@ function waitForSchedulerRetry() {
 }
 function attemptSchedulerRegistration(silent = false) {
   try {
+    registerStoryEchoPublicApi();
     return silent ? backgroundProcessingScheduler.register({ silent: true }) : backgroundProcessingScheduler.register();
   } catch (error) {
     backgroundProcessingScheduler.unregister();
@@ -8456,6 +8812,7 @@ function onActivate() {
     activationGeneration += 1;
   }
   globalThis.storyEchoGenerateInterceptor = storyEchoGenerateInterceptor;
+  activateStoryEchoPublicApi();
   if (!activationLogged) {
     activationLogged = true;
     logger.info("\u6269\u5C55\u5DF2\u52A0\u8F7D\u3002");
@@ -8471,6 +8828,7 @@ function onDisable() {
   schedulerRegistrationPromise = void 0;
   backgroundProcessingScheduler.unregister();
   unregisterSettingsPanel();
+  deactivateStoryEchoPublicApi();
   if (globalThis.storyEchoGenerateInterceptor === storyEchoGenerateInterceptor) {
     globalThis.storyEchoGenerateInterceptor = void 0;
   }
@@ -8482,6 +8840,7 @@ void onActivate();
 export {
   onActivate,
   onDisable,
-  onEnable
+  onEnable,
+  storyEchoReadApi
 };
 //# sourceMappingURL=index.js.map

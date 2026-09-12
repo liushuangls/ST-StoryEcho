@@ -24,6 +24,9 @@ SillyTavern 聊天
 ```text
 src/
   background/scheduler.ts       回复后单批调度与生命周期事件
+  api/
+    read-api.ts                 冻结的总结前沿、覆盖状态与最近注入公共 API
+    change-events.ts            公共快照变化订阅与监听器隔离
   content/story-content.ts      后台使用的可见剧情正文清洗
   history/
     chunk-planner.ts            完整轮次切块
@@ -186,3 +189,9 @@ Provider 统一接受 `AbortSignal`：
 - 来源修订缓存让纯追加聊天避免每轮重复计算相同前缀哈希；
 - L1 模型成本随新增剧情近似线性增长；高层压缩是固定扇入的进位操作；
 - 注入的总结前沿为 `O(log N)` 条，而不是随聊天长度线性累积。
+
+## 9. 只读公共 API
+
+`storyEchoReadApi` 只从当前上下文和已经存在的聊天状态构造冻结快照，不调用 `getOrCreate()`，因此读取空聊天不会产生元数据写入。Luker 通过其扩展注册表以 `story-echo` 暴露同一对象；其他宿主通过 `globalThis.StoryEcho.api` 访问。
+
+接口提供当前有效总结前沿、覆盖游标和层级计数，以及页面会话内最后一次实际插入请求的 StoryEcho 文本。注入快照按聊天 ID 隔离，聊天切换、下一次未注入的外部生成或扩展停用都会清除旧快照。订阅者收到的也是冻结副本；监听器异常与 StoryEcho 主流程隔离。

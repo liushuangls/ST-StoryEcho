@@ -1,5 +1,6 @@
 import { MODULE_ID } from '../core/constants';
 import type { StoryEchoSettings } from '../core/types';
+import { emitStoryEchoPublicApiChanged } from '../api/change-events';
 import { getContext } from '../platform/sillytavern';
 import { MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES } from '../summary/constants';
 import { DEFAULT_SETTINGS } from './defaults';
@@ -164,6 +165,7 @@ export class SettingsRepository {
     mutator(settings);
     normalizeSettings(settings);
     getContext().saveSettingsDebounced();
+    emitStoryEchoPublicApiChanged('settings');
     return settings;
   }
 
@@ -172,6 +174,7 @@ export class SettingsRepository {
     const settings = cloneDefaults();
     context.extensionSettings[MODULE_ID] = settings;
     context.saveSettingsDebounced();
+    emitStoryEchoPublicApiChanged('settings');
     return settings;
   }
 }
