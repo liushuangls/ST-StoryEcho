@@ -24,6 +24,8 @@ interface MainStreamState extends Record<string, unknown> {
   images: string[];
   signature: string;
   toolSignatures: Record<string, string>;
+  reasoningBlocks: Array<Record<string, unknown>>;
+  reasoningDetails: Array<Record<string, unknown>>;
   native: unknown;
 }
 
@@ -37,7 +39,13 @@ export interface MainStreamingRuntime {
     model: string,
     type: string,
     messages: Array<Record<string, unknown>>,
-    options: { allowToolCalls: boolean; agentMode: boolean },
+    options: {
+      allowToolCalls: boolean;
+      agentMode: boolean;
+      tools: never[];
+      replaceTools: boolean;
+      allowStreamingForQuiet: boolean;
+    },
   ): Promise<GenerationParametersResult>;
   getStreamingReply(
     data: unknown,
@@ -363,6 +371,12 @@ async function readStream(
     images: [],
     signature: '',
     toolSignatures: {},
+    // Luker preserves Anthropic blocks and OpenRouter reasoning_details even
+    // when thought display is disabled. Its parser mutates these collections.
+    reasoningBlocks: [],
+    reasoningDetails: [],
+    usage: null,
+    finishReason: null,
     native: null,
   };
   let text = '';
@@ -545,7 +559,13 @@ export async function completeMainConnectionStream(
       request.identity.model,
       'quiet',
       messages,
-      { allowToolCalls: false, agentMode: false },
+      {
+        allowToolCalls: false,
+        agentMode: false,
+        tools: [],
+        replaceTools: true,
+        allowStreamingForQuiet: true,
+      },
     );
     if (!isRecord(generated) || !isRecord(generated.generate_data)) {
       throw new Error('SillyTavern生成了无效的主连接请求参数。');

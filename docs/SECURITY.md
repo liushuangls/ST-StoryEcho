@@ -20,6 +20,7 @@ Key 不写入：
 ## 网络
 
 - 主连接通过 SillyTavern 的 `generateRaw` 或兼容的同源流式入口；
+- 已保存插头通过宿主 `ConnectionManagerRequestService` 发起独立非流式请求；StoryEcho 只保存 ID，不复制插头密钥或切换全局连接，宿主错误详情不会直接写入诊断；
 - 自定义 OpenAI 兼容连接通过同源 `/api/backends/chat-completions/generate`；
 - 浏览器不会直接向第三方域名发送 Key；
 - 默认只允许 HTTPS；

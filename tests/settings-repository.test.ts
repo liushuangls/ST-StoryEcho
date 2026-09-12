@@ -23,6 +23,18 @@ afterEach(() => {
 });
 
 describe('SettingsRepository', () => {
+  it('migrates v12 and persists the saved connection ID', () => {
+    const { extensionSettings } = installContext({ version: 12, llm: { provider: 'main' } });
+    const repository = new SettingsRepository();
+    expect(repository.get().llm.connectionProfileId).toBe('');
+    repository.update((settings) => {
+      settings.llm.provider = 'connection-profile';
+      settings.llm.connectionProfileId = '  saved-id  ';
+    });
+    expect(repository.get().llm).toMatchObject({ provider: 'connection-profile', connectionProfileId: 'saved-id' });
+    expect(extensionSettings[MODULE_ID]).toMatchObject({ version: 13 });
+  });
+
   it('starts with one disabled context-management feature', () => {
     installContext();
     expect(new SettingsRepository().get()).toEqual(DEFAULT_SETTINGS);
@@ -40,7 +52,7 @@ describe('SettingsRepository', () => {
     });
 
     expect(extensionSettings[MODULE_ID]).toMatchObject({
-      version: 12,
+      version: 13,
       enabled: true,
       recentWindow: { size: 12 },
       summary: { targetTurnsPerUpdate: 8 },

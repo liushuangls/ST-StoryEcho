@@ -1,5 +1,5 @@
 export const MODULE_ID = 'story_echo';
 export const DISPLAY_NAME = 'StoryEcho · 剧情上下文';
 export const CHAT_STATE_VERSION = 3 as const;
-export const SETTINGS_VERSION = 12 as const;
-export const EXTENSION_VERSION = '0.21.19';
+export const SETTINGS_VERSION = 13 as const;
+export const EXTENSION_VERSION = '0.21.20';

@@ -83,7 +83,7 @@ StoryEcho 在请求期临时插入一条中立的 system/narrator 消息，不�
 - L1 与 L2+ 的合并组大小；
 - L1 与 L2+ 的输出 Token 上限；
 - 世界书参考开关与绿灯条目上限；
-- SillyTavern 主连接或自定义 OpenAI 兼容 LLM；
+- SillyTavern / Luker 主连接、已保存的连接插头或自定义 OpenAI 兼容 LLM；
 - 调试记录。
 
 设置页还提供手动处理窗口外历史、立即整理层级、完整重建，以及各层总结的搜索、分页、编辑、删除和重新生成。诊断区域展示最近一次真实角色请求的输入 Token 构成、运行统计、裁剪记录和已脱敏报告。
@@ -95,6 +95,10 @@ StoryEcho 在请求期临时插入一条中立的 system/narrator 消息，不�
 默认复用 SillyTavern 当前主连接。后台总结会在酒馆公开相应设置钩子时临时关闭高成本思考并使用低推理，不修改用户预设。普通模型沿用确定性采样；Gemini 3.x 按官方建议省略 `temperature`、`top_p` 和 `top_k`，交由模型默认值处理，避免强制温度 0。这是请求参数适配，不代表已证明某次短总结的具体原因。[Gemini 3.x 参数建议](https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.5#sampling-parameters-no-longer-recommended)
 
 也可以配置自定义 OpenAI 兼容接口。请求仍由 SillyTavern 的 Chat Completions 后端转发，浏览器不会直接把 API Key 发给第三方域名。自定义连接失败时可选择回退主连接。
+
+“连接来源”还会列出宿主已保存的全部连接插头，可直接选择聊天补全或文本补全连接独立用于 L1 与高层总结，不会切换当前聊天的主连接。StoryEcho 只保存插头 ID，凭据由宿主连接管理器解析；插头重命名、更新或删除后列表会刷新。向量、重排、未知接口或不可用插头会显示但不能选用，已选插头删除后会明确报错，不自动回退。
+
+独立插头请求使用宿主 `ConnectionManagerRequestService` 的非流式接口，避免受影响 Luker 版本共享流式解析器的推理状态缺失问题；不载入角色扮演生成预设，文本补全保留该插头的 instruct 格式。主连接流式路径则补齐 OpenRouter 推理详情与 Anthropic 思考块状态。两种路径均保留超时与取消处理。
 
 自定义 Key 明文保存在当前 SillyTavern 用户的 `extensionSettings.story_echo` 中，以便刷新和多端同步。请使用限额、限权、可撤销的独立 Key。同页面其他扩展以及能读取酒馆用户设置的人可能看到它；Key 不会进入聊天元数据或诊断报告。
 

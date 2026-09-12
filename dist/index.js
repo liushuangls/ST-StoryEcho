@@ -978,8 +978,8 @@ var storyEchoTaskCoordinator = new StoryEchoTaskCoordinator();
 var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 3;
-var SETTINGS_VERSION = 12;
-var EXTENSION_VERSION = "0.21.19";
+var SETTINGS_VERSION = 13;
+var EXTENSION_VERSION = "0.21.20";
 
 // src/api/change-events.ts
 var listeners = /* @__PURE__ */ new Set();
@@ -1031,6 +1031,7 @@ var DEFAULT_SETTINGS = Object.freeze({
   },
   llm: {
     provider: "main",
+    connectionProfileId: "",
     custom: {
       baseUrl: "",
       model: "",
@@ -1147,9 +1148,10 @@ function normalizeSettings(settings) {
     MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
     DEFAULT_SETTINGS.summary.reference.maxWorldInfoEntries
   );
-  if (settings.llm.provider !== "main" && settings.llm.provider !== "openai-compatible") {
+  if (!["main", "connection-profile", "openai-compatible"].includes(settings.llm.provider)) {
     settings.llm.provider = DEFAULT_SETTINGS.llm.provider;
   }
+  settings.llm.connectionProfileId = settings.llm.connectionProfileId.trim();
   settings.llm.custom.baseUrl = settings.llm.custom.baseUrl.trim();
   settings.llm.custom.model = settings.llm.custom.model.trim();
   settings.llm.custom.timeoutMs = boundedInteger(
@@ -1293,7 +1295,7 @@ function completionMetadataFromPayload(payload, options) {
   };
 }
 function normalizeLlmCompletionMetadata(value) {
-  if (!isRecord3(value) || !["main", "openai-compatible"].includes(String(value["provider"]))) {
+  if (!isRecord3(value) || !["main", "connection-profile", "openai-compatible"].includes(String(value["provider"]))) {
     return void 0;
   }
   const requestedMaxTokens2 = nonNegativeInteger(value["requestedMaxTokens"]);
@@ -1304,7 +1306,7 @@ function normalizeLlmCompletionMetadata(value) {
   const finishReason = boundedString(value["finishReason"]);
   const source = boundedString(value["source"]);
   const model = boundedString(value["model"]);
-  const fallbackFrom = ["main", "openai-compatible"].includes(String(value["fallbackFrom"])) ? value["fallbackFrom"] : void 0;
+  const fallbackFrom = ["main", "connection-profile", "openai-compatible"].includes(String(value["fallbackFrom"])) ? value["fallbackFrom"] : void 0;
   const promptTokens = nonNegativeInteger(value["promptTokens"]);
   const completionTokens = nonNegativeInteger(value["completionTokens"]);
   const reasoningTokens = nonNegativeInteger(value["reasoningTokens"]);
@@ -2655,6 +2657,12 @@ async function readStream(response, runtime, identity, timeoutMs) {
     images: [],
     signature: "",
     toolSignatures: {},
+    // Luker preserves Anthropic blocks and OpenRouter reasoning_details even
+    // when thought display is disabled. Its parser mutates these collections.
+    reasoningBlocks: [],
+    reasoningDetails: [],
+    usage: null,
+    finishReason: null,
     native: null
   };
   let text = "";
@@ -2817,7 +2825,13 @@ async function completeMainConnectionStream(request) {
       request.identity.model,
       "quiet",
       messages,
-      { allowToolCalls: false, agentMode: false }
+      {
+        allowToolCalls: false,
+        agentMode: false,
+        tools: [],
+        replaceTools: true,
+        allowStreamingForQuiet: true
+      }
     );
     if (!isRecord8(generated) || !isRecord8(generated.generate_data)) {
       throw new Error("SillyTavern\u751F\u6210\u4E86\u65E0\u6548\u7684\u4E3B\u8FDE\u63A5\u8BF7\u6C42\u53C2\u6570\u3002");
@@ -3239,8 +3253,160 @@ var OpenAiCompatibleProvider = class {
   }
 };
 
+// src/platform/connection-profiles.ts
+function isRecord10(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function stringValue2(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function getConnectionProfiles(context = getContext()) {
+  const manager = context.extensionSettings["connectionManager"];
+  if (!isRecord10(manager) || !Array.isArray(manager["profiles"])) {
+    return [];
+  }
+  const disabled = context.extensionSettings["disabledExtensions"];
+  const managerDisabled = Array.isArray(disabled) && disabled.includes("connection-manager");
+  const seen = /* @__PURE__ */ new Set();
+  return manager["profiles"].flatMap((profile) => {
+    if (!isRecord10(profile)) return [];
+    const id = stringValue2(profile["id"]);
+    if (!id || seen.has(id)) return [];
+    seen.add(id);
+    const api = stringValue2(profile["api"]);
+    const mode = stringValue2(profile["mode"]);
+    const mapping = context.CONNECT_API_MAP?.[api];
+    const mainApi = mapping?.selected ?? "";
+    const source = mapping?.source || mapping?.type || "";
+    const generative = (!mode || mode === "cc" || mode === "tc") && (mainApi === "openai" || mainApi === "textgenerationwebui") && Boolean(source);
+    const unavailableReason = !generative ? "\u4E0D\u652F\u6301\u6587\u672C\u751F\u6210" : managerDisabled ? "\u8FDE\u63A5\u7BA1\u7406\u5668\u5DF2\u7981\u7528" : !context.ConnectionManagerRequestService?.sendRequest || !context.extractMessageFromData ? "\u5F53\u524D\u5BBF\u4E3B\u4E0D\u652F\u6301\u72EC\u7ACB\u63D2\u5934\u8BF7\u6C42" : "";
+    return [{
+      id,
+      name: stringValue2(profile["name"]) || id,
+      api,
+      model: stringValue2(profile["model"]),
+      mainApi,
+      source,
+      unavailableReason
+    }];
+  }).sort((left, right) => left.name.localeCompare(right.name));
+}
+function getConnectionProfile(id, context = getContext()) {
+  return getConnectionProfiles(context).find((profile) => profile.id === id);
+}
+
+// src/llm/connection-profile-provider.ts
+var MAX_TIMEOUT_MS = 6e5;
+function upstreamTimeoutStatus(error) {
+  for (let depth = 0; depth < 5 && error instanceof Error; depth += 1) {
+    const status = findRetriableUpstreamTimeoutStatus(error.message);
+    if (status !== null) return status;
+    error = error.cause;
+  }
+  return null;
+}
+var ConnectionProfileLlmProvider = class {
+  constructor(profileId) {
+    this.profileId = profileId;
+  }
+  id = "connection-profile";
+  async complete(request) {
+    return (await this.completeDetailed(request)).text;
+  }
+  async completeDetailed(request) {
+    const context = getContext();
+    const profile = getConnectionProfile(this.profileId, context);
+    if (!profile) {
+      throw new Error("\u6240\u9009\u8FDE\u63A5\u63D2\u5934\u4E0D\u5B58\u5728\u6216\u5DF2\u5220\u9664\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u3002");
+    }
+    if (profile.unavailableReason) {
+      throw new Error(`\u6240\u9009\u8FDE\u63A5\u63D2\u5934\u4E0D\u53EF\u7528\uFF1A${profile.unavailableReason}\u3002`);
+    }
+    const service = context.ConnectionManagerRequestService;
+    request = summaryRequestForModel(request, profile.model);
+    const marked = markInternalGenerationRequest(request.system, request.prompt);
+    const maxTokens = Number.isFinite(request.maxTokens) ? Math.min(16e3, Math.max(16, Math.floor(request.maxTokens))) : 3e3;
+    const timeoutMs = Number.isFinite(request.timeoutMs) ? Math.min(MAX_TIMEOUT_MS, Math.max(1e3, Math.floor(request.timeoutMs))) : MAX_TIMEOUT_MS;
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(request.signal?.reason);
+    if (request.signal?.aborted) onAbort();
+    else request.signal?.addEventListener("abort", onAbort, { once: true });
+    const timeout = globalThis.setTimeout(
+      () => controller.abort(new LlmRequestTimeoutError(timeoutMs)),
+      timeoutMs
+    );
+    try {
+      const payload = await withInternalGeneration(marked, () => runStoryEchoTaskAbortable(
+        async () => {
+          const overrides = {
+            type: "quiet",
+            temperature: 0,
+            top_p: 1,
+            reasoning_effort: "low",
+            include_reasoning: false,
+            tools: [],
+            tool_choice: "none",
+            function_calling_plain_text: false
+          };
+          tuneInternalGenerationSettings(overrides, profile.model);
+          try {
+            return await service.sendRequest(profile.id, [
+              { role: "system", content: marked.systemPrompt },
+              { role: "user", content: marked.prompt }
+            ], maxTokens, {
+              // The host's shared streaming service has the same missing-state
+              // bug on affected Luker versions. Use its raw, non-streaming seam.
+              stream: false,
+              signal: controller.signal,
+              extractData: false,
+              includePreset: false,
+              includeInstruct: true
+            }, overrides);
+          } catch (error) {
+            controller.signal.throwIfAborted();
+            const status = upstreamTimeoutStatus(error);
+            if (status !== null) throw new LlmRequestTimeoutError(timeoutMs, status);
+            throw new Error("\u5DF2\u914D\u7F6E\u8FDE\u63A5\u8BF7\u6C42\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u8BE5\u63D2\u5934\u7684 API\u3001\u6A21\u578B\u4E0E\u51ED\u636E\u3002");
+          }
+        },
+        controller.signal
+      ));
+      assertNoLlmRefusal(payload);
+      const extracted = context.extractMessageFromData(payload, profile.mainApi);
+      if (typeof extracted !== "string") {
+        throw new Error("\u6240\u9009\u8FDE\u63A5\u63D2\u5934\u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u6587\u672C\u54CD\u5E94\u3002");
+      }
+      const text = extracted.replaceAll(`[${marked.marker}]`, "").trim();
+      return {
+        text,
+        metadata: completionMetadataFromPayload(payload, {
+          provider: this.id,
+          requestedMaxTokens: maxTokens,
+          responseText: text,
+          source: profile.source,
+          model: profile.model
+        })
+      };
+    } finally {
+      globalThis.clearTimeout(timeout);
+      request.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+  async testConnection() {
+    const response = await this.complete({
+      system: "You are a connection test. Follow the user instruction exactly.",
+      prompt: "Reply with exactly: OK",
+      maxTokens: 128
+    });
+    if (!response.trim()) throw new Error("\u6240\u9009\u8FDE\u63A5\u63D2\u5934\u8FD4\u56DE\u4E86\u7A7A\u54CD\u5E94\u3002");
+  }
+};
+
 // src/llm/provider-factory.ts
 function createLlmProvider(settings) {
+  if (settings.llm.provider === "connection-profile") {
+    return new ConnectionProfileLlmProvider(settings.llm.connectionProfileId);
+  }
   if (settings.llm.provider === "openai-compatible") {
     return new OpenAiCompatibleProvider(settings.llm.custom);
   }
@@ -4293,7 +4459,11 @@ async function rebuildGenerationSignature(context, settings) {
     maxTokens: settings.summary.level1MaxTokens,
     reference: settings.summary.reference,
     maximumSourceCharacters: MAX_SUMMARY_SOURCE_CHARACTERS,
-    model: settings.llm.provider === "main" ? { provider: "main", ...getMainConnectionIdentity(context) } : {
+    model: settings.llm.provider === "main" ? { provider: "main", ...getMainConnectionIdentity(context) } : settings.llm.provider === "connection-profile" ? {
+      provider: "connection-profile",
+      profileId: settings.llm.connectionProfileId,
+      profile: getConnectionProfile(settings.llm.connectionProfileId, context)
+    } : {
       provider: settings.llm.provider,
       baseUrl: settings.llm.custom.baseUrl.trim(),
       model: settings.llm.custom.model.trim(),
@@ -5716,7 +5886,7 @@ var lastInjection = null;
 var latestExternalGenerationToken = 0;
 var hostEventBinding = null;
 var registeredHostApis = /* @__PURE__ */ new WeakSet();
-function isRecord10(value) {
+function isRecord11(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function frozenRange(range) {
@@ -5749,7 +5919,7 @@ function currentContext() {
 }
 function contextManagementEnabled(context) {
   const settings = context.extensionSettings[MODULE_ID];
-  return isRecord10(settings) && settings["enabled"] === true;
+  return isRecord11(settings) && settings["enabled"] === true;
 }
 function getFrontier() {
   try {
@@ -6319,16 +6489,16 @@ function buildRecentErrorReport(state, settings, limit = RECENT_ERROR_REPORT_LIM
 // src/llm/model-list.ts
 var STATUS_ENDPOINT = "/api/backends/chat-completions/status";
 var MAX_RESPONSE_BYTES2 = 2 * 1024 * 1024;
-function isRecord11(value) {
+function isRecord12(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function errorMessage(payload, response, apiKey) {
   let detail = "";
-  if (isRecord11(payload)) {
+  if (isRecord12(payload)) {
     const error = payload["error"];
     if (typeof error === "string") {
       detail = error;
-    } else if (isRecord11(error) && typeof error["message"] === "string") {
+    } else if (isRecord12(error) && typeof error["message"] === "string") {
       detail = error["message"];
     } else if (typeof payload["message"] === "string") {
       detail = payload["message"];
@@ -6340,13 +6510,13 @@ function errorMessage(payload, response, apiKey) {
   return suffix ? `${base} ${suffix}` : base;
 }
 function parseCustomModelList(payload) {
-  const root = isRecord11(payload) ? payload : null;
+  const root = isRecord12(payload) ? payload : null;
   const candidates = Array.isArray(root?.["models"]) ? root["models"] : Array.isArray(root?.["data"]) ? root["data"] : Array.isArray(payload) ? payload : [];
   const names = candidates.map((candidate) => {
     if (typeof candidate === "string") {
       return candidate.trim();
     }
-    if (!isRecord11(candidate)) {
+    if (!isRecord12(candidate)) {
       return "";
     }
     const value = candidate["id"] ?? candidate["model"] ?? candidate["name"];
@@ -6508,7 +6678,7 @@ async function loadTauriItemizedPromptRecord(chatId, recordId) {
   const value = await storage.getItem(
     `${TAURI_PROMPT_RECORD_PREFIX}${chatId}:${recordId}`
   );
-  return isRecord12(value) ? value : null;
+  return isRecord13(value) ? value : null;
 }
 function finiteTokens(value) {
   const number = typeof value === "number" ? value : Number(value);
@@ -6518,10 +6688,10 @@ function messageIdValue2(value) {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isInteger(number) && number >= 0 ? number : null;
 }
-function stringValue2(value) {
+function stringValue3(value) {
   return typeof value === "string" ? value : "";
 }
-function isRecord12(value) {
+function isRecord13(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function promptText(value) {
@@ -6611,7 +6781,7 @@ async function resolveItemizedPromptRecord(candidate, chatId, recordLoader) {
   if ("rawPrompt" in candidate || "finalPrompt" in candidate) {
     return candidate;
   }
-  const recordId = stringValue2(candidate["recordId"]).trim();
+  const recordId = stringValue3(candidate["recordId"]).trim();
   if (!recordId) {
     return candidate;
   }
@@ -6636,10 +6806,10 @@ function connectionMetadata(record2, context, messageId) {
   const message = context.chat[messageId];
   const extra = message?.extra ?? {};
   return {
-    api: stringValue2(extra["api"]) || stringValue2(record2["main_api"]),
-    model: stringValue2(extra["model"]),
-    tokenizer: stringValue2(record2["tokenizer"]),
-    preset: stringValue2(record2["presetName"]),
+    api: stringValue3(extra["api"]) || stringValue3(record2["main_api"]),
+    model: stringValue3(extra["model"]),
+    tokenizer: stringValue3(record2["tokenizer"]),
+    preset: stringValue3(record2["presetName"]),
     agentProfile: ""
   };
 }
@@ -6676,25 +6846,25 @@ async function buildBreakdown(record2, context) {
   const stageSummaryText = taggedBlocks(rawText, "story_echo_summary");
   const summaryText = stageSummaryText;
   const characterText = [
-    stringValue2(record2["charDescription"]),
-    stringValue2(record2["charPersonality"]),
-    stringValue2(record2["scenarioText"]),
-    stringValue2(record2["userPersona"])
+    stringValue3(record2["charDescription"]),
+    stringValue3(record2["charPersonality"]),
+    stringValue3(record2["scenarioText"]),
+    stringValue3(record2["userPersona"])
   ].filter(Boolean).join("\n");
-  const worldInfoText = stringValue2(record2["worldInfoString"]);
-  const examplesText = stringValue2(record2["examplesString"]);
-  const anchorsText = stringValue2(record2["allAnchors"]);
+  const worldInfoText = stringValue3(record2["worldInfoString"]);
+  const examplesText = stringValue3(record2["examplesString"]);
+  const anchorsText = stringValue3(record2["allAnchors"]);
   const anchorsWithoutKnown = removeExactBlocks(anchorsText, [
     stageSummaryText,
     ...worldInfoText && anchorsText.includes(worldInfoText) ? [worldInfoText] : []
   ]);
   const instructionText = [
-    stringValue2(record2["instruction"]),
-    stringValue2(record2["generatedPromptCache"]),
-    stringValue2(record2["promptBias"])
+    stringValue3(record2["instruction"]),
+    stringValue3(record2["generatedPromptCache"]),
+    stringValue3(record2["promptBias"])
   ].filter(Boolean).join("\n");
-  const storyText = stringValue2(record2["storyString"]);
-  const chatText = stringValue2(record2["mesSendString"]);
+  const storyText = stringValue3(record2["storyString"]);
+  const chatText = stringValue3(record2["mesSendString"]);
   const counted = await Promise.all([
     count(rawText),
     count(summaryText),
@@ -6718,7 +6888,7 @@ async function buildBreakdown(record2, context) {
     chat
   ] = counted;
   const counterEstimated = counted.some((value) => value.estimated);
-  const mainApi = stringValue2(record2["main_api"]);
+  const mainApi = stringValue3(record2["main_api"]);
   const storedTotal = finiteTokens(record2["oaiTotalTokens"]);
   const hasChatCompletionBreakdown = mainApi === "openai" && storedTotal > 0;
   const messageId = messageIdValue2(record2.mesId);
@@ -8007,6 +8177,56 @@ ${consequence}
   }
 };
 
+// src/ui/connection-select.ts
+var PROFILE_PREFIX = "profile:";
+function connectionSelectValue(settings) {
+  return settings.llm.provider === "connection-profile" ? `${PROFILE_PREFIX}${settings.llm.connectionProfileId}` : settings.llm.provider;
+}
+function applyConnectionSelectValue(settings, value) {
+  if (value.startsWith(PROFILE_PREFIX)) {
+    settings.llm.provider = "connection-profile";
+    settings.llm.connectionProfileId = value.slice(PROFILE_PREFIX.length);
+  } else if (value === "main" || value === "openai-compatible") {
+    settings.llm.provider = value;
+  }
+}
+function connectionSelectOptions(settings, profiles) {
+  const options = [
+    { value: "main", label: "SillyTavern / Luker \u4E3B\u8FDE\u63A5", disabled: false },
+    ...profiles.map((profile) => ({
+      value: `${PROFILE_PREFIX}${profile.id}`,
+      label: `\u63D2\u5934\uFF1A${profile.name}${profile.model ? ` \xB7 ${profile.model}` : ""}${profile.unavailableReason ? `\uFF08${profile.unavailableReason}\uFF09` : ""}`,
+      disabled: Boolean(profile.unavailableReason)
+    })),
+    { value: "openai-compatible", label: "\u81EA\u5B9A\u4E49 OpenAI \u517C\u5BB9\u63A5\u53E3", disabled: false }
+  ];
+  const selected = connectionSelectValue(settings);
+  if (!options.some((option) => option.value === selected)) {
+    options.push({ value: selected, label: "\u539F\u9009\u63D2\u5934\u5DF2\u5220\u9664\uFF0F\u4E0D\u53EF\u7528\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9", disabled: true });
+  }
+  return options;
+}
+function syncConnectionSelect(select, settings) {
+  let profiles = [];
+  try {
+    profiles = getConnectionProfiles();
+  } catch {
+  }
+  const options = connectionSelectOptions(settings, profiles);
+  const signature = JSON.stringify(options);
+  if (select.dataset["connectionOptions"] !== signature) {
+    select.replaceChildren(...options.map((item) => {
+      const option = document.createElement("option");
+      option.value = item.value;
+      option.textContent = item.label;
+      option.disabled = item.disabled;
+      return option;
+    }));
+    select.dataset["connectionOptions"] = signature;
+  }
+  select.value = connectionSelectValue(settings);
+}
+
 // src/ui/settings-panel.ts
 var PANEL_ID = "story-echo-settings";
 var settingsRepository2 = new SettingsRepository();
@@ -8237,9 +8457,10 @@ function panelTemplate() {
             <label class="story-echo-field">
               <span>\u8FDE\u63A5\u6765\u6E90</span>
               <select id="story-echo-llm-provider" class="text_pole">
-                <option value="main">SillyTavern \u4E3B\u8FDE\u63A5</option>
+                <option value="main">SillyTavern / Luker \u4E3B\u8FDE\u63A5</option>
                 <option value="openai-compatible">\u81EA\u5B9A\u4E49 OpenAI \u517C\u5BB9\u63A5\u53E3</option>
               </select>
+              <small>\u53EF\u9009\u62E9\u5DF2\u914D\u7F6E\u7684\u8FDE\u63A5\u63D2\u5934\uFF1B\u72EC\u7ACB\u7528\u4E8E\u603B\u7ED3\uFF0C\u4E0D\u5207\u6362\u804A\u5929\u4E3B\u8FDE\u63A5\u3002\u63D2\u5934\u51ED\u636E\u4ECD\u7531\u5BBF\u4E3B\u7BA1\u7406\u3002</small>
             </label>
             <p id="story-echo-main-connection" class="story-echo-hint"></p>
             <div id="story-echo-custom-llm">
@@ -8353,13 +8574,17 @@ function syncForm(panel, settings) {
   element3(panel, "#story-echo-higher-summary-tokens").value = String(settings.summary.higherLevelMaxTokens);
   element3(panel, "#story-echo-world-info-reference").checked = settings.summary.reference.enabled;
   element3(panel, "#story-echo-reference-world-info").value = String(settings.summary.reference.maxWorldInfoEntries);
-  element3(panel, "#story-echo-llm-provider").value = settings.llm.provider;
+  syncConnectionSelect(element3(panel, "#story-echo-llm-provider"), settings);
   element3(panel, "#story-echo-llm-base-url").value = settings.llm.custom.baseUrl;
   element3(panel, "#story-echo-llm-model").value = settings.llm.custom.model;
   element3(panel, "#story-echo-llm-api-key").value = settings.llm.custom.apiKey;
   element3(panel, "#story-echo-llm-timeout").value = String(settings.llm.custom.timeoutMs);
   element3(panel, "#story-echo-llm-http").checked = settings.llm.custom.allowInsecureHttp;
   element3(panel, "#story-echo-llm-fallback").checked = settings.llm.custom.fallbackToMain;
+  syncConnectionDescription(panel, settings);
+  syncVisibility(panel, settings);
+}
+function syncConnectionDescription(panel, settings) {
   let identity = "\u4E3B\u8FDE\u63A5\u5C1A\u672A\u5C31\u7EEA";
   try {
     const current = getMainConnectionIdentity();
@@ -8367,7 +8592,10 @@ function syncForm(panel, settings) {
   } catch {
   }
   element3(panel, "#story-echo-main-connection").textContent = `\u5F53\u524D\u4E3B\u8FDE\u63A5\uFF1A${identity}`;
-  syncVisibility(panel, settings);
+  if (settings.llm.provider === "connection-profile") {
+    const profile = getConnectionProfile(settings.llm.connectionProfileId);
+    element3(panel, "#story-echo-main-connection").textContent = profile ? `\u603B\u7ED3\u63D2\u5934\uFF1A${profile.name} \xB7 ${profile.source || profile.api} / ${profile.model || "\u9ED8\u8BA4\u6A21\u578B"}${profile.unavailableReason ? `\uFF08${profile.unavailableReason}\uFF09` : "\uFF08\u4E0D\u5F71\u54CD\u4E3B\u8FDE\u63A5\uFF09"}` : "\u6240\u9009\u63D2\u5934\u5DF2\u5220\u9664\u6216\u4E0D\u53EF\u7528\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u3002";
+  }
 }
 function update(panel, mutator) {
   const settings = settingsRepository2.update(mutator);
@@ -8434,7 +8662,7 @@ function bindSettings(panel) {
   });
   element3(panel, "#story-echo-llm-provider").addEventListener("change", (event) => {
     update(panel, (settings) => {
-      settings.llm.provider = event.currentTarget.value;
+      applyConnectionSelectValue(settings, event.currentTarget.value);
     });
   });
   element3(panel, "#story-echo-llm-base-url").addEventListener("change", (event) => {
@@ -8692,6 +8920,8 @@ async function refreshStatus(panel) {
   const status = element3(panel, "#story-echo-status");
   try {
     const settings = settingsRepository2.get();
+    syncConnectionSelect(element3(panel, "#story-echo-llm-provider"), settings);
+    syncConnectionDescription(panel, settings);
     syncVisibility(panel, settings);
     const state = stateRepository3.getExisting();
     if (!state) {
@@ -8834,6 +9064,18 @@ async function registerSettingsPanelOnce(generation) {
       context.event_types?.["ITEMIZED_PROMPTS_DELETED"] ?? context.eventTypes?.["ITEMIZED_PROMPTS_DELETED"]
     ].filter((eventName2) => Boolean(eventName2)));
     if (eventSource) {
+      for (const key of [
+        "CONNECTION_PROFILE_CREATED",
+        "CONNECTION_PROFILE_UPDATED",
+        "CONNECTION_PROFILE_DELETED",
+        "CONNECTION_PROFILE_LOADED",
+        "OAI_MODEL_CHANGED"
+      ]) {
+        const name = context.event_types?.[key] ?? context.eventTypes?.[key];
+        if (name) subscriptions.subscribe(eventSource, name, () => {
+          globalThis.setTimeout(() => requestRefresh(panel), 0);
+        });
+      }
       for (const eventName2 of chatRefreshEvents) {
         subscriptions.subscribe(eventSource, eventName2, () => {
           promptTokenStatsCard.invalidate();

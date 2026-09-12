@@ -1,5 +1,5 @@
 export type WindowUnit = 'turns' | 'messages';
-export type LlmProviderId = 'main' | 'openai-compatible';
+export type LlmProviderId = 'main' | 'connection-profile' | 'openai-compatible';
 
 export interface LlmCompletionMetadata {
   provider: LlmProviderId;
@@ -46,7 +46,7 @@ export interface LlmResponseDiagnostic {
 }
 
 export interface StoryEchoSettings {
-  version: 12;
+  version: 13;
   enabled: boolean;
   debug: boolean;
   recentWindow: {
@@ -72,6 +72,8 @@ export interface StoryEchoSettings {
   };
   llm: {
     provider: LlmProviderId;
+    /** Saved host connection ID only; credentials remain in the host. */
+    connectionProfileId: string;
     custom: {
       baseUrl: string;
       model: string;

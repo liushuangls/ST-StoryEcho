@@ -151,6 +151,56 @@ afterEach(() => {
 });
 
 describe('MainLlmProvider streaming', () => {
+  it('initializes Luker OpenRouter reasoning_details even when thought display is off', async () => {
+    installStreamingContext('openrouter', 'google/gemini-3.8-flash');
+    const runtime = streamingRuntime();
+    const states: unknown[] = [];
+    runtime.getStreamingReply = vi.fn((data, state, options) => {
+      expect(options.overrideShowThoughts).toBe(false);
+      const delta = (data as { choices: Array<{ delta: {
+        content?: string; reasoning_details?: Array<Record<string, unknown>>;
+      } }> }).choices[0]!.delta;
+      // Mirrors Luker's unconditional preservation, not only its text parser.
+      for (const detail of delta.reasoning_details ?? []) {
+        const preserved = { ...detail };
+        if (!Number.isInteger(preserved['index'])) preserved['index'] = state.reasoningDetails.length;
+        state.reasoningDetails.push(preserved);
+      }
+      states.push(state);
+      return delta.content ?? '';
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => eventStream([
+      sse({ choices: [{ delta: { reasoning_details: [{ type: 'reasoning.encrypted', index: 0, data: 'opaque' }] } }] }),
+      sse({ choices: [{ delta: { content: 'OK', reasoning_details: [{ type: 'reasoning.text', text: 'hidden' }] }, finish_reason: 'stop' }] }),
+      sse('[DONE]'),
+    ]));
+    const provider = new MainLlmProvider(fetchMock, async () => ({}), async () => runtime);
+    await expect(provider.testConnection()).resolves.toBeUndefined();
+    await expect(provider.complete({ system: 'test', prompt: 'test' })).resolves.toBe('OK');
+    expect(states[0]).toMatchObject({ reasoningDetails: [
+      { type: 'reasoning.encrypted', index: 0 }, { type: 'reasoning.text', index: 1 },
+    ] });
+    expect(states[0]).not.toBe(states[2]);
+  });
+
+  it('initializes Luker Anthropic thinking-block state', async () => {
+    installStreamingContext('claude', 'claude-sonnet-4');
+    const runtime = streamingRuntime();
+    runtime.getStreamingReply = vi.fn((data, state) => {
+      const frame = data as { type: string; index: number; delta?: { text?: string } };
+      if (frame.type === 'content_block_start') {
+        state.reasoningBlocks[frame.index] = { type: 'thinking', thinking: '' };
+      }
+      return frame.delta?.text ?? '';
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(eventStream([
+      sse({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+      sse({ type: 'content_block_delta', index: 1, delta: { text: 'OK' } }),
+      sse({ type: 'message_stop' }),
+    ]));
+    const provider = new MainLlmProvider(fetchMock, async () => ({}), async () => runtime);
+    await expect(provider.testConnection()).resolves.toBeUndefined();
+  });
   it('sends the Gemini L1 profile and default sampling through native streaming', async () => {
     const context = installStreamingContext('makersuite', 'gemini-3.8-flash', { temperature: 0.4, top_p: 0.7 });
     const previous = structuredClone(context.settings);
@@ -282,7 +332,10 @@ describe('MainLlmProvider streaming', () => {
         expect.objectContaining({ role: 'system', content: expect.stringContaining('测试用户') }),
         expect.objectContaining({ role: 'user', content: expect.stringContaining('prompt') }),
       ]),
-      { allowToolCalls: false, agentMode: false },
+      {
+        allowToolCalls: false, agentMode: false, tools: [],
+        replaceTools: true, allowStreamingForQuiet: true,
+      },
     );
     expect(context.emitted.map(({ event }) => event)).toEqual([
       'prompt-ready',

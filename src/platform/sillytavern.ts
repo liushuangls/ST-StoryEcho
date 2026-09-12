@@ -110,6 +110,22 @@ export interface SillyTavernContext {
   getRequestHeaders?(): Record<string, string>;
   getCurrentChatId?(): string | null;
   getChatCompletionModel?(settings?: Record<string, unknown>): string | null;
+  CONNECT_API_MAP?: Record<string, { selected: string; source?: string; type?: string }>;
+  ConnectionManagerRequestService?: {
+    sendRequest(
+      profileId: string,
+      prompt: Array<{ role: string; content: string }>,
+      maxTokens: number,
+      custom: {
+        stream: boolean;
+        signal: AbortSignal;
+        extractData: boolean;
+        includePreset: boolean;
+        includeInstruct: boolean;
+      },
+      overridePayload: Record<string, unknown>,
+    ): Promise<unknown>;
+  };
   getCharacterCardFields?(options?: { chid?: number }): SillyTavernCharacterCardFields;
   getTokenCountAsync?(text: string, padding?: number): Promise<number>;
   substituteParams?(text: string): string;

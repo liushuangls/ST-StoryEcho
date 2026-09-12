@@ -14,6 +14,7 @@ import { countCompletedTurns, planNextChunk } from '../history/chunk-planner';
 import { SourceRevisionCache } from '../history/source-revision-cache';
 import { firstStoryPhaseBoundary } from '../history/story-phase';
 import { completeObservedInternalRequest } from '../llm/observed-completion';
+import { getConnectionProfile } from '../platform/connection-profiles';
 import {
   getContext,
   getCurrentChatId,
@@ -200,12 +201,18 @@ async function rebuildGenerationSignature(
     maximumSourceCharacters: MAX_SUMMARY_SOURCE_CHARACTERS,
     model: settings.llm.provider === 'main'
       ? { provider: 'main', ...getMainConnectionIdentity(context) }
-      : {
-          provider: settings.llm.provider,
-          baseUrl: settings.llm.custom.baseUrl.trim(),
-          model: settings.llm.custom.model.trim(),
-          fallbackToMain: settings.llm.custom.fallbackToMain,
-        },
+      : settings.llm.provider === 'connection-profile'
+        ? {
+            provider: 'connection-profile',
+            profileId: settings.llm.connectionProfileId,
+            profile: getConnectionProfile(settings.llm.connectionProfileId, context),
+          }
+        : {
+            provider: settings.llm.provider,
+            baseUrl: settings.llm.custom.baseUrl.trim(),
+            model: settings.llm.custom.model.trim(),
+            fallbackToMain: settings.llm.custom.fallbackToMain,
+          },
   }));
 }
 

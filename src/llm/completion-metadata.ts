@@ -104,7 +104,7 @@ export function completionMetadataFromPayload(
 export function normalizeLlmCompletionMetadata(
   value: unknown,
 ): LlmCompletionMetadata | undefined {
-  if (!isRecord(value) || !['main', 'openai-compatible'].includes(String(value['provider']))) {
+  if (!isRecord(value) || !['main', 'connection-profile', 'openai-compatible'].includes(String(value['provider']))) {
     return undefined;
   }
   const requestedMaxTokens = nonNegativeInteger(value['requestedMaxTokens']);
@@ -115,7 +115,7 @@ export function normalizeLlmCompletionMetadata(
   const finishReason = boundedString(value['finishReason']);
   const source = boundedString(value['source']);
   const model = boundedString(value['model']);
-  const fallbackFrom = ['main', 'openai-compatible'].includes(String(value['fallbackFrom']))
+  const fallbackFrom = ['main', 'connection-profile', 'openai-compatible'].includes(String(value['fallbackFrom']))
     ? value['fallbackFrom'] as LlmProviderId
     : undefined;
   const promptTokens = nonNegativeInteger(value['promptTokens']);

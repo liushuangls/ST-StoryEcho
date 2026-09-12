@@ -22,6 +22,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   },
   llm: {
     provider: 'main',
+    connectionProfileId: '',
     custom: {
       baseUrl: '',
       model: '',

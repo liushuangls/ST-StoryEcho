@@ -134,9 +134,10 @@ function normalizeSettings(settings: StoryEchoSettings): void {
     MAX_SUMMARY_MATCHED_WORLD_INFO_ENTRIES,
     DEFAULT_SETTINGS.summary.reference.maxWorldInfoEntries,
   );
-  if (settings.llm.provider !== 'main' && settings.llm.provider !== 'openai-compatible') {
+  if (!['main', 'connection-profile', 'openai-compatible'].includes(settings.llm.provider)) {
     settings.llm.provider = DEFAULT_SETTINGS.llm.provider;
   }
+  settings.llm.connectionProfileId = settings.llm.connectionProfileId.trim();
   settings.llm.custom.baseUrl = settings.llm.custom.baseUrl.trim();
   settings.llm.custom.model = settings.llm.custom.model.trim();
   settings.llm.custom.timeoutMs = boundedInteger(

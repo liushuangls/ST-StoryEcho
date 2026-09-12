@@ -1,7 +1,7 @@
 import { backgroundTargetMessageId } from '../background/scheduler';
 import { DISPLAY_NAME } from '../core/constants';
 import { logger } from '../core/logger';
-import type { LlmProviderId, StoryEchoChatState, StoryEchoSettings, WindowUnit } from '../core/types';
+import type { StoryEchoChatState, StoryEchoSettings, WindowUnit } from '../core/types';
 import { DIAGNOSTICS_UPDATED_EVENT } from '../debug/events';
 import { MAX_INTERNAL_LLM_ATTEMPTS } from '../debug/internal-llm-attempts';
 import { resetDiagnostics } from '../debug/metrics';
@@ -31,6 +31,8 @@ import {
   stageSummaryManagerTemplate,
 } from './summary-manager';
 import { isElementRendered, observeElementVisibility } from './visibility';
+import { applyConnectionSelectValue, syncConnectionSelect } from './connection-select';
+import { getConnectionProfile } from '../platform/connection-profiles';
 
 const PANEL_ID = 'story-echo-settings';
 const settingsRepository = new SettingsRepository();
@@ -284,9 +286,10 @@ function panelTemplate(): HTMLElement {
             <label class="story-echo-field">
               <span>连接来源</span>
               <select id="story-echo-llm-provider" class="text_pole">
-                <option value="main">SillyTavern 主连接</option>
+                <option value="main">SillyTavern / Luker 主连接</option>
                 <option value="openai-compatible">自定义 OpenAI 兼容接口</option>
               </select>
+              <small>可选择已配置的连接插头；独立用于总结，不切换聊天主连接。插头凭据仍由宿主管理。</small>
             </label>
             <p id="story-echo-main-connection" class="story-echo-hint"></p>
             <div id="story-echo-custom-llm">
@@ -413,7 +416,7 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
     settings.summary.reference.enabled;
   element<HTMLInputElement>(panel, '#story-echo-reference-world-info').value =
     String(settings.summary.reference.maxWorldInfoEntries);
-  element<HTMLSelectElement>(panel, '#story-echo-llm-provider').value = settings.llm.provider;
+  syncConnectionSelect(element<HTMLSelectElement>(panel, '#story-echo-llm-provider'), settings);
   element<HTMLInputElement>(panel, '#story-echo-llm-base-url').value = settings.llm.custom.baseUrl;
   element<HTMLInputElement>(panel, '#story-echo-llm-model').value = settings.llm.custom.model;
   element<HTMLInputElement>(panel, '#story-echo-llm-api-key').value = settings.llm.custom.apiKey;
@@ -423,6 +426,11 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
     settings.llm.custom.allowInsecureHttp;
   element<HTMLInputElement>(panel, '#story-echo-llm-fallback').checked =
     settings.llm.custom.fallbackToMain;
+  syncConnectionDescription(panel, settings);
+  syncVisibility(panel, settings);
+}
+
+function syncConnectionDescription(panel: HTMLElement, settings: StoryEchoSettings): void {
   let identity = '主连接尚未就绪';
   try {
     const current = getMainConnectionIdentity();
@@ -431,7 +439,12 @@ function syncForm(panel: HTMLElement, settings: StoryEchoSettings): void {
     // The settings panel can mount before the main connection is ready.
   }
   element<HTMLElement>(panel, '#story-echo-main-connection').textContent = `当前主连接：${identity}`;
-  syncVisibility(panel, settings);
+  if (settings.llm.provider === 'connection-profile') {
+    const profile = getConnectionProfile(settings.llm.connectionProfileId);
+    element<HTMLElement>(panel, '#story-echo-main-connection').textContent = profile
+      ? `总结插头：${profile.name} · ${profile.source || profile.api} / ${profile.model || '默认模型'}${profile.unavailableReason ? `（${profile.unavailableReason}）` : '（不影响主连接）'}`
+      : '所选插头已删除或不可用，请重新选择。';
+  }
 }
 
 function update(
@@ -504,7 +517,7 @@ function bindSettings(panel: HTMLElement): void {
   });
   element<HTMLSelectElement>(panel, '#story-echo-llm-provider').addEventListener('change', (event) => {
     update(panel, (settings) => {
-      settings.llm.provider = (event.currentTarget as HTMLSelectElement).value as LlmProviderId;
+      applyConnectionSelectValue(settings, (event.currentTarget as HTMLSelectElement).value);
     });
   });
   element<HTMLInputElement>(panel, '#story-echo-llm-base-url').addEventListener('change', (event) => {
@@ -803,6 +816,8 @@ async function refreshStatus(panel: HTMLElement): Promise<void> {
   const status = element<HTMLElement>(panel, '#story-echo-status');
   try {
     const settings = settingsRepository.get();
+    syncConnectionSelect(element<HTMLSelectElement>(panel, '#story-echo-llm-provider'), settings);
+    syncConnectionDescription(panel, settings);
     syncVisibility(panel, settings);
     const state = stateRepository.getExisting();
     if (!state) {
@@ -955,6 +970,15 @@ async function registerSettingsPanelOnce(generation: number): Promise<void> {
       context.event_types?.['ITEMIZED_PROMPTS_DELETED'] ?? context.eventTypes?.['ITEMIZED_PROMPTS_DELETED'],
     ].filter((eventName): eventName is string => Boolean(eventName)));
     if (eventSource) {
+      for (const key of [
+        'CONNECTION_PROFILE_CREATED', 'CONNECTION_PROFILE_UPDATED',
+        'CONNECTION_PROFILE_DELETED', 'CONNECTION_PROFILE_LOADED', 'OAI_MODEL_CHANGED',
+      ]) {
+        const name = context.event_types?.[key] ?? context.eventTypes?.[key];
+        if (name) subscriptions.subscribe(eventSource, name, () => {
+          globalThis.setTimeout(() => requestRefresh(panel), 0);
+        });
+      }
       for (const eventName of chatRefreshEvents) {
         subscriptions.subscribe(eventSource, eventName, () => {
           promptTokenStatsCard.invalidate();

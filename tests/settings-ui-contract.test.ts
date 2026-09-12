@@ -54,6 +54,15 @@ describe('context-only settings panel contract', () => {
     expect(source).toContain('buildRecentErrorReport(state, settingsRepository.get())');
   });
 
+  it('binds the saved-profile selector and refreshes it after host connection changes', () => {
+    expect(source).toContain('syncConnectionSelect(');
+    expect(source).toContain('applyConnectionSelectValue(');
+    expect(source).toContain('syncConnectionDescription(panel, settings)');
+    for (const name of ['CONNECTION_PROFILE_CREATED', 'CONNECTION_PROFILE_UPDATED', 'CONNECTION_PROFILE_DELETED', 'CONNECTION_PROFILE_LOADED']) {
+      expect(source).toContain(`'${name}'`);
+    }
+  });
+
   it('keeps window, world-book and model settings collapsed by default', () => {
     expect(source).toContain(
       '<details id="story-echo-context-settings" class="story-echo-section story-echo-collapsible">',
