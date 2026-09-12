@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderStageSummaryBlock } from '../src/prompt/render';
+import { SUMMARY_ARCHIVAL_GUIDANCE } from '../src/summary/archival-guidance';
 import {
   buildStageSummaryPrompt,
   STAGE_SUMMARY_SYSTEM_PROMPT,
@@ -11,6 +12,16 @@ import {
 } from '../src/summary/compaction-prompts';
 
 describe('context prompts', () => {
+  it('applies the same neutral archival boundary to every summary level', () => {
+    for (const prompt of [
+      STAGE_SUMMARY_SYSTEM_PROMPT,
+      LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT,
+      HIGHER_LEVEL_SUMMARY_COMPACTION_SYSTEM_PROMPT,
+    ]) {
+      expect(prompt.split(SUMMARY_ARCHIVAL_GUIDANCE)).toHaveLength(2);
+    }
+  });
+
   it('contains only the retained context-management protocol tags', () => {
     const text = [
       STAGE_SUMMARY_SYSTEM_PROMPT,

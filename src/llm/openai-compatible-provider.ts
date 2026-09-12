@@ -15,6 +15,7 @@ import {
 } from './errors';
 import { completionMetadataFromPayload } from './completion-metadata';
 import { responseDiagnosticFromPayload } from './response-diagnostic';
+import { assertNoLlmRefusal } from './refusal';
 
 type FetchLike = typeof fetch;
 type RequestHeadersProvider = () => Promise<Record<string, string>>;
@@ -185,14 +186,15 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         throw new Error(detail ? `${fallback} ${detail}` : fallback);
       }
       const content = responseContent(payload);
+      const completion = completionMetadataFromPayload(payload, {
+        provider: this.id,
+        requestedMaxTokens: maxTokens,
+        responseText: content?.trim() ? content : '',
+        source: 'custom',
+        model,
+      });
+      assertNoLlmRefusal(payload, completion);
       if (!content?.trim()) {
-        const completion = completionMetadataFromPayload(payload, {
-          provider: this.id,
-          requestedMaxTokens: maxTokens,
-          responseText: '',
-          source: 'custom',
-          model,
-        });
         const responseDiagnostic = responseDiagnosticFromPayload(payload, [apiKey]);
         responseDiagnostic.hasReasoning ||= (completion.reasoningTokens ?? 0) > 0;
         throw new LlmEmptyResponseError(
@@ -203,13 +205,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       }
       return {
         text: content,
-        metadata: completionMetadataFromPayload(payload, {
-          provider: this.id,
-          requestedMaxTokens: maxTokens,
-          responseText: content,
-          source: 'custom',
-          model,
-        }),
+        metadata: completion,
       };
     } catch (error) {
       if (request.signal?.aborted) {

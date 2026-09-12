@@ -14,12 +14,13 @@ import {
   L1_SOURCE_ORDER_CANDIDATE,
   promptEvalVariant,
 } from '../evals/variants';
-import { STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { STAGE_SUMMARY_BASE_SYSTEM_PROMPT, STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { SUMMARY_ARCHIVAL_GUIDANCE } from '../src/summary/archival-guidance';
 
 const FROZEN_V2_SHA256 = '80fbaf870f951a055f8eddb83875a92e9ac79b0623c8939d4e88f7a2995808ff';
 
 describe('promoted L1 lean evidence contract', () => {
-  it('matches the exact frozen v2 prompt that passed development and holdout evaluation', () => {
+  it('preserves the evaluated v2 contract and identifies the separate archival addition', () => {
     expect(L1_LEAN_EVIDENCE_CONTRACT_CANDIDATE.split(L1_LOW_IMPACT_OMISSION_PRINCIPLE))
       .toHaveLength(2);
     expect(L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE).toBe(
@@ -28,10 +29,12 @@ describe('promoted L1 lean evidence contract', () => {
         L1_LOW_IMPACT_OMISSION_V2_CANDIDATE,
       ),
     );
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toBe(L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE);
-    expect(Array.from(STAGE_SUMMARY_SYSTEM_PROMPT)).toHaveLength(1_577);
-    expect(createHash('sha256').update(STAGE_SUMMARY_SYSTEM_PROMPT).digest('hex'))
+    expect(STAGE_SUMMARY_BASE_SYSTEM_PROMPT).toBe(L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE);
+    expect(Array.from(STAGE_SUMMARY_BASE_SYSTEM_PROMPT)).toHaveLength(1_577);
+    expect(createHash('sha256').update(STAGE_SUMMARY_BASE_SYSTEM_PROMPT).digest('hex'))
       .toBe(FROZEN_V2_SHA256);
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT)
+      .toBe(`${STAGE_SUMMARY_BASE_SYSTEM_PROMPT}\n\n${SUMMARY_ARCHIVAL_GUIDANCE}`);
   });
 
   it('keeps the validated evidence, ordering and density behavior generic', () => {
@@ -86,7 +89,7 @@ describe('promoted L1 lean evidence contract', () => {
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).not.toMatch(/(?:最大|至少|不超过).*?(?:Token|字|字符)/u);
   });
 
-  it('makes v2 an identity alias while retaining v1 as a reproducible ablation', () => {
+  it('keeps v1 and v2 reproducible without silently adding new production guidance', () => {
     expect(promptEvalVariant(' l1-lean-evidence-contract-v2 ')).toBe('l1-lean-evidence-contract-v2');
     expect(promptEvalVariant(' l1-lean-evidence-contract ')).toBe('l1-lean-evidence-contract');
     expect(Array.from(L1_LEAN_EVIDENCE_CONTRACT_CANDIDATE).length)
@@ -103,7 +106,8 @@ describe('promoted L1 lean evidence contract', () => {
         expect(v1).toBe(base);
         continue;
       }
-      expect(v2).toBe(base);
+      expect(v2).toEqual({ ...base, system: L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE });
+      expect(v2.system).not.toContain(SUMMARY_ARCHIVAL_GUIDANCE);
       expect(v1).toEqual({ ...base, system: L1_LEAN_EVIDENCE_CONTRACT_CANDIDATE });
       expect(v1.prompt).toBe(base.prompt);
       expect(v1.maxTokens).toBe(base.maxTokens);

@@ -1,7 +1,9 @@
 import type { TavernChatMessage } from '../core/types';
 import { storyContent } from '../content/story-content';
+import { SUMMARY_ARCHIVAL_GUIDANCE } from './archival-guidance';
 
-export const STAGE_SUMMARY_SYSTEM_PROMPT = `你是一名长篇角色扮演剧情连续性编辑器。
+/** Frozen evidence contract, retained for reproducible historical evaluations. */
+export const STAGE_SUMMARY_BASE_SYSTEM_PROMPT = `你是一名长篇角色扮演剧情连续性编辑器。
 
 目标
 把一批连续的较早聊天压缩成一条可独立阅读的中文阶段总结，使后续角色模型在原文离开上下文后仍能准确理解关键前因、变化、当前结果和待续内容。总结用于恢复连续性，不复现原场景。只输出总结正文，不附加解释、标签、核对清单或写作说明。
@@ -27,6 +29,8 @@ export const STAGE_SUMMARY_SYSTEM_PROMPT = `你是一名长篇角色扮演剧情
 - 对白通常改为间接概述；只有措辞本身构成承诺、规则、身份确认、关键拒绝或可复用线索时，才保留最短必要原话。每个事实只写一次，不以抽象标签代替具体变化。
 - 使用中立第三人称和清晰实体名称。按内容复杂度选择紧凑段落、概括性标题或少量动态小节，不逐消息复述，也不为每个场景设置标题。
 - 篇幅由有效信息量决定，主动追求高压缩率；先确保事实边界和状态链准确，再删除低价值细节。所有关键变化、当前结果和待续事项已覆盖且没有重复时立即收束。`;
+
+export const STAGE_SUMMARY_SYSTEM_PROMPT = `${STAGE_SUMMARY_BASE_SYSTEM_PROMPT}\n\n${SUMMARY_ARCHIVAL_GUIDANCE}`;
 
 export const MAX_PREVIOUS_STAGE_SUMMARY_CHARACTERS = 5_000;
 

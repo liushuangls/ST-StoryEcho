@@ -16,6 +16,25 @@ afterEach(() => {
 });
 
 describe('completeWithConfiguredProvider', () => {
+  it.each([
+    { promptFeedback: { blockReason: 'SAFETY' } },
+    { choices: [{ message: { content: '', refusal: 'private refusal body' } }] },
+  ])('does not retry an explicit block as an empty response: %j', async (payload) => {
+    const generateRawData = vi.fn().mockResolvedValue(payload);
+    const extractMessageFromData = vi.fn().mockReturnValue('');
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({
+        generateRaw: vi.fn(), generateRawData, extractMessageFromData,
+      }),
+    });
+
+    await expect(completeWithConfiguredProviderDetailed(DEFAULT_SETTINGS, {
+      system: 'system', prompt: 'prompt', maxTokens: 3_000,
+    })).rejects.toThrow('内容过滤');
+    expect(generateRawData).toHaveBeenCalledOnce();
+    expect(extractMessageFromData).not.toHaveBeenCalled();
+  });
+
   it('releases a hanging main-provider background request for foreground generation', async () => {
     const generateRaw = vi.fn(() => new Promise<string>(() => undefined));
     vi.stubGlobal('SillyTavern', {

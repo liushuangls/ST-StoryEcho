@@ -359,6 +359,30 @@ describe('SummaryCompactionService', () => {
     });
   });
 
+  it('preserves every child summary when a high-level response is content-filtered', async () => {
+    const messages = chat(3);
+    const entries = await entriesForChat(messages);
+    install(messages, entries);
+    const previous = structuredClone(mocks.state!.stageSummary);
+    mocks.complete.mockResolvedValueOnce({
+      text: '尚未完成的部分总结',
+      metadata: {
+        provider: 'main', requestedMaxTokens: 8_000,
+        finishReason: 'SAFETY', responseCharacters: 9,
+      },
+    });
+
+    await expect(new SummaryCompactionService().processAllPending())
+      .rejects.toThrow('内容过滤');
+    expect(mocks.state!.stageSummary).toEqual(previous);
+    expect(mocks.state!.metrics.summaryCompactionFailures).toBe(1);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      task: 'summary-compaction', status: 'failed',
+      completion: { finishReason: 'SAFETY' },
+    });
+    expect(mocks.complete).toHaveBeenCalledOnce();
+  });
+
   it('rejects stale child source hashes before calling the model', async () => {
     const messages = chat(3);
     const entries = await entriesForChat(messages);

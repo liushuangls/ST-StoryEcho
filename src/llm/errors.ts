@@ -3,6 +3,14 @@ import type {
   LlmResponseDiagnostic,
 } from '../core/types';
 
+export class LlmRefusalError extends Error {
+  constructor(readonly completion?: LlmCompletionMetadata) {
+    // Never retain the refusal body: it may quote private source text.
+    super('总结模型拒绝了请求或响应被内容过滤拦截，已丢弃本次输出。请检查总结连接和模型设置后重试。');
+    this.name = 'LlmRefusalError';
+  }
+}
+
 export class LlmEmptyResponseError extends Error {
   constructor(
     message: string,

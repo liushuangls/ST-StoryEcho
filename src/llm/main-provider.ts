@@ -14,6 +14,7 @@ import {
 } from '../runtime/task-cancellation';
 import { LlmRequestTimeoutError } from './errors';
 import { completionMetadataFromPayload } from './completion-metadata';
+import { assertNoLlmRefusal } from './refusal';
 import { markInternalGenerationRequest, withInternalGeneration } from './internal-generation';
 import { tuneInternalGenerationSettings } from './internal-settings';
 import {
@@ -131,6 +132,7 @@ export class MainLlmProvider implements LlmProvider {
               context.extractMessageFromData
             ) {
               const payload = await context.generateRawData(options);
+              assertNoLlmRefusal(payload);
               return {
                 text: context.extractMessageFromData(payload, context.mainApi),
                 payload,

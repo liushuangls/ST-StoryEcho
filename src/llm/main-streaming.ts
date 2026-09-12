@@ -1,4 +1,5 @@
 import { readResponseTextWithLimit } from '../http/response';
+import { assertNoLlmRefusal } from './refusal';
 import type {
   MainConnectionIdentity,
   SillyTavernContext,
@@ -383,6 +384,7 @@ async function readStream(
       throw new Error('主连接返回了无法解析的流式数据。');
     }
     throwStreamPayloadError(parsed, timeoutMs, event.event);
+    assertNoLlmRefusal(parsed);
     inspectChunk(parsed, metadata, event.event);
     const next = runtime.getStreamingReply(parsed, state, {
       chatCompletionSource: identity.source,
@@ -428,7 +430,9 @@ async function readStream(
       const possibleJson = buffer.trim();
       if (possibleJson.startsWith('{') && possibleJson.endsWith('}')) {
         try {
-          throwStreamPayloadError(JSON.parse(possibleJson) as unknown, timeoutMs);
+          const payload: unknown = JSON.parse(possibleJson);
+          throwStreamPayloadError(payload, timeoutMs);
+          assertNoLlmRefusal(payload);
         } catch (error) {
           if (error instanceof SyntaxError) {
             // The incomplete-stream error below is the stable public result.

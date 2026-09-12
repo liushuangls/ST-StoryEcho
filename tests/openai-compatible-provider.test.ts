@@ -13,6 +13,28 @@ afterEach(() => {
 });
 
 describe('OpenAiCompatibleProvider', () => {
+  it('rejects an explicit refusal even if the provider also returns content', async () => {
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'gemini-3.8-flash';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{
+        finish_reason: 'stop',
+        message: { content: 'partial story', refusal: 'private refusal body' },
+      }],
+    })));
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+
+    const error = await provider.completeDetailed({ system: 'system', prompt: 'prompt' })
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({
+      name: 'LlmRefusalError', completion: { provider: 'openai-compatible', finishReason: 'stop' },
+    });
+    expect(JSON.stringify(error)).not.toContain('private refusal body');
+    expect(JSON.stringify(error)).not.toContain('partial story');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('uses the SillyTavern custom backend so the server sends the LLM request', async () => {
     const fetchMock = vi.fn<typeof fetch>(function (this: unknown) {
       expect(this).toBe(globalThis);

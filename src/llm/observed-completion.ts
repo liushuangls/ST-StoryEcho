@@ -10,7 +10,8 @@ import { recordInternalLlmAttempt } from '../debug/internal-llm-attempts';
 import { tauriTavernAgentBridge } from '../platform/tauritavern-agent';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { completeWithConfiguredProviderDetailed } from './complete';
-import { isLlmEmptyResponseError, isLlmRequestRetryError } from './errors';
+import { isLlmEmptyResponseError, isLlmRequestRetryError, LlmRefusalError } from './errors';
+import { assertSummaryCompletionAccepted } from './refusal';
 
 interface ObservedCompletionContext {
   task: InternalLlmTask;
@@ -41,6 +42,7 @@ export async function completeObservedInternalRequest(
   const agentActiveAtStart = tauriTavernAgentBridge.isRunActive();
   try {
     const result = await completeWithConfiguredProviderDetailed(settings, request);
+    assertSummaryCompletionAccepted(result);
     const finishedAt = new Date();
     recordInternalLlmAttempt(state, {
       id,
@@ -61,6 +63,7 @@ export async function completeObservedInternalRequest(
     const finishedAt = new Date();
     const emptyResponse = isLlmEmptyResponseError(error) ? error : null;
     const retryError = isLlmRequestRetryError(error) ? error : null;
+    const refusedCompletion = error instanceof LlmRefusalError ? error.completion : undefined;
     recordInternalLlmAttempt(state, {
       id,
       task: context.task,
@@ -79,6 +82,7 @@ export async function completeObservedInternalRequest(
         responseDiagnostic: emptyResponse.responseDiagnostic,
       } : {}),
       ...(retryError ? { attemptErrors: retryError.attemptErrors } : {}),
+      ...(refusedCompletion ? { completion: refusedCompletion } : {}),
       error: boundedError(error),
     });
     throw error;

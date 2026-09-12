@@ -149,6 +149,37 @@ afterEach(() => {
 });
 
 describe('MainLlmProvider streaming', () => {
+  it.each([
+    { promptFeedback: { blockReason: 'SAFETY' } },
+    { candidates: [{ finishReason: 'SAFETY' }] },
+    { choices: [{ delta: { refusal: 'private refusal body' } }] },
+  ])('discards partial text and closes the stream on an explicit refusal: %j', async (payload) => {
+    installStreamingContext('makersuite', 'gemini-3.8-flash');
+    const cancelled = vi.fn();
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(openEventStream([
+      sse({ candidates: [{ content: { parts: [{ text: '未完成的总结' }] } }] }),
+      sse(payload),
+    ], cancelled));
+    const runtime = streamingRuntime();
+    const provider = new MainLlmProvider(fetchMock, async () => ({}), async () => runtime);
+
+    await expect(provider.completeDetailed({ system: 'system', prompt: 'prompt' }))
+      .rejects.toThrow('内容过滤');
+    expect(cancelled).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('recognizes a Gemini prompt block returned as JSON instead of SSE', async () => {
+    installStreamingContext('makersuite', 'gemini-3.8-flash');
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      promptFeedback: { blockReason: 'SAFETY' },
+    })));
+    const provider = new MainLlmProvider(fetchMock, async () => ({}), async () => streamingRuntime());
+
+    await expect(provider.completeDetailed({ system: 'system', prompt: 'prompt' }))
+      .rejects.toThrow('内容过滤');
+  });
+
   it('streams OpenAI main-connection requests and retains finish/usage metadata', async () => {
     const context = installStreamingContext('openai', 'gpt-stream');
     const runtime = streamingRuntime();

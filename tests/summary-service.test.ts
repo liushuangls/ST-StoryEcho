@@ -147,6 +147,51 @@ describe('stage-summary prompt helpers', () => {
 });
 
 describe('StageSummaryService', () => {
+  it('does not advance coverage or save refusal prose as a stage summary', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    const text = '抱歉，我无法总结这段包含敏感内容的文本。';
+    mocks.complete.mockResolvedValueOnce({
+      text,
+      metadata: {
+        provider: 'main', requestedMaxTokens: 3_000,
+        finishReason: 'stop', responseCharacters: text.length,
+      },
+    });
+
+    await expect(new StageSummaryService().processAllThrough(chat.length - 1))
+      .rejects.toThrow('总结模型拒绝');
+
+    expect(mocks.state!.stageSummary.entries).toEqual([]);
+    expect(mocks.state!.stageSummary.coveredThroughMessageId).toBe(-1);
+    expect(mocks.state!.metrics.summaryFailures).toBe(1);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      task: 'stage-summary', status: 'failed', completion: { finishReason: 'stop' },
+    });
+    expect(JSON.stringify(mocks.state)).not.toContain(text);
+    expect(mocks.complete).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an existing summary and its coverage when regeneration is refused', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    const service = new StageSummaryService();
+    await service.processAllThrough(chat.length - 1);
+    const previous = structuredClone(mocks.state!.stageSummary);
+    mocks.complete.mockResolvedValueOnce({
+      text: 'I cannot provide a summary of this content.',
+      metadata: {
+        provider: 'main', requestedMaxTokens: 3_000,
+        finishReason: 'stop', responseCharacters: 47,
+      },
+    });
+
+    await expect(service.regenerateEntry(previous.entries[0]!.sourceStartMessageId))
+      .rejects.toThrow('总结模型拒绝');
+    expect(mocks.state!.stageSummary).toEqual(previous);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)?.status).toBe('failed');
+  });
+
   it('releases a cancelled world-book preparation without starting the LLM', async () => {
     const chat = completedChat(2);
     const currentSettings = settings();

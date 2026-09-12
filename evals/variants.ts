@@ -1,6 +1,6 @@
 import type { BuiltPromptEvalCase } from './types';
 import { LEVEL_2_SUMMARY_COMPACTION_SYSTEM_PROMPT } from '../src/summary/compaction-prompts';
-import { STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { STAGE_SUMMARY_BASE_SYSTEM_PROMPT, STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
 
 export type PromptEvalVariant = 'production' | 'l1-event-transition' | 'l1-source-order' | 'l1-adjacent-order-edges' | 'l1-lean-evidence-contract' | 'l1-lean-evidence-contract-v2' | 'l2-state-dedup' | 'l2-evidence-boundaries' | 'l2-relationship-process' | 'l2-source-faithful' | 'l2-binding-examples' | 'l2-binding-scope' | 'l2-binding-contract' | 'l2-binding-audience' | 'l2-contract-only' | 'l2-statement-events' | 'l2-integrated-evidence-events';
 
@@ -21,8 +21,8 @@ export const L1_HISTORY_MESSAGES_PRINCIPLE = '- history_messages按messageId排�
 
 export const L1_ADJACENT_ORDER_EDGES_PRINCIPLE = '- history_messages按messageId排列，是本批事件、行动和状态变化的主要依据。history_order_edges若存在，每组[前一消息ID,后一消息ID]只重申相邻原文的先后，不添加因果、回应关系或完成状态；归并同一行动链时不得倒置这些边。';
 
-// Frozen historical v1 candidate. Production now uses the validated v2 below;
-// keeping v1 here makes saved local experiments reproducible.
+// Frozen historical v1 candidate. The production evidence contract uses v2;
+// neither historical candidate includes later archival guidance.
 export const L1_LEAN_EVIDENCE_CONTRACT_CANDIDATE = `你是一名长篇角色扮演剧情连续性编辑器。
 
 目标
@@ -62,8 +62,8 @@ export const L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE = L1_LEAN_EVIDENCE_CONTRACT_
   L1_LOW_IMPACT_OMISSION_V2_CANDIDATE,
 );
 
-if (L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE !== STAGE_SUMMARY_SYSTEM_PROMPT) {
-  throw new Error('生产 L1 提示词与已验证的精简证据契约 v2 不一致。');
+if (L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE !== STAGE_SUMMARY_BASE_SYSTEM_PROMPT) {
+  throw new Error('L1 基础证据契约与已验证的精简证据契约 v2 不一致。');
 }
 
 // Experiment only: src/ never imports this file. Preserve the production L2
@@ -166,7 +166,11 @@ export function applyPromptEvalVariant(testCase: BuiltPromptEvalCase, variant: P
     if (testCase.system !== STAGE_SUMMARY_SYSTEM_PROMPT) {
       throw new Error('L1 精简证据契约要求未修改的生产提示词，不能重复或叠加。');
     }
-    if (variant === 'l1-lean-evidence-contract-v2') return testCase;
+    // Historical v2 predates the neutral archival guidance. Preserve its exact
+    // bytes so old results remain reproducible and can be compared to production.
+    if (variant === 'l1-lean-evidence-contract-v2') {
+      return { ...testCase, system: L1_LEAN_EVIDENCE_CONTRACT_V2_CANDIDATE };
+    }
     return { ...testCase, system: L1_LEAN_EVIDENCE_CONTRACT_CANDIDATE };
   }
   if (testCase.kind !== 'l2') return testCase;
