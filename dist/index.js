@@ -979,7 +979,7 @@ var MODULE_ID = "story_echo";
 var DISPLAY_NAME = "StoryEcho \xB7 \u5267\u60C5\u4E0A\u4E0B\u6587";
 var CHAT_STATE_VERSION = 3;
 var SETTINGS_VERSION = 12;
-var EXTENSION_VERSION = "0.21.18";
+var EXTENSION_VERSION = "0.21.19";
 
 // src/api/change-events.ts
 var listeners = /* @__PURE__ */ new Set();
