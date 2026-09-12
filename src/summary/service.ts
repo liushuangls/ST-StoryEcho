@@ -537,6 +537,7 @@ export class StageSummaryService {
     const completion = await completeObservedInternalRequest(state, settings, {
       system: STAGE_SUMMARY_SYSTEM_PROMPT,
       prompt,
+      summaryLevel: 1,
       maxTokens: settings.summary.level1MaxTokens,
       timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
     }, {

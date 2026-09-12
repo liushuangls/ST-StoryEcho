@@ -381,6 +381,7 @@ describe('SummaryCompactionService', () => {
       completion: { finishReason: 'SAFETY' },
     });
     expect(mocks.complete).toHaveBeenCalledOnce();
+    expect(mocks.complete.mock.calls[0]?.[1]).toHaveProperty('summaryLevel', 2);
   });
 
   it('rejects stale child source hashes before calling the model', async () => {

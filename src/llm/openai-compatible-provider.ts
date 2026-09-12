@@ -16,6 +16,8 @@ import {
 import { completionMetadataFromPayload } from './completion-metadata';
 import { responseDiagnosticFromPayload } from './response-diagnostic';
 import { assertNoLlmRefusal } from './refusal';
+import { tuneInternalGenerationSettings } from './internal-settings';
+import { summaryRequestForModel } from '../summary/model-prompts';
 
 type FetchLike = typeof fetch;
 type RequestHeadersProvider = () => Promise<Record<string, string>>;
@@ -92,6 +94,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     if (!model) {
       throw new Error('自定义LLM模型名不能为空。');
     }
+    request = summaryRequestForModel(request, model);
     const baseUrl = normalizeChatCompletionsBaseUrl(this.config.baseUrl, {
       allowInsecureHttp: this.config.allowInsecureHttp,
     });
@@ -150,6 +153,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       custom_include_body: customIncludeBody,
       custom_exclude_body: '',
     };
+    tuneInternalGenerationSettings(body, model);
 
     try {
       const response = await this.fetchImpl.call(globalThis, GENERATE_ENDPOINT, {

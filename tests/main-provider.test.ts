@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LlmRequestTimeoutError } from '../src/llm/errors';
 import { MainLlmProvider, tuneInternalGenerationSettings } from '../src/llm/main-provider';
+import { STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { GEMINI_L1_DELIVERY_GUIDANCE } from '../src/summary/model-prompts';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -8,6 +10,52 @@ afterEach(() => {
 });
 
 describe('MainLlmProvider', () => {
+  it('adapts Gemini L1 in the raw-host path without changing the saved preset', async () => {
+    const preset = { chat_completion_source: 'makersuite', google_model: 'gemini-3.8-flash', temperature: 0.7, top_p: 0.8 };
+    let handler: ((settings: unknown) => void) | undefined;
+    const off = vi.fn();
+    const generateRaw = vi.fn(async (_options: { systemPrompt: string; prompt: string; responseLength?: number }) => {
+      const body = { model: 'gemini-3.8-flash', temperature: 0.7, top_p: 0.8, top_k: 1, max_tokens: 3_000 };
+      handler?.(body);
+      expect(body).toEqual({ model: 'gemini-3.8-flash', max_tokens: 3_000 });
+      return '双方约定次日归还钥匙，使用范围仅限档案室。';
+    });
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({
+        mainApi: 'openai', chatCompletionSettings: preset, generateRaw,
+        getChatCompletionModel: () => 'gemini-3.8-flash',
+        eventSource: { on: (_name: string, callback: typeof handler) => { handler = callback; }, off },
+        eventTypes: { CHAT_COMPLETION_SETTINGS_READY: 'settings-ready' },
+      }),
+    });
+
+    await new MainLlmProvider().complete({
+      system: STAGE_SUMMARY_SYSTEM_PROMPT, prompt: '原始剧情', summaryLevel: 1, maxTokens: 3_000,
+    });
+    expect(generateRaw).toHaveBeenCalledWith(expect.objectContaining({
+      responseLength: 3_000,
+      systemPrompt: expect.stringContaining('优先完整覆盖独有重要事实'),
+      prompt: expect.stringContaining(GEMINI_L1_DELIVERY_GUIDANCE),
+    }));
+    expect(generateRaw.mock.calls[0]?.[0]).not.toHaveProperty('summaryLevel');
+    expect(preset).toMatchObject({ temperature: 0.7, top_p: 0.8 });
+    expect(off).toHaveBeenCalledWith('settings-ready', expect.any(Function));
+  });
+
+  it('uses model defaults only for Gemini 3 sampling while retaining low reasoning', () => {
+    const settings = {
+      model: 'google/gemini-3.8-flash', temperature: 0.2, top_p: 0.5, top_k: 1,
+      reasoning_effort: 'high', include_reasoning: true,
+    };
+    tuneInternalGenerationSettings(settings);
+    expect(settings).toEqual({
+      model: 'google/gemini-3.8-flash', reasoning_effort: 'low', include_reasoning: false,
+    });
+    const other = { model: 'gemini-2.5-pro', temperature: 0.5, top_p: 0.9 };
+    tuneInternalGenerationSettings(other);
+    expect(other).toEqual({ model: 'gemini-2.5-pro', temperature: 0, top_p: 1 });
+  });
+
   it('uses a bounded response length and internal request marker', async () => {
     const generateRaw = vi.fn().mockResolvedValue('OK');
     vi.stubGlobal('SillyTavern', { getContext: () => ({ generateRaw }) });

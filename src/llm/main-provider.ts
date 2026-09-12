@@ -17,6 +17,7 @@ import { completionMetadataFromPayload } from './completion-metadata';
 import { assertNoLlmRefusal } from './refusal';
 import { markInternalGenerationRequest, withInternalGeneration } from './internal-generation';
 import { tuneInternalGenerationSettings } from './internal-settings';
+import { summaryRequestForModel } from '../summary/model-prompts';
 import {
   canStreamMainConnection,
   completeMainConnectionStream,
@@ -32,6 +33,7 @@ type RequestHeadersProvider = () => Promise<Record<string, string>>;
 
 async function withLightweightMainReasoning<T>(
   context: ReturnType<typeof getContext>,
+  model: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   const eventName = context.eventTypes?.['CHAT_COMPLETION_SETTINGS_READY']
@@ -42,7 +44,7 @@ async function withLightweightMainReasoning<T>(
     return operation();
   }
 
-  const handler = (settings: unknown): void => tuneInternalGenerationSettings(settings);
+  const handler = (settings: unknown): void => tuneInternalGenerationSettings(settings, model);
   eventSource.on(eventName, handler);
   try {
     return await operation();
@@ -65,6 +67,8 @@ export class MainLlmProvider implements LlmProvider {
     captureMetadata: boolean,
   ): Promise<{ text: string; payload?: unknown; requestedMaxTokens: number }> {
     const context = getContext();
+    const identity = getMainConnectionIdentity(context);
+    request = summaryRequestForModel(request, identity.model);
     const markedRequest = markInternalGenerationRequest(request.system, request.prompt);
     const options: {
       systemPrompt: string;
@@ -105,9 +109,9 @@ export class MainLlmProvider implements LlmProvider {
     try {
       result = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
         context,
+        identity.model,
         () => runStoryEchoTaskAbortable(
           async () => {
-            const identity = getMainConnectionIdentity(context);
             if (canStreamMainConnection(context, identity)) {
               return completeMainConnectionStream({
                 context,

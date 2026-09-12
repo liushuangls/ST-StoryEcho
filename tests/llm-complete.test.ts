@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { StoryEchoSettings } from '../src/core/types';
 import {
   completeWithConfiguredProvider,
   completeWithConfiguredProviderDetailed,
@@ -9,6 +10,8 @@ import { isInternalGeneration } from '../src/llm/internal-generation';
 import { storyEchoTaskCoordinator } from '../src/runtime/task-coordinator';
 import { StoryEchoTaskCancelledError } from '../src/runtime/task-cancellation';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
+import { STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { GEMINI_L1_DELIVERY_GUIDANCE } from '../src/summary/model-prompts';
 
 afterEach(() => {
   storyEchoTaskCoordinator.resetForTests();
@@ -16,6 +19,38 @@ afterEach(() => {
 });
 
 describe('completeWithConfiguredProvider', () => {
+  it.each([
+    ['gemini-3.8-flash', 'deepseek-v4-flash', false],
+    ['deepseek-v4-flash', 'gemini-3.8-flash', true],
+  ])('selects the actual receiving model profile on fallback from %s to %s', async (customModel, mainModel, geminiMain) => {
+    const settings: StoryEchoSettings = structuredClone(DEFAULT_SETTINGS);
+    settings.llm.provider = 'openai-compatible';
+    settings.llm.custom.baseUrl = 'https://example.com/v1';
+    settings.llm.custom.model = customModel;
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'test custom connection failure' },
+    }), { status: 400 }));
+    const generateRaw = vi.fn().mockResolvedValue('主连接总结');
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({
+        mainApi: 'openai', generateRaw,
+        chatCompletionSettings: { chat_completion_source: 'custom', custom_model: mainModel },
+        getRequestHeaders: () => ({}),
+      }),
+    });
+
+    await expect(completeWithConfiguredProviderDetailed(settings, {
+      system: STAGE_SUMMARY_SYSTEM_PROMPT, prompt: '原始剧情', summaryLevel: 1, maxTokens: 3_000,
+    })).resolves.toMatchObject({ text: '主连接总结', metadata: { fallbackFrom: 'openai-compatible' } });
+    const options = generateRaw.mock.calls[0]?.[0];
+    expect(options.prompt.includes(GEMINI_L1_DELIVERY_GUIDANCE)).toBe(geminiMain);
+    expect(options.systemPrompt.includes('主动追求高压缩率')).toBe(!geminiMain);
+    expect(options.responseLength).toBe(3_000);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(generateRaw).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { promptFeedback: { blockReason: 'SAFETY' } },
     { choices: [{ message: { content: '', refusal: 'private refusal body' } }] },

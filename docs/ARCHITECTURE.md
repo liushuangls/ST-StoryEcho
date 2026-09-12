@@ -37,6 +37,8 @@ src/
     main-provider.ts            SillyTavern 主连接
     openai-compatible-provider.ts
     internal-generation.ts      内部请求 nonce 与递归拦截防护
+    internal-settings.ts        请求级低推理与模型采样参数适配
+    model-family.ts             Gemini 模型与版本识别
   prompt/
     interceptor.ts              请求期安全裁剪与注入
     itemization.ts              最近请求 Token 分类
@@ -50,12 +52,15 @@ src/
   state/repository.ts           聊天派生状态与迁移
   summary/
     service.ts                  原文阶段总结（L1）
+    model-prompts.ts            Gemini L1 的事实覆盖与长上下文交付要求
     source.ts                   原文来源序列化
     compaction-state.ts         层级阈值、候选选择与前沿比较
     compaction-prompts.ts       高层压缩提示词
     compaction-service.ts       同层递归压缩、提交与重新生成
   ui/                           设置、分层总结管理与诊断
 ```
+
+`LlmRequest.summaryLevel` 只作为内部路由提示，不序列化为模型 API 参数。提供方解析实际模型后，才对 Gemini 的 L1 应用交付要求，因此自定义连接失败回退时不会把 Gemini 指令残留给其他模型；重试也不会重复叠加。Gemini 3.x 的请求移除采样覆盖字段，其余模型保留原有确定性采样。
 
 ## 3. 持久化模型
 

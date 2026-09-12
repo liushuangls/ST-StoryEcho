@@ -245,6 +245,8 @@ export interface TavernChatMessage {
 export interface LlmRequest {
   system: string;
   prompt: string;
+  /** Internal routing hint; never serialized as a provider API parameter. */
+  summaryLevel?: number;
   maxTokens?: number;
   /** Optional per-request deadline. Providers keep their normal default when omitted. */
   timeoutMs?: number;

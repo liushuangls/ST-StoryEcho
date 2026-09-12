@@ -155,6 +155,7 @@ export class SummaryCompactionService {
     const completion = await completeObservedInternalRequest(state, settings, {
       system: summaryCompactionSystemPrompt(targetLevel),
       prompt: buildSummaryCompactionPrompt({ sources, targetLevel, worldBackground }),
+      summaryLevel: targetLevel,
       maxTokens: settings.summary.higherLevelMaxTokens,
       timeoutMs: SUMMARY_LLM_TIMEOUT_MS,
     }, {

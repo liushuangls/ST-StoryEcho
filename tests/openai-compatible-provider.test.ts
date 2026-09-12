@@ -3,6 +3,8 @@ import type { StoryEchoSettings } from '../src/core/types';
 import { LlmRequestTimeoutError } from '../src/llm/errors';
 import { OpenAiCompatibleProvider } from '../src/llm/openai-compatible-provider';
 import { DEFAULT_SETTINGS } from '../src/settings/defaults';
+import { STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { GEMINI_L1_DELIVERY_GUIDANCE } from '../src/summary/model-prompts';
 
 function customConfig(): StoryEchoSettings['llm']['custom'] {
   return structuredClone(DEFAULT_SETTINGS.llm.custom);
@@ -13,6 +15,30 @@ afterEach(() => {
 });
 
 describe('OpenAiCompatibleProvider', () => {
+  it('applies the same Gemini L1 profile through a custom compatible connection', async () => {
+    const config = customConfig();
+    config.baseUrl = 'https://example.com/v1';
+    config.model = 'google/gemini-3.8-flash';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '完整剧情档案' }, finish_reason: 'stop' }],
+    })));
+    const provider = new OpenAiCompatibleProvider(config, fetchMock, async () => ({}));
+    await provider.completeDetailed({
+      system: STAGE_SUMMARY_SYSTEM_PROMPT, prompt: '原始剧情', summaryLevel: 1, maxTokens: 3_000,
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.messages).toEqual([
+      { role: 'system', content: expect.stringContaining('优先完整覆盖独有重要事实') },
+      { role: 'user', content: `原始剧情\n\n${GEMINI_L1_DELIVERY_GUIDANCE}` },
+    ]);
+    for (const key of ['temperature', 'top_p', 'top_k', 'summaryLevel']) {
+      expect(body).not.toHaveProperty(key);
+    }
+    expect(body).toMatchObject({ max_tokens: 3_000, reasoning_effort: 'low', stream: false });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('rejects an explicit refusal even if the provider also returns content', async () => {
     const config = customConfig();
     config.baseUrl = 'https://example.com/v1';

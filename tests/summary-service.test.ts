@@ -170,6 +170,7 @@ describe('StageSummaryService', () => {
     });
     expect(JSON.stringify(mocks.state)).not.toContain(text);
     expect(mocks.complete).toHaveBeenCalledOnce();
+    expect(mocks.complete.mock.calls[0]?.[1]).toHaveProperty('summaryLevel', 1);
   });
 
   it('keeps an existing summary and its coverage when regeneration is refused', async () => {

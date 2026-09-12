@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LlmRequestTimeoutError } from '../src/llm/errors';
 import { MainLlmProvider } from '../src/llm/main-provider';
 import type { MainStreamingRuntime } from '../src/llm/main-streaming';
+import { STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
+import { GEMINI_L1_DELIVERY_GUIDANCE } from '../src/summary/model-prompts';
 
 function eventStream(frames: string[], splitAt: number[] = []): Response {
   const bytes = new TextEncoder().encode(frames.join(''));
@@ -149,6 +151,29 @@ afterEach(() => {
 });
 
 describe('MainLlmProvider streaming', () => {
+  it('sends the Gemini L1 profile and default sampling through native streaming', async () => {
+    const context = installStreamingContext('makersuite', 'gemini-3.8-flash', { temperature: 0.4, top_p: 0.7 });
+    const previous = structuredClone(context.settings);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(eventStream([
+      sse({ candidates: [{ content: { parts: [{ text: '完整剧情档案' }] }, finishReason: 'STOP' }] }),
+      sse('[DONE]'),
+    ]));
+    const provider = new MainLlmProvider(fetchMock, async () => ({}), async () => streamingRuntime());
+    await provider.completeDetailed({
+      system: STAGE_SUMMARY_SYSTEM_PROMPT, prompt: '原始剧情', summaryLevel: 1, maxTokens: 3_000,
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.messages[0].content).toContain('优先完整覆盖独有重要事实');
+    expect(body.messages[1].content).toContain(GEMINI_L1_DELIVERY_GUIDANCE);
+    for (const key of ['temperature', 'top_p', 'top_k', 'summaryLevel']) {
+      expect(body).not.toHaveProperty(key);
+    }
+    expect(body).toMatchObject({ max_tokens: 3_000, reasoning_effort: 'low', stream: true });
+    expect(context.settings).toEqual(previous);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { promptFeedback: { blockReason: 'SAFETY' } },
     { candidates: [{ finishReason: 'SAFETY' }] },

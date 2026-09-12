@@ -557,7 +557,7 @@ export async function completeMainConnectionStream(
       await eventSource?.emit?.call(eventSource, settingsEvent, body);
     }
     controller.signal.throwIfAborted();
-    tuneInternalGenerationSettings(body);
+    tuneInternalGenerationSettings(body, request.identity.model);
     body['stream'] = true;
     body['type'] = 'quiet';
     delete body['n'];

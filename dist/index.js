@@ -2329,11 +2329,19 @@ async function withInternalGeneration(request, operation) {
   }
 }
 
+// src/llm/model-family.ts
+function isGeminiModel(model) {
+  return /(?:^|[/:])gemini(?:[-_.]|$)/iu.test(model.trim());
+}
+function isGemini3Model(model) {
+  return /(?:^|[/:])gemini-3(?:[.-]|$)/iu.test(model.trim());
+}
+
 // src/llm/internal-settings.ts
 function isRecord7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function tuneInternalGenerationSettings(value) {
+function tuneInternalGenerationSettings(value, model = "") {
   if (!isRecord7(value)) {
     return;
   }
@@ -2349,12 +2357,42 @@ function tuneInternalGenerationSettings(value) {
   if ("enable_thinking" in value) {
     value["enable_thinking"] = false;
   }
+  const selectedModel = model || (typeof value["model"] === "string" ? value["model"] : "");
+  if (isGemini3Model(selectedModel)) {
+    delete value["temperature"];
+    delete value["top_p"];
+    delete value["top_k"];
+    return;
+  }
   if ("temperature" in value) {
     value["temperature"] = 0;
   }
   if ("top_p" in value) {
     value["top_p"] = 1;
   }
+}
+
+// src/summary/model-prompts.ts
+var GEMINI_L1_DELIVERY_GUIDANCE = `<stage_summary_delivery>
+\u57FA\u4E8E\u4E0A\u9762\u7684 history_messages\uFF0C\u751F\u6210\u4FE1\u606F\u5B8C\u6574\u7684 L1 \u9636\u6BB5\u5267\u60C5\u6863\u6848\u3002
+\u6309\u5B9E\u9645\u5148\u540E\u4E0E\u56E0\u679C\u4FDD\u7559\u672C\u6279\u6BCF\u6761\u72EC\u7ACB\u7684\u91CD\u8981\u5267\u60C5\u63A8\u8FDB\uFF0C\u5199\u6E05\u8D77\u56E0\u3001\u5173\u952E\u4E92\u52A8\u6216\u9009\u62E9\u3001\u7ED3\u679C\u548C\u672A\u51B3\u4E8B\u9879\uFF1B\u5DF2\u7ECF\u7ED3\u675F\u4F46\u4ECD\u89E3\u91CA\u4EBA\u7269\u9009\u62E9\u6216\u5173\u7CFB\u6F14\u53D8\u7684\u91CD\u8981\u7ECF\u5386\u4E5F\u8981\u4FDD\u7559\u3002
+\u4FDD\u7559\u5404\u9879\u63A8\u8FDB\u5FC5\u8981\u7684\u53C2\u4E0E\u8005\u3001\u5BF9\u8C61\u3001\u6761\u4EF6\u3001\u627F\u8BFA\u548C\u8FB9\u754C\uFF0C\u4E0D\u628A\u591A\u573A\u91CD\u8981\u4E8B\u4EF6\u538B\u6210\u7B3C\u7EDF\u8BC4\u4EF7\u6216\u53EA\u5217\u6700\u65B0\u72B6\u6001\u3002
+\u7BC7\u5E45\u968F\u72EC\u6709\u91CD\u8981\u4FE1\u606F\u5C55\u5F00\uFF1B\u4FE1\u606F\u4E30\u5BCC\u65F6\u4FDD\u7559\u591A\u4E2A\u5177\u4F53\u4E8B\u4EF6\u94FE\uFF0C\u7701\u7565\u91CD\u590D\u3001\u6C14\u6C1B\u63CF\u5199\u548C\u65E0\u540E\u679C\u7EC6\u8282\uFF0C\u4E0D\u9760\u731C\u6D4B\u6216\u91CD\u590D\u51D1\u957F\u3002\u53EA\u8F93\u51FA\u4E2D\u6587\u603B\u7ED3\u6B63\u6587\u3002
+</stage_summary_delivery>`;
+function summaryRequestForModel(request, model) {
+  if (request.summaryLevel !== 1 || !isGeminiModel(model)) {
+    return request;
+  }
+  return {
+    ...request,
+    system: request.system.replace(
+      "\u4E3B\u52A8\u8FFD\u6C42\u9AD8\u538B\u7F29\u7387",
+      "\u4F18\u5148\u5B8C\u6574\u8986\u76D6\u72EC\u6709\u91CD\u8981\u4E8B\u5B9E\uFF0C\u518D\u538B\u7F29\u91CD\u590D\u4E0E\u65E0\u540E\u679C\u7EC6\u8282"
+    ),
+    prompt: request.prompt.endsWith(GEMINI_L1_DELIVERY_GUIDANCE) ? request.prompt : `${request.prompt}
+
+${GEMINI_L1_DELIVERY_GUIDANCE}`
+  };
 }
 
 // src/http/response.ts
@@ -2791,7 +2829,7 @@ async function completeMainConnectionStream(request) {
       await eventSource?.emit?.call(eventSource, settingsEvent, body);
     }
     controller.signal.throwIfAborted();
-    tuneInternalGenerationSettings(body);
+    tuneInternalGenerationSettings(body, request.identity.model);
     body["stream"] = true;
     body["type"] = "quiet";
     delete body["n"];
@@ -2831,14 +2869,14 @@ async function completeMainConnectionStream(request) {
 
 // src/llm/main-provider.ts
 var MAX_REQUEST_TIMEOUT_MS = 6e5;
-async function withLightweightMainReasoning(context, operation) {
+async function withLightweightMainReasoning(context, model, operation) {
   const eventName2 = context.eventTypes?.["CHAT_COMPLETION_SETTINGS_READY"] ?? context.event_types?.["CHAT_COMPLETION_SETTINGS_READY"];
   const eventSource = context.eventSource;
   const remove = eventSource?.off ?? eventSource?.removeListener;
   if (!eventName2 || !eventSource || !remove) {
     return operation();
   }
-  const handler = (settings) => tuneInternalGenerationSettings(settings);
+  const handler = (settings) => tuneInternalGenerationSettings(settings, model);
   eventSource.on(eventName2, handler);
   try {
     return await operation();
@@ -2855,6 +2893,8 @@ var MainLlmProvider = class {
   id = "main";
   async perform(request, captureMetadata) {
     const context = getContext();
+    const identity = getMainConnectionIdentity(context);
+    request = summaryRequestForModel(request, identity.model);
     const markedRequest = markInternalGenerationRequest(request.system, request.prompt);
     const options = {
       systemPrompt: markedRequest.systemPrompt,
@@ -2885,9 +2925,9 @@ var MainLlmProvider = class {
     try {
       result = await withInternalGeneration(markedRequest, () => withLightweightMainReasoning(
         context,
+        identity.model,
         () => runStoryEchoTaskAbortable(
           async () => {
-            const identity = getMainConnectionIdentity(context);
             if (canStreamMainConnection(context, identity)) {
               return completeMainConnectionStream({
                 context,
@@ -3066,6 +3106,7 @@ var OpenAiCompatibleProvider = class {
     if (!model) {
       throw new Error("\u81EA\u5B9A\u4E49LLM\u6A21\u578B\u540D\u4E0D\u80FD\u4E3A\u7A7A\u3002");
     }
+    request = summaryRequestForModel(request, model);
     const baseUrl = normalizeChatCompletionsBaseUrl(this.config.baseUrl, {
       allowInsecureHttp: this.config.allowInsecureHttp
     });
@@ -3116,6 +3157,7 @@ var OpenAiCompatibleProvider = class {
       custom_include_body: customIncludeBody,
       custom_exclude_body: ""
     };
+    tuneInternalGenerationSettings(body, model);
     try {
       const response = await this.fetchImpl.call(globalThis, GENERATE_ENDPOINT2, {
         method: "POST",
@@ -4511,6 +4553,7 @@ ${prompt}`;
     const completion = await completeObservedInternalRequest(state, settings, {
       system: STAGE_SUMMARY_SYSTEM_PROMPT,
       prompt,
+      summaryLevel: 1,
       maxTokens: settings.summary.level1MaxTokens,
       timeoutMs: SUMMARY_LLM_TIMEOUT_MS
     }, {
@@ -5085,6 +5128,7 @@ var SummaryCompactionService = class {
     const completion = await completeObservedInternalRequest(state, settings, {
       system: summaryCompactionSystemPrompt(targetLevel),
       prompt: buildSummaryCompactionPrompt({ sources, targetLevel, worldBackground }),
+      summaryLevel: targetLevel,
       maxTokens: settings.summary.higherLevelMaxTokens,
       timeoutMs: SUMMARY_LLM_TIMEOUT_MS
     }, {
