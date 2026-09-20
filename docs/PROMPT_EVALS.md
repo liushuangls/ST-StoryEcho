@@ -271,7 +271,8 @@ npm run eval:generate
 
 `STORY_ECHO_EVAL_VARIANT` 默认 `production`。本地候选各自独立，不互相叠加：
 
-- `l1-lean-evidence-contract-v2`：已晋级的生产 L1 Prompt 的恒等别名，用于读取或复核晋级前保存的候选结果；不会在生产文本上再追加任何内容。`l1-lean-evidence-contract` 保留冻结 v1，供历史消融复现。`l1-event-transition`、`l1-source-order` 与 `l1-adjacent-order-edges` 基于旧生产段落，名称仍可解析，但对 L1 用例会显式报“已归档”，防止误叠加。
+- 历史组织实验已归档：候选组织规则已撤回，临时 `l1-pre-history-structure` 通用变体入口已移除。`npm run eval:history-structure` 只通过 `evals/history-structure-prompts.ts` 读取 v0.21.20 对照与失败候选两份冻结历史提示词，不随当前生产的事实取舍或证据边界调整而变化。工具使用原样总结和独立阅读器做两场景、两轮对照，最多 18 次串行请求，无重试，拒绝覆盖已有输出目录或静默改变提示词哈希。2026-09-20 实测两版各答对 32/32，但候选有一处事实确定性扩大，未通过验收；见[测试记录](PROMPT_EVAL_L1_HISTORY_STRUCTURE_EXPERIMENT.md)。该实验衡量整条组织规则，不能把结果单独归因于标题符号。
+- `l1-lean-evidence-contract-v2`：冻结的历史 L1 证据契约，不包含后来加入的中性归档规则，因此与当前生产提示词不同；用于读取或复核旧结果。`l1-lean-evidence-contract` 保留冻结 v1，供历史消融复现。`l1-event-transition`、`l1-source-order` 与 `l1-adjacent-order-edges` 基于旧生产段落，名称仍可解析，但对 L1 用例会显式报“已归档”，防止误叠加。
 - `l2-state-dedup`：L2 跨段状态去重；相同条件与状态只完整交代一次，更正、反转、条件变化及关键因果仍保留。当前证据不支持推广。
 - `l2-evidence-boundaries`：L2 证据粒度与强度；防止把暗示、未交代和概括状态扩写为更具体事实，同时不删除或模糊来源已明确的信息。不包含评测剧情的专名或答案。
 - `l2-relationship-process`：仅改写 L2“保留变化过程”那一条原则，把来源中行为/表态、对方回应、边界/承诺及其条件明确列为需保留的关系推进；不以最终关系标签代替过程，也不补全人物内心。生产段落变化、重复或已替换时拒绝继续实验。
@@ -283,7 +284,7 @@ npm run eval:generate
 - `l2-statement-events`：只追加“重要实际表态/回应不能被内心感受、最终标签或客观结果替代”的通用段落，并禁止补写未说明的听者和表达方式。七例各两轮均保留目标表态，但固定生产基线也全部保留；候选两轮仍把客观证明边界写成人物发言，并有范围、因果和动机扩写，未进入 Judge/长链，不采用。见 [重要表态保留实验](PROMPT_EVAL_STATEMENT_EVENTS_EXPERIMENT.md)。
 - `l2-integrated-evidence-events`：不追加段落，只把生产 L2 的前两条保真原则替换为等行数、略短的结果导向规则；保留原覆盖契约，并把重要表态、回应与“旁白事实不能变成人物发言”纳入同一证据边界。实验方案与结果见 [L2 整合证据规则实验](PROMPT_EVAL_L2_INTEGRATED_PRINCIPLES_EXPERIMENT.md)。
 
-各候选均保持 L1、L3+、Token 硬上限及来源/rubric 不变。此文件只在 `evals/` 内使用，不导入浏览器 bundle。候选存在不代表已通过质量验收。
+各变体仅修改目标层级的提示词，其他层级、Token 硬上限及来源/rubric 不变。变体选择逻辑只在 `evals/` 内使用，不导入浏览器 bundle。候选或对照存在不代表已通过质量验收。
 
 ```bash
 STORY_ECHO_EVAL_CASES='l2-relationship-reversal,l2-ten-source-parallel-arcs,l2-campus-ensemble-and-slow-burn,l2-cultivation-resources-and-oaths' \

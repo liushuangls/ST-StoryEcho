@@ -11,6 +11,14 @@ export class LlmRefusalError extends Error {
   }
 }
 
+export class LlmTruncatedResponseError extends Error {
+  constructor(readonly completion: LlmCompletionMetadata) {
+    // Retain diagnostic metadata, never the partial private summary.
+    super('总结输出达到 Token 上限而被截断，已丢弃本次输出并保留原文或原有总结。请调整输出预算或总结批次后重试。');
+    this.name = 'LlmTruncatedResponseError';
+  }
+}
+
 export class LlmEmptyResponseError extends Error {
   constructor(
     message: string,

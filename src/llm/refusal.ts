@@ -1,5 +1,6 @@
 import type { LlmCompletionMetadata, LlmCompletionResult } from '../core/types';
-import { LlmRefusalError } from './errors';
+import { LlmRefusalError, LlmTruncatedResponseError } from './errors';
+import { outputLimitReached } from './finish-reason';
 
 const BLOCKED_FINISH_REASONS = new Set([
   'CONTENT_FILTER', 'REFUSAL', 'SAFETY', 'BLOCKLIST',
@@ -74,5 +75,8 @@ function looksLikeRefusalText(text: string): boolean {
 export function assertSummaryCompletionAccepted(result: LlmCompletionResult): void {
   if (blockedFinishReason(result.metadata.finishReason) || looksLikeRefusalText(result.text)) {
     throw new LlmRefusalError(result.metadata);
+  }
+  if (outputLimitReached(result.metadata.finishReason)) {
+    throw new LlmTruncatedResponseError(result.metadata);
   }
 }

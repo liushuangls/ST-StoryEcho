@@ -1,6 +1,7 @@
 import type { TavernChatMessage } from '../core/types';
 import { storyContent } from '../content/story-content';
 import { SUMMARY_ARCHIVAL_GUIDANCE } from './archival-guidance';
+import { L1_INFORMATION_PRIORITY_GUIDANCE, SUMMARY_EVIDENCE_SCOPE_GUIDANCE } from './evidence-guidance';
 
 /** Frozen evidence contract, retained for reproducible historical evaluations. */
 export const STAGE_SUMMARY_BASE_SYSTEM_PROMPT = `你是一名长篇角色扮演剧情连续性编辑器。
@@ -30,7 +31,10 @@ export const STAGE_SUMMARY_BASE_SYSTEM_PROMPT = `你是一名长篇角色扮演�
 - 使用中立第三人称和清晰实体名称。按内容复杂度选择紧凑段落、概括性标题或少量动态小节，不逐消息复述，也不为每个场景设置标题。
 - 篇幅由有效信息量决定，主动追求高压缩率；先确保事实边界和状态链准确，再删除低价值细节。所有关键变化、当前结果和待续事项已覆盖且没有重复时立即收束。`;
 
-export const STAGE_SUMMARY_SYSTEM_PROMPT = `${STAGE_SUMMARY_BASE_SYSTEM_PROMPT}\n\n${SUMMARY_ARCHIVAL_GUIDANCE}`;
+export const STAGE_SUMMARY_SYSTEM_PROMPT = `${STAGE_SUMMARY_BASE_SYSTEM_PROMPT.replace(
+  '篇幅由有效信息量决定，主动追求高压缩率；先确保事实边界和状态链准确，再删除低价值细节。所有关键变化、当前结果和待续事项已覆盖且没有重复时立即收束。',
+  L1_INFORMATION_PRIORITY_GUIDANCE,
+)}\n\n${SUMMARY_EVIDENCE_SCOPE_GUIDANCE}\n\n${SUMMARY_ARCHIVAL_GUIDANCE}`;
 
 export const MAX_PREVIOUS_STAGE_SUMMARY_CHARACTERS = 5_000;
 

@@ -1,14 +1,10 @@
 import type { StageSummaryEntry, SummarySourceRange } from '../core/types';
-
-const TRUNCATED_FINISH_REASONS = new Set([
-  'length', 'max_token', 'max_tokens', 'max_output_tokens', 'token_limit', 'output_token_limit',
-]);
+import { outputLimitReached } from '../llm/finish-reason';
 const MAX_TRUNCATION_RANGES = 32;
 
 export function stageSummaryOutputTruncated(entry: StageSummaryEntry): boolean {
   if (entry.manuallyEdited || entry.deleted) return false;
-  const reason = entry.generation?.finishReason?.trim().toLowerCase().replace(/[\s-]+/gu, '_');
-  return Boolean(reason && TRUNCATED_FINISH_REASONS.has(reason));
+  return outputLimitReached(entry.generation?.finishReason);
 }
 
 /** Bounded, conservative affected ranges; adjacent ranges need only one marker. */

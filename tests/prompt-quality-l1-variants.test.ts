@@ -16,6 +16,7 @@ import {
 } from '../evals/variants';
 import { STAGE_SUMMARY_BASE_SYSTEM_PROMPT, STAGE_SUMMARY_SYSTEM_PROMPT } from '../src/summary/prompts';
 import { SUMMARY_ARCHIVAL_GUIDANCE } from '../src/summary/archival-guidance';
+import { L1_INFORMATION_PRIORITY_GUIDANCE, SUMMARY_EVIDENCE_SCOPE_GUIDANCE } from '../src/summary/evidence-guidance';
 
 const FROZEN_V2_SHA256 = '80fbaf870f951a055f8eddb83875a92e9ac79b0623c8939d4e88f7a2995808ff';
 
@@ -33,8 +34,9 @@ describe('promoted L1 lean evidence contract', () => {
     expect(Array.from(STAGE_SUMMARY_BASE_SYSTEM_PROMPT)).toHaveLength(1_577);
     expect(createHash('sha256').update(STAGE_SUMMARY_BASE_SYSTEM_PROMPT).digest('hex'))
       .toBe(FROZEN_V2_SHA256);
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT)
-      .toBe(`${STAGE_SUMMARY_BASE_SYSTEM_PROMPT}\n\n${SUMMARY_ARCHIVAL_GUIDANCE}`);
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain(L1_INFORMATION_PRIORITY_GUIDANCE);
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain(SUMMARY_EVIDENCE_SCOPE_GUIDANCE);
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain(SUMMARY_ARCHIVAL_GUIDANCE);
   });
 
   it('keeps the validated evidence, ordering and density behavior generic', () => {

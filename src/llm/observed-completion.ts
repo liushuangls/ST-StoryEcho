@@ -10,7 +10,7 @@ import { recordInternalLlmAttempt } from '../debug/internal-llm-attempts';
 import { tauriTavernAgentBridge } from '../platform/tauritavern-agent';
 import { isStoryEchoTaskCancelledError } from '../runtime/task-cancellation';
 import { completeWithConfiguredProviderDetailed } from './complete';
-import { isLlmEmptyResponseError, isLlmRequestRetryError, LlmRefusalError } from './errors';
+import { isLlmEmptyResponseError, isLlmRequestRetryError, LlmRefusalError, LlmTruncatedResponseError } from './errors';
 import { assertSummaryCompletionAccepted } from './refusal';
 
 interface ObservedCompletionContext {
@@ -63,7 +63,8 @@ export async function completeObservedInternalRequest(
     const finishedAt = new Date();
     const emptyResponse = isLlmEmptyResponseError(error) ? error : null;
     const retryError = isLlmRequestRetryError(error) ? error : null;
-    const refusedCompletion = error instanceof LlmRefusalError ? error.completion : undefined;
+    const rejectedCompletion = error instanceof LlmRefusalError || error instanceof LlmTruncatedResponseError
+      ? error.completion : undefined;
     recordInternalLlmAttempt(state, {
       id,
       task: context.task,
@@ -74,6 +75,7 @@ export async function completeObservedInternalRequest(
       sourceStartMessageId: context.sourceStartMessageId,
       sourceEndMessageId: context.sourceEndMessageId,
       requestedMaxTokens: emptyResponse?.completion.requestedMaxTokens
+        ?? rejectedCompletion?.requestedMaxTokens
         ?? requestedMaxTokens(request),
       agentActiveAtStart,
       agentActiveAtEnd: tauriTavernAgentBridge.isRunActive(),
@@ -82,7 +84,7 @@ export async function completeObservedInternalRequest(
         responseDiagnostic: emptyResponse.responseDiagnostic,
       } : {}),
       ...(retryError ? { attemptErrors: retryError.attemptErrors } : {}),
-      ...(refusedCompletion ? { completion: refusedCompletion } : {}),
+      ...(rejectedCompletion ? { completion: rejectedCompletion } : {}),
       error: boundedError(error),
     });
     throw error;

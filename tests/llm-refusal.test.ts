@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LlmCompletionResult } from '../src/core/types';
-import { LlmRefusalError } from '../src/llm/errors';
+import { LlmRefusalError, LlmTruncatedResponseError } from '../src/llm/errors';
 import { assertNoLlmRefusal, assertSummaryCompletionAccepted } from '../src/llm/refusal';
 
 function result(text: string, finishReason = 'stop'): LlmCompletionResult {
@@ -79,9 +79,31 @@ describe('summary refusal detection', () => {
     expect(() => assertSummaryCompletionAccepted(result(text))).not.toThrow();
   });
 
-  it('rejects filtered partial text but preserves normal output-limit handling', () => {
+  it('distinguishes content filtering from output-limit truncation', () => {
     expect(() => assertSummaryCompletionAccepted(result('部分剧情', 'SAFETY')))
       .toThrow(LlmRefusalError);
-    expect(() => assertSummaryCompletionAccepted(result('部分剧情', 'length'))).not.toThrow();
+    expect(() => assertSummaryCompletionAccepted(result('部分剧情', 'length')))
+      .toThrow(LlmTruncatedResponseError);
   });
+
+  it.each(['length', 'MAX_TOKENS', ' max-token ', 'max output tokens', 'token_limit', 'OUTPUT_TOKEN_LIMIT'])(
+    'rejects declared incomplete output without keeping private prose: %s', (reason) => {
+      let error: unknown;
+      try { assertSummaryCompletionAccepted(result('private unfinished summary', reason)); }
+      catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(LlmTruncatedResponseError);
+      expect(error).toMatchObject({ completion: { finishReason: reason } });
+      expect(String(error)).toContain('保留原文或原有总结');
+      expect(JSON.stringify(error)).not.toContain('private unfinished summary');
+    },
+  );
+
+  it.each([undefined, '', 'stop', 'STOP', 'end_turn', 'unknown'])(
+    'does not infer truncation from prose or absent metadata: %s', (reason) => {
+      const completion = result('旅队到达边界，守卫提到“length”和 Token 上限。');
+      if (reason === undefined) delete completion.metadata.finishReason;
+      else completion.metadata.finishReason = reason;
+      expect(() => assertSummaryCompletionAccepted(completion)).not.toThrow();
+    },
+  );
 });

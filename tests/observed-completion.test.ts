@@ -9,6 +9,39 @@ afterEach(() => {
 });
 
 describe('observed internal LLM completion', () => {
+  it('rejects a nonempty truncated custom response without retrying, falling back or retaining its text', async () => {
+    const text = 'private incomplete summary';
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ finish_reason: 'length', message: { content: text } }],
+      usage: { prompt_tokens: 100, completion_tokens: 4_000, total_tokens: 4_100 },
+    }), { status: 200 }));
+    const generateRaw = vi.fn().mockResolvedValue('must not fall back');
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('SillyTavern', {
+      getContext: () => ({ generateRaw, getRequestHeaders: () => ({ 'X-CSRF-Token': 'csrf' }) }),
+    });
+    const settings: StoryEchoSettings = structuredClone(DEFAULT_SETTINGS);
+    settings.llm.provider = 'openai-compatible';
+    settings.llm.custom.baseUrl = 'https://example.com/v1';
+    settings.llm.custom.model = 'model-name';
+    settings.llm.custom.fallbackToMain = true;
+    const state = chatState();
+
+    await expect(completeObservedInternalRequest(state, settings, {
+      system: 'system', prompt: 'prompt', maxTokens: 4_000,
+    }, { task: 'stage-summary', sourceStartMessageId: 0, sourceEndMessageId: 19 }))
+      .rejects.toThrow('被截断');
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(generateRaw).not.toHaveBeenCalled();
+    expect(state.recentInternalLlmAttempts).toHaveLength(1);
+    expect(state.recentInternalLlmAttempts[0]).toMatchObject({
+      status: 'failed', requestedMaxTokens: 4_000,
+      completion: { finishReason: 'length', completionTokens: 4_000, responseCharacters: text.length },
+    });
+    expect(JSON.stringify(state)).not.toContain(text);
+  });
+
   it('persists safe completion and response-shape metadata for an empty custom response', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({
       choices: [{

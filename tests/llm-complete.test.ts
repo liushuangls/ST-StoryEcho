@@ -45,7 +45,8 @@ describe('completeWithConfiguredProvider', () => {
     })).resolves.toMatchObject({ text: '主连接总结', metadata: { fallbackFrom: 'openai-compatible' } });
     const options = generateRaw.mock.calls[0]?.[0];
     expect(options.prompt.includes(GEMINI_L1_DELIVERY_GUIDANCE)).toBe(geminiMain);
-    expect(options.systemPrompt.includes('主动追求高压缩率')).toBe(!geminiMain);
+    expect(options.systemPrompt).not.toContain('主动追求高压缩率');
+    expect(options.systemPrompt).toContain('优先完整覆盖独有重要事实');
     expect(options.responseLength).toBe(3_000);
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(generateRaw).toHaveBeenCalledOnce();

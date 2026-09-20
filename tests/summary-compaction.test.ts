@@ -359,7 +359,9 @@ describe('SummaryCompactionService', () => {
     });
   });
 
-  it('preserves every child summary when a high-level response is content-filtered', async () => {
+  it.each([
+    ['SAFETY', '内容过滤'], ['length', '被截断'], ['MAX_TOKENS', '被截断'],
+  ])('preserves every child summary when a high-level response ends with %s', async (finishReason, message) => {
     const messages = chat(3);
     const entries = await entriesForChat(messages);
     install(messages, entries);
@@ -368,17 +370,17 @@ describe('SummaryCompactionService', () => {
       text: '尚未完成的部分总结',
       metadata: {
         provider: 'main', requestedMaxTokens: 8_000,
-        finishReason: 'SAFETY', responseCharacters: 9,
+        finishReason, responseCharacters: 9,
       },
     });
 
     await expect(new SummaryCompactionService().processAllPending())
-      .rejects.toThrow('内容过滤');
+      .rejects.toThrow(message);
     expect(mocks.state!.stageSummary).toEqual(previous);
     expect(mocks.state!.metrics.summaryCompactionFailures).toBe(1);
     expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
       task: 'summary-compaction', status: 'failed',
-      completion: { finishReason: 'SAFETY' },
+      completion: { finishReason },
     });
     expect(mocks.complete).toHaveBeenCalledOnce();
     expect(mocks.complete.mock.calls[0]?.[1]).toHaveProperty('summaryLevel', 2);
@@ -521,18 +523,26 @@ describe('SummaryCompactionService', () => {
       .rejects.toThrow('当前没有可用聊天');
   });
 
-  it('records a failed high-level regeneration and preserves the parent', async () => {
+  it.each(['error', 'truncated'])('records a failed high-level regeneration and preserves the parent: %s', async (failure) => {
     const messages = chat(3);
     install(messages, await entriesForChat(messages));
     const service = new SummaryCompactionService();
     const compacted = await service.processNextIfNeeded();
     const parent = structuredClone(compacted.state!.stageSummary.entries[0]!);
-    mocks.complete.mockRejectedValueOnce(new Error('regeneration failed'));
+    if (failure === 'truncated') {
+      mocks.complete.mockResolvedValueOnce({
+        text: 'private partial replacement',
+        metadata: { provider: 'main', requestedMaxTokens: 10_000, finishReason: 'MAX_TOKENS', responseCharacters: 27 },
+      });
+    } else {
+      mocks.complete.mockRejectedValueOnce(new Error('regeneration failed'));
+    }
 
     await expect(service.regenerateEntry(parent.sourceStartMessageId))
-      .rejects.toThrow('regeneration failed');
+      .rejects.toThrow(failure === 'truncated' ? '被截断' : 'regeneration failed');
 
     expect(mocks.state?.stageSummary.entries[0]).toEqual(parent);
+    expect(JSON.stringify(mocks.state)).not.toContain('private partial replacement');
     expect(mocks.state?.metrics.summaryCompactionFailures).toBe(1);
     expect(mocks.state?.recentInternalLlmAttempts.at(-1)).toMatchObject({
       task: 'summary-compaction',

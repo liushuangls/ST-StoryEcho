@@ -126,7 +126,8 @@ describe('stage-summary prompt helpers', () => {
     );
     const instructions = `${STAGE_SUMMARY_SYSTEM_PROMPT}\n${prompt}`;
 
-    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('主动追求高压缩率');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).not.toContain('主动追求高压缩率');
+    expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('优先完整覆盖独有重要事实');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('事实边界和状态链准确');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('优先写最新有效状态');
     expect(STAGE_SUMMARY_SYSTEM_PROMPT).toContain('每个事实只写一次');
@@ -147,6 +148,43 @@ describe('stage-summary prompt helpers', () => {
 });
 
 describe('StageSummaryService', () => {
+  it.each(['length', 'MAX_TOKENS'])('does not save truncated L1 output or advance coverage: %s', async (finishReason) => {
+    const chat = completedChat(2);
+    install(chat);
+    const previous = structuredClone(mocks.state!.stageSummary);
+    mocks.complete.mockResolvedValueOnce({
+      text: 'private unfinished summary',
+      metadata: { provider: 'main', requestedMaxTokens: 4_000, finishReason, responseCharacters: 26 },
+    });
+
+    await expect(new StageSummaryService().processAllThrough(chat.length - 1)).rejects.toThrow('被截断');
+    expect(mocks.state!.stageSummary).toEqual(previous);
+    expect(mocks.state!.metrics.summaryFailures).toBe(1);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({
+      status: 'failed', requestedMaxTokens: 4_000,
+      completion: { finishReason, requestedMaxTokens: 4_000 },
+    });
+    expect(JSON.stringify(mocks.state)).not.toContain('private unfinished summary');
+    expect(mocks.complete).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the old L1 and coverage when regeneration is truncated', async () => {
+    const chat = completedChat(2);
+    install(chat);
+    const service = new StageSummaryService();
+    await service.processAllThrough(chat.length - 1);
+    const previous = structuredClone(mocks.state!.stageSummary);
+    mocks.complete.mockResolvedValueOnce({
+      text: 'private truncated replacement',
+      metadata: { provider: 'main', requestedMaxTokens: 4_000, finishReason: 'length', responseCharacters: 28 },
+    });
+
+    await expect(service.regenerateEntry(previous.entries[0]!.sourceStartMessageId)).rejects.toThrow('被截断');
+    expect(mocks.state!.stageSummary).toEqual(previous);
+    expect(mocks.state!.recentInternalLlmAttempts.at(-1)).toMatchObject({ status: 'failed', completion: { finishReason: 'length' } });
+    expect(JSON.stringify(mocks.state)).not.toContain('private truncated replacement');
+  });
+
   it('does not advance coverage or save refusal prose as a stage summary', async () => {
     const chat = completedChat(2);
     install(chat);
@@ -261,7 +299,7 @@ describe('StageSummaryService', () => {
       metadata: {
         provider: 'main',
         requestedMaxTokens: 3_000,
-        finishReason: 'length',
+        finishReason: 'stop',
         promptTokens: 1_000,
         completionTokens: 50,
         reasoningTokens: 20,
@@ -283,7 +321,7 @@ describe('StageSummaryService', () => {
       sourceEndMessageId: first.sourceEndMessageId,
       sourceHash: first.sourceHash,
       generation: {
-        finishReason: 'length',
+        finishReason: 'stop',
         completionTokens: 50,
         reasoningTokens: 20,
       },
@@ -297,7 +335,7 @@ describe('StageSummaryService', () => {
       sourceEndMessageId: 3,
       agentActiveAtStart: false,
       completion: {
-        finishReason: 'length',
+        finishReason: 'stop',
         responseCharacters: 12,
       },
     });
@@ -390,7 +428,7 @@ describe('StageSummaryService', () => {
     });
   });
 
-  it('persists full-rebuild drafts and resumes from the failed batch', async () => {
+  it.each(['error', 'truncated'])('persists only complete full-rebuild drafts and resumes after %s', async (failure) => {
     const chat = completedChat(6);
     install(chat);
     const oldEntry = {
@@ -415,14 +453,23 @@ describe('StageSummaryService', () => {
       .mockResolvedValueOnce({
         text: '重建草稿二。',
         metadata: { provider: 'main', requestedMaxTokens: 3_000, responseCharacters: 6 },
-      })
-      .mockRejectedValueOnce(new Error('third batch failed'));
+      });
+    if (failure === 'truncated') {
+      mocks.complete.mockResolvedValueOnce({
+        text: 'private partial draft',
+        metadata: { provider: 'main', requestedMaxTokens: 3_000, finishReason: 'length', responseCharacters: 21 },
+      });
+    } else {
+      mocks.complete.mockRejectedValueOnce(new Error('third batch failed'));
+    }
     const service = new StageSummaryService();
 
     await expect(service.rebuildAllThrough(chat.length - 1))
-      .rejects.toThrow('third batch failed');
+      .rejects.toThrow(failure === 'truncated' ? '被截断' : 'third batch failed');
 
     expect(mocks.state!.stageSummary.entries).toEqual([oldEntry]);
+    expect(mocks.state!.stageSummary.coveredThroughMessageId).toBe(3);
+    expect(JSON.stringify(mocks.state)).not.toContain('private partial draft');
     expect(mocks.state!.stageSummary.rebuildCheckpoint).toMatchObject({
       targetEndMessageId: 11,
       entries: [
